@@ -37,6 +37,21 @@ export function isCancelled(e: unknown): boolean {
   return errText(e).toLowerCase().includes("cancelled");
 }
 
+/**
+ * One panel's text that the page could not letter.
+ *
+ * `panel` indexes the panels that were sent to compose -- the drawn ones --
+ * not the board's own panel list, which may have gaps in it. The caller maps
+ * it back before naming a panel to the user.
+ */
+export interface TextOverflow {
+  panel: number;
+  page: number;
+  spoken: number;
+  lettered: number;
+  caption_clipped: boolean;
+}
+
 export const api = {
   hostInfo: () => invoke<HostInfo>("host_info"),
   setupState: () => invoke<SetupState>("setup_state"),
@@ -117,14 +132,24 @@ export const api = {
   bindComic: (jobId: string, pages: string[], title: string,
               project: string | null, projectName: string | null) =>
     invoke<string>("bind_comic", { jobId, pages, title, project, projectName }),
+  /**
+   * Compose the drawn panels into pages.
+   *
+   * Returns the pages and whatever text would not fit on them. A cell has a
+   * real limit and a crowded one cannot letter everything it was given, but
+   * that used to happen silently -- the page came back looking finished with a
+   * speaker missing from it. `overflow` is empty on an ordinary board and is
+   * the only warning the user gets on a crowded one, so it must be shown.
+   */
   composeBoard: (
     jobId: string, panels: string[], captions: string[], shots: string[],
     dialogue: { speaker: string; text: string }[][], scenes: number[],
     layout: string, project: string | null, projectName: string
-  ) => invoke<string[]>("compose_board",
-                        { jobId, board: { panels, captions, shots, dialogue,
-                                          scenes, layout, project,
-                                          project_name: projectName } }),
+  ) => invoke<{ pages: string[]; overflow: TextOverflow[] }>(
+    "compose_board",
+    { jobId, board: { panels, captions, shots, dialogue,
+                      scenes, layout, project,
+                      project_name: projectName } }),
   /**
    * Board state, encrypted in the vault.
    *

@@ -2125,6 +2125,36 @@ pub struct BoardPages {
     pub project_name: Option<String>,
 }
 
+/// One panel's text that would not fit the cell it was lettered into.
+///
+/// Composing does not fail on this. The page is real and mostly right, and
+/// refusing to make it would leave the user with nothing to look at while they
+/// decide what to cut. But it cannot be silent either: this is approved text
+/// that is not in the picture, and before this existed the only way to find
+/// out was to read the finished page and notice a speaker had stopped talking.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct TextOverflow {
+    /// Index into the panels that were sent to compose, not into the board.
+    pub panel: usize,
+    /// Which composed page it landed on, counting from one.
+    #[serde(default)]
+    pub page: usize,
+    /// How many spoken lines the panel was given.
+    pub spoken: usize,
+    /// How many of them were actually drawn.
+    pub lettered: usize,
+    /// Whether the caption was cut short at the bottom of its box.
+    #[serde(default)]
+    pub caption_clipped: bool,
+}
+
+/// The pages a board composed, and what would not fit on them.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct ComposedBoard {
+    pub pages: Vec<String>,
+    pub overflow: Vec<TextOverflow>,
+}
+
 /// Bind a board's finished pages into one PDF.
 ///
 /// Sealed into the vault like everything else, then exported through
@@ -2228,7 +2258,7 @@ pub async fn compose_board(
     state: State<'_, AppState>,
     job_id: String,
     board: BoardPages,
-) -> Result<Vec<String>> {
+) -> Result<ComposedBoard> {
     let _job = state.job_gate.read().await;
     let BoardPages {
         panels,
@@ -2372,7 +2402,24 @@ pub async fn compose_board(
     if !unused.is_empty() {
         state.vault.discard_slots(&unused);
     }
-    Ok(produced)
+
+    // Text the pages could not hold, passed through rather than dropped here.
+    // A page that lost a line of dialogue is still a page -- it is written,
+    // sealed and returned -- but the board has to be able to say so, and this
+    // is the only place that knows.
+    let overflow: Vec<TextOverflow> = result["overflow"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(ComposedBoard {
+        pages: produced,
+        overflow,
+    })
 }
 
 /// Break a story into an ordered list of panels.

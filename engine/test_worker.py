@@ -708,13 +708,37 @@ class ShotListParsing(unittest.TestCase):
             '[{"shot":"wide","subject":"x","action":"y","setting":"z"}]', 1)
         self.assertEqual(panels[0]["dialogue"], [])
 
-    def test_a_crowd_of_speakers_is_capped(self):
-        # Balloons sit on top of the panel; three of them leave no panel.
+    def test_every_speaker_survives_the_parser(self):
+        """Balloons sit on top of the panel, so a cell has a real limit.
+
+        It is not this function's limit to enforce. Five lines used to become
+        two here, before the user had seen any of them and before anything knew
+        how large the cell would be -- so the cut was made by the part of the
+        pipeline least able to judge it and reported by nothing. The composer
+        measures the cell it actually has and says what would not fit.
+        """
         many = ",".join(f'{{"speaker":"S{i}","text":"line {i}"}}' for i in range(5))
         panels = worker._parse_shotlist(
             f'[{{"shot":"wide","subject":"x","action":"y","setting":"z",'
             f'"dialogue":[{many}]}}]', 1)
-        self.assertLessEqual(len(panels[0]["dialogue"]), 2)
+        self.assertEqual(len(panels[0]["dialogue"]), 5)
+        self.assertEqual([d["speaker"] for d in panels[0]["dialogue"]],
+                         [f"S{i}" for i in range(5)])
+
+    def test_a_long_line_is_not_shortened_on_the_way_in(self):
+        """Ninety characters was where a spoken line used to be cut.
+
+        Mid-word, with no ellipsis and no record, so the panel arrived holding
+        a sentence that stopped. Whether the line is too long for its bubble is
+        a question about the bubble.
+        """
+        line = "I have been waiting out here since the rain started, and the " \
+               "bus does not come after nine, and I am not going home."
+        self.assertGreater(len(line), 90)
+        panels = worker._parse_shotlist(
+            '[{"shot":"wide","subject":"x","action":"y","setting":"z",'
+            f'"dialogue":[{{"speaker":"Jon","text":"{line}"}}]}}]', 1)
+        self.assertEqual(panels[0]["dialogue"][0]["text"], line)
 
 
 class SceneNumbering(unittest.TestCase):
@@ -2177,7 +2201,7 @@ class PageGeometry(unittest.TestCase):
         """So the widest cell matches the panel and needs no upscale."""
         for px in (512, 768, 1024):
             panels = self._panels(1, px=px)
-            page = worker._render_page(panels, [0], self._meta(["wide"]),
+            page, _short = worker._render_page(panels, [0], self._meta(["wide"]),
                                        self._style(px + 68))
             self.assertEqual(page.width, px + 68)
 
@@ -2189,10 +2213,10 @@ class PageGeometry(unittest.TestCase):
         the top of the head and the chin.
         """
         style = self._style(836)
-        wide = worker._render_page(self._panels(1), [0],
+        wide, _short = worker._render_page(self._panels(1), [0],
                                    self._meta(["wide"]), style)
         for shot in ("close-up", "medium"):
-            tight = worker._render_page(self._panels(1), [0],
+            tight, _short = worker._render_page(self._panels(1), [0],
                                         self._meta([shot]), style)
             self.assertGreater(
                 tight.height, wide.height,
@@ -2274,7 +2298,7 @@ class PageGeometry(unittest.TestCase):
                            "expected these pages to differ before normalising")
 
         style["page_height"] = max(natural)
-        heights = {worker._render_page(self._panels(6), idx, meta, style).height
+        heights = {worker._render_page(self._panels(6), idx, meta, style)[0].height
                    for idx in pages}
         self.assertEqual(len(heights), 1,
                          f"pages came out at {sorted(heights)}")
@@ -2286,7 +2310,8 @@ class PageGeometry(unittest.TestCase):
         shots = ["medium", "close-up"]
         plan, natural = worker._page_plan(shots, style)
         style["page_height"] = natural + 400
-        page = worker._render_page(self._panels(2), [0, 1], self._meta(shots), style)
+        page, _short = worker._render_page(self._panels(2), [0, 1],
+                                          self._meta(shots), style)
         self.assertEqual(page.height, natural + 400)
         # The cells keep their own size; only paper was added.
         self.assertEqual([cell_h for _t, _w, cell_h in plan],
@@ -2305,7 +2330,7 @@ class PageGeometry(unittest.TestCase):
                       "three times to be dangerous here."] * 3,
             dialogue=[[{"text": "Is that you?", "speaker": "Marta"},
                        {"text": "I have been waiting.", "speaker": "Jon"}]] * 3)
-        page = worker._render_page(self._panels(3), [0, 1, 2], meta, style)
+        page, _short = worker._render_page(self._panels(3), [0, 1, 2], meta, style)
         self.assertEqual(page.width, style["width"])
         self.assertGreater(page.height, style["margin"] * 2)
 
@@ -3051,7 +3076,7 @@ class CaptionScripts(unittest.TestCase):
         meta = {"shots": ["wide"], "captions": ["ねこが日本語で話した"],
                 "dialogue": [[{"text": "おはよう", "speaker": "ミラ"}]],
                 "scenes": [1]}
-        page = worker._render_page(panels, [0], meta, style)
+        page, _short = worker._render_page(panels, [0], meta, style)
         self.assertEqual(page.width, 836)
 
 
@@ -3085,7 +3110,7 @@ class CellTextStaysInItsCell(unittest.TestCase):
 
     def _block_height(self, probe, style, cap, dialogue, cell_w, cell_h):
         """Where the lettering ends, measured the way it is drawn."""
-        size, cap_h, bubbles = worker._cell_text_plan(
+        size, cap_h, bubbles, _whole = worker._cell_text_plan(
             probe, cap, dialogue, style, cell_w, cell_h)
         base = worker._text_size(style)
         body = style["font"] if size == base else worker._caption_font(size)
@@ -3151,7 +3176,7 @@ class CellTextStaysInItsCell(unittest.TestCase):
         probe = self._probe()
         style = self._style(836)
         _tier, cell_w, cell_h = worker._page_plan(["wide"], style)[0][0]
-        size, cap_h, bubbles = worker._cell_text_plan(
+        size, cap_h, bubbles, _whole = worker._cell_text_plan(
             probe, "The rain had not stopped since Tuesday.", self.DIALOGUE,
             style, cell_w, cell_h)
         self.assertEqual(size, 19)
@@ -3162,7 +3187,7 @@ class CellTextStaysInItsCell(unittest.TestCase):
         probe = self._probe()
         style = self._style(1211)
         _tier, cell_w, cell_h = worker._page_plan(["medium"] * 3, style)[0][0]
-        size, _cap_h, bubbles = worker._cell_text_plan(
+        size, _cap_h, bubbles, _whole = worker._cell_text_plan(
             probe, self.CAPTION, self.DIALOGUE, style, cell_w, cell_h)
         self.assertLess(size, 19, "a smaller face is the first thing to try")
         self.assertEqual(bubbles, 2, "both lines of dialogue still fit")
@@ -3179,7 +3204,7 @@ class CellTextStaysInItsCell(unittest.TestCase):
                 "captions": [self.CAPTION] * 6,
                 "dialogue": [list(self.DIALOGUE)] * 6,
                 "scenes": [1] * 6}
-        page = worker._render_page(panels, list(range(6)), meta, style)
+        page, _short = worker._render_page(panels, list(range(6)), meta, style)
         plan, _natural = worker._page_plan(shots, style)
         y = style["margin"]
         for _tier, _cell_w, cell_h in plan[:-1]:
@@ -3190,6 +3215,137 @@ class CellTextStaysInItsCell(unittest.TestCase):
                     f"something was drawn in the gutter at row {row}")
             y += cell_h + style["gutter"]
 
+
+
+class TextThatDoesNotFitIsReported(unittest.TestCase):
+    """A composed page used to lose speech without saying so.
+
+    Two things cut text and neither told anyone. The parser kept the first two
+    spoken lines and the first ninety characters of each, before the user had
+    read any of it. Then the composer, measuring a cell that genuinely could
+    not hold what was left, returned a smaller balloon count and drew that --
+    so a three-hander arrived as a two-hander, was composed, looked finished,
+    and was bound into a PDF with one speaker missing.
+
+    The parser no longer cuts. The composer still does, because a 244px cell
+    really cannot hold three balloons, but it now reports every panel it did it
+    to. These tests hold that reporting in place.
+    """
+
+    THREE = [{"speaker": "Marta", "text": "Is that you at the door again?"},
+             {"speaker": "Jon", "text": "I have been waiting out here since "
+                                        "the rain started, and the bus does "
+                                        "not come after nine."},
+             {"speaker": "Marta", "text": "Then you had better come in before "
+                                          "you catch your death of it."}]
+
+    def _style(self, width, size=19):
+        return {"width": width, "margin": 34, "gutter": 18, "size": size,
+                "font": worker._caption_font(size),
+                "small": worker._caption_font(13),
+                "line_h": int(size * 1.4)}
+
+    def _panels(self, n, px=768):
+        from PIL import Image
+        return [Image.new("RGB", (px, px), (120, 140 + i, 160))
+                for i in range(n)]
+
+    def _meta(self, shots, dialogue, captions=None):
+        n = len(shots)
+        return {"shots": list(shots),
+                "captions": list(captions or [""] * n),
+                "dialogue": list(dialogue),
+                "scenes": [1] * n}
+
+    def test_a_cell_that_cannot_hold_its_dialogue_says_which_panel(self):
+        style = self._style(836)
+        shots = ["medium"] * 3
+        meta = self._meta(shots, [list(self.THREE)] * 3)
+        _page, short = worker._render_page(self._panels(3), [0, 1, 2],
+                                           meta, style)
+        self.assertTrue(short, "a 244px cell cannot letter three balloons")
+        for record in short:
+            self.assertEqual(record["spoken"], 3)
+            self.assertLess(record["lettered"], 3)
+            self.assertIn(record["panel"], (0, 1, 2))
+
+    def test_a_page_that_letters_everything_reports_nothing(self):
+        """The ordinary page, which must not start warning about itself."""
+        style = self._style(836)
+        meta = self._meta(["wide"], [self.THREE[:1]],
+                          ["The rain had not stopped since Tuesday."])
+        _page, short = worker._render_page(self._panels(1), [0], meta, style)
+        self.assertEqual(short, [])
+
+    def test_the_report_names_a_clipped_caption_separately(self):
+        """A caption this long reaches a cell only by being typed there.
+
+        The writer's own narration is bounded at 120 characters when it is
+        parsed. A caption the user edited is not bounded anywhere, which is the
+        case that matters: it is approved text, and it was being clipped at the
+        bottom of the box with nothing returned to say so.
+        """
+        caption = ("Marta had spent eleven years in that kitchen and had "
+                   "never once thought of it as hers. " * 8).strip()
+        style = self._style(836)
+        shots = ["medium"] * 3
+        meta = self._meta(shots, [[]] * 3, [caption] * 3)
+        _page, short = worker._render_page(self._panels(3), [0, 1, 2],
+                                           meta, style)
+        self.assertTrue(short, "this caption does not fit a 244px cell")
+        self.assertTrue(all(r["caption_clipped"] for r in short))
+        self.assertTrue(all(r["spoken"] == 0 for r in short))
+
+    def test_the_scroll_measures_its_balloons_and_reports_them_too(self):
+        """The strip never measured at all -- it capped at two and drew.
+
+        Uncapped and unmeasured, the third balloon is lettered past the bottom
+        of its own panel and into the gap, where it reads as belonging to the
+        panel after it.
+        """
+        style = self._style(836)
+        style["page_height"] = 0
+        long_talk = [{"speaker": f"S{i}",
+                      "text": "I have been waiting out here since the rain "
+                              "started and the bus does not come after nine."}
+                     for i in range(8)]
+        meta = self._meta(["medium"], [long_talk])
+        _page, short = worker._render_strip(self._panels(1), meta, style)
+        self.assertTrue(short, "eight balloons do not fit one scroll panel")
+        self.assertEqual(short[0]["spoken"], 8)
+        self.assertLess(short[0]["lettered"], 8)
+
+    def test_the_scroll_keeps_the_lines_it_can_hold(self):
+        style = self._style(836)
+        meta = self._meta(["medium"], [self.THREE[:1]])
+        _page, short = worker._render_strip(self._panels(1), meta, style)
+        self.assertEqual(short, [])
+
+    def test_nothing_the_scroll_letters_runs_past_its_panel(self):
+        """Measured the way it is drawn, not asserted about the report."""
+        from PIL import Image, ImageDraw
+
+        style = self._style(836)
+        probe = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+        base = worker._text_size(style)
+        panels = self._panels(1)
+        width, margin = style["width"], style["margin"]
+        im_w = width - margin * 2
+        im_h = round(im_w * 0.78)
+        long_talk = [{"speaker": f"S{i}", "text": "The bus does not come "
+                                                  "after nine o'clock."}
+                     for i in range(9)]
+        meta = self._meta(["medium"], [long_talk])
+        _page, short = worker._render_strip(panels, meta, style)
+        drawn = short[0]["lettered"] if short else len(long_talk)
+        used = 16
+        for line in long_talk[:drawn]:
+            used += worker._bubble_height(
+                probe, line["text"], line["speaker"],
+                worker._lettering(line["text"], base, style["font"]),
+                min(im_w - 40, 420), style["line_h"])
+        self.assertLessEqual(used, im_h,
+                             "the scroll lettered past the bottom of its panel")
 
 
 class StagingIsNotLeftBehind(unittest.TestCase):

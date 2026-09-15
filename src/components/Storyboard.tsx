@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { api, errText, isCancelled, newJobId, onEngineProgress, vaultUrl } from "../lib/api";
+import { api, errText, isCancelled, newJobId, onEngineProgress, vaultUrl,
+         type TextOverflow } from "../lib/api";
 import type { Cast, EngineProgress, ModelStatus, Panel } from "../lib/types";
 import { ImageDrop, JobProgress } from "./shared";
 import { loadPref, savePref } from "../lib/prefs";
@@ -271,7 +272,7 @@ export default function Storyboard({
       people: c.people.map((p) => p.name === name
         ? { ...p, description: look } : p),
     }));
-    setSheet(null); setPages([]);
+    setSheet(null); setPages([]); setOverflow([]);
   };
 
   const addPerson = (name: string, look: string, lead = false) => {
@@ -295,7 +296,7 @@ export default function Storyboard({
       return { ...base, people };
     });
     // The sheet was drawn against the old cast, so it is not this cast.
-    setSheet(null); setPages([]);
+    setSheet(null); setPages([]); setOverflow([]);
     setNarratorName(""); setNarratorLook("");
     notify(`${clean} added to the cast. The cast sheet will be drawn again.`);
   };
@@ -321,6 +322,19 @@ export default function Storyboard({
   const [elapsed, setElapsed] = useState(0);
   const [composing, setComposing] = useState(false);
   const [pages, setPages] = useState<string[]>([]);
+  /**
+   * Approved text the composed pages could not letter, by board panel index.
+   *
+   * A cell has a real limit: a 244px cell in a three-panel tier cannot hold
+   * three balloons at a readable size, and something has to give. What must
+   * not give is the user's knowledge of it -- the composer used to draw what
+   * fitted and return a page that looked finished, so a panel arrived in the
+   * bound PDF with a speaker missing and nothing anywhere said which one.
+   *
+   * Cleared wherever `pages` is, because it describes those pages and nothing
+   * else. Kept in the draft, because they are kept too.
+   */
+  const [overflow, setOverflow] = useState<TextOverflow[]>([]);
   /** A page sets panels in rows with gutters; a strip stacks them at one
    *  width for scrolling. Different things, and people want both. */
   const [layout, setLayout] = useState(() => loadPref("boardLayout", "page"));
@@ -377,6 +391,7 @@ export default function Storyboard({
         setRedraws(Array.isArray(draft.redraws) ? draft.redraws : []);
         setNotes(draft.notes ?? {});
         setPages(Array.isArray(draft.pages) ? draft.pages : []);
+        setOverflow(Array.isArray(draft.overflow) ? draft.overflow : []);
         setOwnSheet(Array.isArray(draft.ownSheet) ? draft.ownSheet : []);
         setPlaceSheets(draft.placeSheets ?? {});
         setCoverage(draft.coverage ?? null);
@@ -449,7 +464,7 @@ export default function Storyboard({
     const draft: BoardDraft = {
       version: 1, story, cast, projectId, style, character, panels, sheet, drawn,
       redraws, notes, pages, ownSheet, placeSheets,
-      coverage,
+      coverage, overflow,
     };
     const timeout = window.setTimeout(() => {
       const body = JSON.stringify(draft);
@@ -467,7 +482,7 @@ export default function Storyboard({
       }
     }, 350);
     return () => window.clearTimeout(timeout);
-  }, [draftLoaded, story, cast, projectId, style, character, panels, sheet, drawn,
+  }, [draftLoaded, overflow, story, cast, projectId, style, character, panels, sheet, drawn,
       redraws, notes, pages, ownSheet, placeSheets, coverage, notify]);
 
   /**
@@ -534,7 +549,7 @@ export default function Storyboard({
     // Every downstream decision was made from the previous manuscript. Keeping
     // any of it would quietly mix two different stories.
     setCast(null); setPanels(null); setProjectId(null); setSheet(null);
-    setDrawn([]); setRedraws([]); setNotes({}); setPages([]);
+    setDrawn([]); setRedraws([]); setNotes({}); setPages([]); setOverflow([]);
     setPlaceSheets({}); setCoverage(null); setSelected(0);
   };
 
@@ -565,7 +580,7 @@ export default function Storyboard({
     if (drawnInStyle && confirmStyle !== id) { setConfirmStyle(id); return; }
     setStyle(next);
     setSheet(null); setDrawn([]); setRedraws([]);
-    setPlaceSheets({}); setPages([]);
+    setPlaceSheets({}); setPages([]); setOverflow([]);
     setConfirmStyle(null);
   };
 
@@ -578,7 +593,7 @@ export default function Storyboard({
    * because a page is only as current as the panels in it.
    */
   const recastSheet = () => {
-    setSheet(null); setPages([]);
+    setSheet(null); setPages([]); setOverflow([]);
     notify("The cast sheet will be drawn again on the next run. Panels already "
       + "drawn were drawn against the old one -- redraw the ones that no "
       + "longer match.");
@@ -591,7 +606,7 @@ export default function Storyboard({
       delete next[key];
       return next;
     });
-    setPages([]);
+    setPages([]); setOverflow([]);
     notify(`${key} will be drawn again on the next run.`);
   };
 
@@ -641,7 +656,7 @@ export default function Storyboard({
     // it silently attaches to a different moment, and the panel it was written
     // for is drawn without it. Same for the redraw counters, which move the
     // seed on, and for the selection, which can now point past the end.
-    setNotes({}); setRedraws([]); setSelected(0); setPages([]);
+    setNotes({}); setRedraws([]); setSelected(0); setPages([]); setOverflow([]);
     // Rooms are keyed by scene number, and scene 1 of a new story is not scene
     // 1 of the last one. Kept, they would be reused: buildPlaces skips any
     // scene that already has a sheet, so the new comic would quietly inherit
@@ -998,7 +1013,7 @@ export default function Storyboard({
       // not, which left the one hole: correcting a frame and drawing it again
       // kept the old pages on screen, still showing the frame that had just
       // been replaced -- and those are the two pictures the whole board is for.
-      setPages([]);
+      setPages([]); setOverflow([]);
       setDone((v) => Math.max(v, i + 1));
       onProduced();
       return true;
@@ -1052,7 +1067,7 @@ export default function Storyboard({
       if (!items[i]) return items;
       const next = [...items]; next[i] = null; return next;
     });
-    setPages([]);
+    setPages([]); setOverflow([]);
   };
 
   /** Redraw one panel, keeping the rest of the board. */
@@ -1074,11 +1089,15 @@ export default function Storyboard({
   const compose = async () => {
     if (!panels) return;
     type Ready = { id: string; caption: string; shot: Panel["shot"];
-                   dialogue: { speaker: string; text: string }[]; scene: number };
+                   dialogue: { speaker: string; text: string }[]; scene: number;
+                   at: number };
     const pairs = panels
       .map((p, i) => ({ id: drawn[i], caption: p.caption, shot: p.shot,
-                        dialogue: p.dialogue ?? [], scene: p.scene ?? 1 }))
+                        dialogue: p.dialogue ?? [], scene: p.scene ?? 1,
+                        at: i }))
       .filter((x): x is Ready => Boolean(x.id));
+    /** Board panel index for each panel the engine will be handed. */
+    const sources = pairs.map((x) => x.at);
     if (pairs.length === 0) { notify("Draw at least one panel first.", true); return; }
 
     setComposing(true);
@@ -1091,12 +1110,26 @@ export default function Storyboard({
         pairs.map((p) => p.dialogue ?? []),
         pairs.map((p) => p.scene),
         layout, projectId, projectName);
-      setPages(made);
+      setPages(made.pages);
+      // The engine counts the panels it was given, which are the drawn ones.
+      // The user counts panels on the board, and the two differ by every gap
+      // in it -- so a report about "panel 3" would point at the wrong panel on
+      // any board that is not finished. Mapped back here, once.
+      const lost = made.overflow.map((o) => ({
+        ...o, panel: sources[o.panel] ?? o.panel,
+      }));
+      setOverflow(lost);
       onProduced();
-      notify(made.length === 1
+      notify(made.pages.length === 1
         ? `Composed one page from ${pairs.length} panels. It is in the Vault.`
-        : `Composed ${made.length} pages from ${pairs.length} panels, broken `
-          + "where the scenes change. They are in the Vault.");
+        : `Composed ${made.pages.length} pages from ${pairs.length} panels, `
+          + "broken where the scenes change. They are in the Vault.");
+      if (lost.length) {
+        notify(
+          `${lost.length} panel${lost.length === 1 ? "" : "s"} could not fit `
+          + "all their text. The pages are composed; see what was left off "
+          + "before binding them.", true);
+      }
     } catch (e) {
       notify(errText(e), true);
     } finally {
@@ -1219,7 +1252,7 @@ export default function Storyboard({
                     }
                     setConfirmReset(null);
                     setPanels(null); setProjectId(null); setSheet(null);
-                    setDrawn([]); setRedraws([]); setNotes({}); setPages([]);
+                    setDrawn([]); setRedraws([]); setNotes({}); setPages([]); setOverflow([]);
                     setPlaceSheets({}); setCoverage(null); setSelected(0);
                   }}>
                   {confirmReset === "prose"
@@ -1296,6 +1329,45 @@ export default function Storyboard({
                 <div className="sub-head">
                   {pages.length === 1 ? "The page" : `${pages.length} pages`}
                 </div>
+                {overflow.length > 0 && (
+                  <div className="notice warn" style={{ marginBottom: 10 }}>
+                    <strong>
+                      {overflow.length} panel{overflow.length === 1 ? "" : "s"}
+                      {" "}lost text on the page
+                    </strong>
+                    <details>
+                      <summary>
+                        These pages are composed and readable, but they are not
+                        the whole script. Shorten the text or give the panel a
+                        wider cell, then compose again.
+                      </summary>
+                      {overflow.map((o) => {
+                        const missed = o.spoken - o.lettered;
+                        const parts = [
+                          missed > 0
+                            ? `${missed} of ${o.spoken} spoken `
+                              + `line${o.spoken === 1 ? "" : "s"} not drawn`
+                            : "",
+                          o.caption_clipped ? "caption cut short" : "",
+                        ].filter(Boolean);
+                        return (
+                          <p key={`${o.panel}-${o.page}`}>
+                            <button className="btn small"
+                                    style={{ marginRight: 8 }}
+                                    onClick={() => {
+                                      setSelected(o.panel);
+                                      setRailTab("panel");
+                                    }}>
+                              Panel {o.panel + 1}
+                            </button>
+                            {parts.join(", ")}
+                            {o.page ? ` (page ${o.page})` : ""}
+                          </p>
+                        );
+                      })}
+                    </details>
+                  </div>
+                )}
                 {pages.map((id, i) => (
                   <img key={id} src={vaultUrl(id)} alt={`Page ${i + 1}`}
                        style={{ width: "100%", borderRadius: 6, marginBottom: 10 }} />
@@ -1792,7 +1864,7 @@ export default function Storyboard({
               setConfirmReset(null);
               setStory(""); setCast(null); setPanels(null); setProjectId(null);
               setCharacter(""); setSheet(null); setDrawn([]); setRedraws([]);
-              setNotes({}); setPages([]); setOwnSheet([]); setPlaceSheets({});
+              setNotes({}); setPages([]); setOverflow([]); setOwnSheet([]); setPlaceSheets({});
               setCoverage(null);
               setSelected(0);
             }}>

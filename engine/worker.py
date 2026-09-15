@@ -3146,7 +3146,7 @@ def _text_size(style: dict[str, Any]) -> int:
 
 def _cell_text_plan(probe: Any, cap: str, dialogue: list[Any],
                     style: dict[str, Any], cell_w: int,
-                    cell_h: int) -> tuple[int, int, int]:
+                    cell_h: int) -> tuple[int, int, int, bool]:
     """The face size, caption height and balloon count that fit in one cell.
 
     Nothing may be drawn outside its own cell, and the only bound the lettering
@@ -3167,10 +3167,17 @@ def _cell_text_plan(probe: Any, cap: str, dialogue: list[Any],
     readable face, and the caption is clipped before a balloon is: a reader can
     follow a story whose narration was cut short far more easily than one whose
     characters stop answering each other.
+
+    When it comes to that, it is reported. Returns the face size, the caption
+    height, how many balloons fit, and whether the caption was set whole -- and
+    the caller compares that balloon count against the dialogue it passed in.
+    Losing a line is sometimes the only thing a cell this size can do; doing it
+    without saying so is what turned a composed page into a finished-looking
+    comic that had quietly stopped quoting one of its speakers.
     """
     base = _text_size(style)
     cap_w, bub_w = _caption_width(cell_w), _bubble_width(cell_w)
-    wanted = list(dialogue)[:2]
+    wanted = list(dialogue)
     best: tuple[tuple[int, bool], int, int, int] | None = None
     for cover in (max(0, int(cell_h * _TEXT_COVER)), max(0, cell_h - 20)):
         cap_room = cover if not wanted else int(cover * _CAPTION_SHARE)
@@ -3198,15 +3205,15 @@ def _cell_text_plan(probe: Any, cap: str, dialogue: list[Any],
                 used += height
                 count += 1
             if count == len(wanted) and whole:
-                return size, cap_h, count
+                return size, cap_h, count, True
             # More of the story drawn wins, then a caption that is not cut
             # short, then the larger face -- which is why the largest is tried
             # first and a tie never replaces what is already held.
             score = (count, whole)
             if best is None or score > best[0]:
                 best = (score, size, cap_h, count)
-    _score, size, cap_h, count = best or ((0, True), base, 0, 0)
-    return size, cap_h, count
+    score, size, cap_h, count = best or ((0, True), base, 0, 0)
+    return size, cap_h, count, bool(score[1])
 
 
 def _page_plan(shots: list[str], style: dict[str, Any]) -> tuple[list[Any], int]:
@@ -3238,8 +3245,14 @@ def _page_plan(shots: list[str], style: dict[str, Any]) -> tuple[list[Any], int]
 
 
 def _render_page(panels: list[Any], idx: list[int], meta: dict[str, list[Any]],
-                 style: dict[str, Any]) -> Any:
-    """Draw one page of panels as tiers."""
+                 style: dict[str, Any]) -> tuple[Any, list[dict[str, Any]]]:
+    """Draw one page of panels as tiers, and report what would not fit on it.
+
+    The second return is one record per panel that lost text -- which panel,
+    how many spoken lines it was given, how many were lettered, and whether the
+    caption was cut short. Empty is the ordinary case and the only one that
+    should reach an exported chapter.
+    """
     from PIL import Image, ImageDraw
 
     page_w, margin, gutter = style["width"], style["margin"], style["gutter"]
@@ -3262,6 +3275,7 @@ def _render_page(panels: list[Any], idx: list[int], meta: dict[str, list[Any]],
 
     page = Image.new("RGB", (page_w, total_h), PAGE_GROUND)
     draw = ImageDraw.Draw(page)
+    short: list[dict[str, Any]] = []
     # A page shorter than the board's tallest carries its spare paper split
     # top and bottom. All of it at the bottom reads as a page that ran out;
     # centred, a sparse page reads as a deliberately quiet one.
@@ -3274,11 +3288,15 @@ def _render_page(panels: list[Any], idx: list[int], meta: dict[str, list[Any]],
             draw.rectangle([x, y, x + cell_w, y + cell_h],
                            outline=(20, 20, 22), width=3)
             cap = meta["captions"][src].strip()
-            dialogue = list(meta["dialogue"][src])[:2]
+            dialogue = list(meta["dialogue"][src])
             # What this cell can actually hold: a smaller face, and fewer
             # balloons, rather than lettering drawn over the tier below.
-            size, cap_h, bubbles = _cell_text_plan(probe, cap, dialogue, style,
-                                                   cell_w, cell_h)
+            size, cap_h, bubbles, whole = _cell_text_plan(
+                probe, cap, dialogue, style, cell_w, cell_h)
+            if bubbles < len(dialogue) or not whole:
+                short.append({"panel": src, "spoken": len(dialogue),
+                              "lettered": bubbles,
+                              "caption_clipped": bool(cap) and not whole})
             line_h = max(1, int(size * 1.4))
             body = font if size == base else _caption_font(size)
             label = small if size == base else _caption_font(max(9, size - 6))
@@ -3299,17 +3317,23 @@ def _render_page(panels: list[Any], idx: list[int], meta: dict[str, list[Any]],
                               line_h, tail_down=True)
             x += cell_w + gutter
         y += cell_h + gutter
-    return page
+    return page, short
 
 
 def _render_strip(panels: list[Any], meta: dict[str, list[Any]],
-                  style: dict[str, Any]) -> Any:
+                  style: dict[str, Any]) -> tuple[Any, list[dict[str, Any]]]:
     """Draw the panels as one vertical scroll.
 
     Not a page stretched tall, which is the mistake this form is known for.
     A scroll reveals one moment at a time and the gap between panels is the
     tempo: a short gap reads as a beat, a long one as a held breath. So the
     gutter widens wherever the scene changes, and stays tight within one.
+
+    Reports what would not fit, in the same shape a page does. A scroll has no
+    tier below to letter into, so the balloons here were never measured against
+    anything at all -- they were simply capped at two and drawn. Uncapped, the
+    third one runs past the bottom of its own panel and into the gap, where it
+    reads as belonging to the panel after it.
     """
     from PIL import Image, ImageDraw
 
@@ -3341,20 +3365,33 @@ def _render_strip(panels: list[Any], meta: dict[str, list[Any]],
 
     page = Image.new("RGB", (width, total), (243, 241, 236))
     draw = ImageDraw.Draw(page)
+    short: list[dict[str, Any]] = []
     y = margin
     for i, im in enumerate(sized):
         page.paste(im, (margin, y))
         draw.rectangle([margin, y, margin + im.width, y + im.height],
                        outline=(20, 20, 22), width=3)
-        by = y + 16
-        for line in list(meta["dialogue"][i])[:2]:
+        spoken = list(meta["dialogue"][i])
+        bub_w = min(im.width - 40, 420)
+        by, used, lettered = y + 16, 0, 0
+        for line in spoken:
             text = str(line.get("text", ""))
             speaker = str(line.get("speaker", ""))
+            height = _bubble_height(probe, text, speaker,
+                                    _lettering(text, base, font),
+                                    bub_w, line_h)
+            if used + height > im.height - 16:
+                break
+            used += height
+            lettered += 1
             by += _bubble(draw, text, speaker,
                           _lettering(text, base, font),
                           _lettering(speaker, max(9, base - 6), small),
-                          margin + im.width // 2, by,
-                          min(im.width - 40, 420), line_h, tail_down=True)
+                          margin + im.width // 2, by, bub_w, line_h,
+                          tail_down=True)
+        if lettered < len(spoken):
+            short.append({"panel": i, "spoken": len(spoken),
+                          "lettered": lettered, "caption_clipped": False})
         y += im.height
         if caps[i]:
             for n, line in enumerate(caps[i]):
@@ -3363,7 +3400,7 @@ def _render_strip(panels: list[Any], meta: dict[str, list[Any]],
             y += len(caps[i]) * line_h + 18
         if i < len(gaps):
             y += gaps[i]
-    return page
+    return page, short
 
 
 def op_compose_board(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
@@ -3462,13 +3499,21 @@ def op_compose_board(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
                 for idx in pages
             )
 
+        # Text the page could not hold, gathered across every page so the
+        # board can say which panels lost speech rather than handing back a
+        # set of pages that look finished.
+        short: list[dict[str, Any]] = []
+
         import io
 
         import vaultcrypto as vc
 
         for k, idx in enumerate(pages):
-            img = (_render_page(panels, idx, meta, style) if layout == "page"
-                   else _render_strip(panels, meta, style))
+            img, lost = (_render_page(panels, idx, meta, style)
+                         if layout == "page"
+                         else _render_strip(panels, meta, style))
+            for record in lost:
+                short.append({**record, "page": k + 1})
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             data = buf.getvalue()
@@ -3485,7 +3530,7 @@ def op_compose_board(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
 
     return {"outputs": outputs, "sealed": True, "sizes": sizes,
             "dimensions": dims, "pages": len(outputs),
-            "panels": n, "layout": layout}
+            "panels": n, "layout": layout, "overflow": short}
 
 
 def op_bind_comic(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
@@ -3853,15 +3898,31 @@ def op_enrich_panels(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
 
 
 def _clean_dialogue(raw: Any) -> list[dict[str, str]]:
-    """Normalise spoken lines, and keep them short enough to letter.
+    """Normalise spoken lines, and keep every one of them.
 
-    A bubble sits on top of the panel it belongs to. Two of them, or one long
-    one, and there is no panel left to see -- so this caps both.
+    A bubble sits on top of the panel it belongs to, so there is a real bound
+    on how much speech a cell can carry. This used to enforce it here, keeping
+    the first two lines and the first ninety characters of each -- and that was
+    the wrong place twice over.
+
+    It cannot know the bound. A wide establishing cell on a roomy page holds
+    both lines at full size; a cell in a three-panel tier does not hold one.
+    The number that was enforced was a guess at the narrowest case, applied to
+    every case, and `_cell_text_plan` already measures the real one.
+
+    And it ran before anyone had read the line. A three-hander lost its third
+    speaker between the writer returning it and the board first drawing it, so
+    the cut was never a decision anybody made -- the panel simply arrived with
+    two speakers and no indication that it had ever had three. Cutting a line
+    of dialogue is an editorial choice and it belongs to the user.
+
+    So every line the writer returned is kept, whole, and what will not fit is
+    reported by the composer rather than removed by the parser.
     """
     if not isinstance(raw, list):
         return []
     out: list[dict[str, str]] = []
-    for item in raw[:2]:
+    for item in raw:
         if isinstance(item, str):
             speaker, text = "", item
         elif isinstance(item, dict):
@@ -3872,7 +3933,7 @@ def _clean_dialogue(raw: Any) -> list[dict[str, str]]:
         text = " ".join(text.split()).strip('"\u201c\u201d')
         if not text:
             continue
-        out.append({"speaker": " ".join(speaker.split())[:40], "text": text[:90]})
+        out.append({"speaker": " ".join(speaker.split()), "text": text})
     return out
 
 

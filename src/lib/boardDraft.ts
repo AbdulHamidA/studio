@@ -1,4 +1,4 @@
-import { api } from "./api";
+import { api, type TextOverflow } from "./api";
 import { loadPref, removePref } from "./prefs";
 import type { StyleLock } from "./board";
 import type { Cast, Panel } from "./types";
@@ -49,6 +49,17 @@ export interface BoardDraft {
    *  match, so the rooms are drawn once more and then reused. */
   placeSheets: Record<string, string>;
   coverage: Coverage | null;
+  /**
+   * Text the composed pages could not letter, by board panel index.
+   *
+   * Kept with the board rather than held in memory because the pages it
+   * describes are kept too. A warning that a page is missing a line of
+   * dialogue is worth nothing if it disappears when the app is reopened and
+   * the page it is about does not. Optional because a draft written before
+   * this carries none, which reads correctly as "nothing known", not "nothing
+   * lost" -- the board says so.
+   */
+  overflow?: TextOverflow[];
 }
 
 const LEGACY_PREFS = [
