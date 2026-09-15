@@ -322,6 +322,14 @@ fn board_key(key: Option<String>) -> Result<String> {
     Ok(key)
 }
 
+/// Where the copy of a board's previous state lives.
+///
+/// Not under the `board-` prefix, so `board_state_list` cannot mistake it for
+/// a comic that can be reopened.
+fn previous_key(key: &str) -> String {
+    format!("prev-{key}")
+}
+
 #[tauri::command]
 pub fn board_state_set(
     state: State<'_, AppState>,
@@ -333,7 +341,44 @@ pub fn board_state_set(
     }
     serde_json::from_str::<serde_json::Value>(&value)
         .map_err(|e| AppError::msg(format!("the Board draft is not valid JSON: {e}")))?;
-    Ok(state.vault.set_state(&board_key(key)?, value)?)
+    let key = board_key(key)?;
+
+    // One step back, kept before the new state replaces the old.
+    //
+    // The whole board is one JSON string in one slot, rewritten in full every
+    // time anything changes. The index write itself is safe -- it goes to a
+    // temporary file and is renamed, with the previous index kept as a backup
+    // -- so a crash mid-write cannot corrupt it. What it cannot survive is a
+    // correct write of wrong content: whatever the board holds in memory
+    // becomes the only copy 350ms later, and the manuscript, the division and
+    // every hand-typed note are in it.
+    //
+    // That has already happened once here. A failed restore left the autosave
+    // armed with every field at its default and wrote `{story: "", panels:
+    // null}` over the stored draft; the guard added then stops that one path,
+    // and this makes the general case recoverable rather than the next one
+    // fatal too.
+    //
+    // Failing to keep it is not a reason to refuse the save. A board that
+    // cannot be written down is worse than one with no history.
+    if let Ok(Some(old)) = state.vault.get_state(&key) {
+        if old != value {
+            let _ = state.vault.set_state(&previous_key(&key), old);
+        }
+    }
+    Ok(state.vault.set_state(&key, value)?)
+}
+
+/// The state this board had before the last save, if it is still known.
+///
+/// Offered rather than applied. Which of two versions of a manuscript is the
+/// right one is not a question this can answer.
+#[tauri::command]
+pub fn board_state_previous(
+    state: State<'_, AppState>,
+    key: Option<String>,
+) -> Result<Option<String>> {
+    Ok(state.vault.get_state(&previous_key(&board_key(key)?))?)
 }
 
 /// The project ids of every board that can be reopened.
@@ -355,6 +400,9 @@ pub fn board_state_forget(state: State<'_, AppState>, key: String) -> Result<()>
     if key == "board-draft" {
         return Err(AppError::msg("that is the open board, not a saved one"));
     }
+    // Its one step back goes with it. Left behind it is an orphan nothing can
+    // reach, holding the manuscript of a board the user asked to forget.
+    let _ = state.vault.remove_state(&previous_key(&key));
     Ok(state.vault.remove_state(&key)?)
 }
 
@@ -2587,6 +2635,33 @@ mod board_key_tests {
     #[test]
     fn an_over_long_key_is_refused() {
         assert!(board_key(Some(format!("board-{}", "a".repeat(60)))).is_err());
+    }
+
+    /// The step back must not look like a board that can be reopened.
+    ///
+    /// `board_state_list` returns every state key beginning with `board-`, and
+    /// the library offers each one as a comic to open. A previous state stored
+    /// as `board-draft-prev` would have appeared there as a second comic named
+    /// `draft-prev`, holding a copy of the manuscript.
+    #[test]
+    fn a_previous_state_is_outside_the_board_namespace() {
+        let prev = super::previous_key("board-draft");
+        assert!(!prev.starts_with("board-"), "{prev} would be listed");
+        assert!(
+            board_key(Some(prev.clone())).is_err(),
+            "{prev} is reachable"
+        );
+        // Still a legal state key, or it could not be stored at all.
+        assert!(prev.len() <= 64);
+        assert!(prev.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'));
+    }
+
+    #[test]
+    fn every_board_has_its_own_step_back() {
+        assert_ne!(
+            super::previous_key("board-draft"),
+            super::previous_key("board-0f2a9c11")
+        );
     }
 }
 

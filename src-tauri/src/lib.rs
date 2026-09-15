@@ -171,6 +171,7 @@ pub fn run() {
             commands::sweep_transient,
             commands::board_state_get,
             commands::board_state_set,
+            commands::board_state_previous,
             commands::board_state_list,
             commands::board_state_forget,
             commands::vault_repair,

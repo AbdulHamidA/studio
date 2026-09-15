@@ -346,6 +346,18 @@ export default function Storyboard({
    */
   const [variants, setVariants] = useState<Record<number, string[]>>({});
   /** The panel whose region is being painted, and the painted mask itself. */
+  /**
+   * Why the board is not being written down, when it is not.
+   *
+   * The whole board -- manuscript, division, notes, character binding -- is
+   * one JSON string in one slot. A failed save used to raise a toast and
+   * nothing else, so it was gone in a few seconds while the board carried on
+   * looking exactly as it had, and the user kept working on something that was
+   * not being saved. This stays until a save succeeds.
+   */
+  const [unsaved, setUnsaved] = useState<string | null>(null);
+  /** An earlier state of this board, offered when one is worth offering. */
+  const [previous, setPrevious] = useState<Partial<BoardDraft> | null>(null);
   const [repairing, setRepairing] = useState<number | null>(null);
   const [maskBytes, setMaskBytes] = useState<Uint8Array | null>(null);
   /** A page sets panels in rows with gutters; a strip stacks them at one
@@ -447,6 +459,21 @@ export default function Storyboard({
         const draft: Partial<BoardDraft> | null = await loadBoardDraft();
         if (!live) return;
         if (draft) applyDraft(draft);
+        // A board that restored empty while an earlier state of it still
+        // exists is the shape the destroyed-manuscript bug had. It is not
+        // proof of anything -- a board can legitimately be emptied -- so the
+        // earlier state is offered rather than applied.
+        if (!draft?.story?.trim() && !draft?.panels?.length) {
+          try {
+            const back = await api.boardStatePrevious();
+            if (live && back) {
+              const parsed = JSON.parse(back) as Partial<BoardDraft>;
+              if (parsed.story?.trim() || parsed.panels?.length) {
+                setPrevious(parsed);
+              }
+            }
+          } catch { /* no step back is not an error */ }
+        }
         // Arm the autosave only once the restore has actually succeeded. A
         // draft of `null` counts: that is a good read of a board nobody has
         // started yet, and a first-time user still needs saving to work.
@@ -482,8 +509,18 @@ export default function Storyboard({
     };
     const timeout = window.setTimeout(() => {
       const body = JSON.stringify(draft);
-      void api.boardStateSet(body).catch((e) =>
-        notify(`Could not save the encrypted Board draft: ${errText(e)}`, true));
+      void api.boardStateSet(body).then(
+        () => setUnsaved(null),
+        (e) => {
+          // A toast is not enough for this one. It is gone in a few seconds
+          // and the board goes on looking exactly as it did, so the user keeps
+          // working on something that is not being written down -- and finds
+          // out when they reopen the app. This stays on screen until a save
+          // succeeds.
+          const why = errText(e);
+          setUnsaved(why);
+          notify(`Could not save the encrypted Board draft: ${why}`, true);
+        });
       // A second copy under this board's own id, so the comic survives the next
       // story. The draft slot holds the board in front of you and nothing else:
       // dividing a new story overwrote the division, the notes and the
@@ -1317,8 +1354,52 @@ export default function Storyboard({
                 : "Compose"}
           </span>
         ))}
-        <span className="board-save">Encrypted draft saved automatically</span>
+        <span className="board-save">
+          {unsaved ? "Not being saved" : "Encrypted draft saved automatically"}
+        </span>
       </div>
+
+      {unsaved && (
+        // Stays until a save succeeds. The board is still usable and still
+        // holds everything; what it is not doing is writing any of it down.
+        <div className="notice warn" style={{ margin: "10px 0" }}>
+          <strong>This board is not being saved</strong>
+          <div style={{ fontSize: 11.5, lineHeight: 1.6, marginTop: 4 }}>
+            {unsaved}
+          </div>
+          <div style={{ fontSize: 11.5, lineHeight: 1.6, marginTop: 4 }}>
+            Everything on screen is still here. Nothing since the last
+            successful save has been written to the vault, so copy the
+            manuscript out before closing the app if this does not clear.
+          </div>
+        </div>
+      )}
+
+      {previous && (
+        // Offered, never applied. Which of two versions of a manuscript is the
+        // right one is not a question this can answer.
+        <div className="notice warn" style={{ margin: "10px 0" }}>
+          <strong>This board opened empty, and an earlier version of it exists</strong>
+          <div style={{ fontSize: 11.5, lineHeight: 1.6, marginTop: 4 }}>
+            {previous.story?.trim()
+              ? `It begins "${previous.story.trim().slice(0, 90)}…"`
+              : "It has a division but no manuscript."}
+            {previous.panels?.length
+              ? ` ${previous.panels.length} panels.`
+              : ""}
+          </div>
+          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+            <button className="btn small primary" disabled={busy}
+                    onClick={() => { applyDraft(previous); setPrevious(null); }}>
+              Put it back
+            </button>
+            <button className="btn small" onClick={() => setPrevious(null)}>
+              No, this board is meant to be empty
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="board-work">
 
         {/* ---- the manuscript: your prose, never rewritten ---- */}

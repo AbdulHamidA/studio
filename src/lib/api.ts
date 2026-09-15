@@ -165,6 +165,15 @@ export const api = {
   boardStateGet: (key?: string) => invoke<string | null>("board_state_get", { key }),
   boardStateSet: (value: string, key?: string) =>
     invoke<void>("board_state_set", { value, key }),
+  /**
+   * The state this board had before the last save, if it is still known.
+   *
+   * The whole board is one JSON string in one slot, rewritten in full on every
+   * change, so a correct write of wrong content leaves no earlier copy. One
+   * step back is kept, and this is how to reach it.
+   */
+  boardStatePrevious: (key?: string) =>
+    invoke<string | null>("board_state_previous", { key }),
   /** Project ids of every board that can be reopened. */
   boardStateList: () => invoke<string[]>("board_state_list"),
   boardStateForget: (key: string) => invoke<void>("board_state_forget", { key }),
