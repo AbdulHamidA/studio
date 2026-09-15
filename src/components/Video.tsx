@@ -75,6 +75,8 @@ export default function Video({
   const [assisting, setAssisting] = useState(false);
   /** What the enhancer suggests, pending your decision. */
   const [proposal, setProposal] = useState<AssistResult | null>(null);
+  /** The rewrite as it is being written. See `improve`. */
+  const [draft, setDraft] = useState("");
   const [undoPrompt, setUndoPrompt] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
@@ -117,7 +119,17 @@ export default function Video({
     if (!prompt.trim()) { notify("Write a rough idea first.", true); return; }
     const id = newJobId();
     setAssisting(true);
-    const un = await onEngineProgress((p) => { if (p.job_id === id) setProg(p); });
+    setDraft("");
+    const un = await onEngineProgress((p) => {
+      if (p.job_id !== id) return;
+      setProg(p);
+      // The words as they arrive, the same as in the studio. The engine has
+      // streamed them all along and this screen registered the listener and
+      // discarded `p.text` -- so the video assist button was still the spinner
+      // that was removed from the studio for being one, and this rewrite takes
+      // longer than that one did.
+      if (typeof p.text === "string") setDraft(p.text);
+    });
     try {
       // Hand it the starting picture when there is one: a clip that animates
       // a photograph should describe how that photograph moves, not invent a
@@ -131,7 +143,7 @@ export default function Video({
     } catch (e) {
       notify(errText(e), true);
     } finally {
-      un(); setAssisting(false); setProg(null);
+      un(); setAssisting(false); setProg(null); setDraft("");
     }
   };
 
@@ -281,6 +293,12 @@ export default function Video({
             >
               {assisting ? "Thinking…" : "\u2728 Make my prompt precise"}
             </button>
+            {assisting && draft && (
+              <div className="proposal plain" aria-live="polite">
+                <b>Writing…</b>
+                <div className="text">{draft}</div>
+              </div>
+            )}
             {proposal && (
               <PromptProposal
                 result={proposal}

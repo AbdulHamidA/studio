@@ -2757,6 +2757,128 @@ class TruncatedCastSalvage(unittest.TestCase):
         self.assertIn("could not read the cast", str(caught.exception))
 
 
+class OneHelperIsResidentAtATime(unittest.TestCase):
+    """Reading a picture and then writing about it held both models at once.
+
+    `_helpers_resident` exists because there are two of them, and every guard
+    that made room for "the assistant" was written when there was one. The
+    guard between the two helpers themselves was never written: the generator
+    loader, the video route and the idle path all free both, and the one
+    transition that always happens -- reader, then writer, back to back on
+    every assisted edit -- freed neither. 2B and 4B resident together, which is
+    the one-resident rule broken by the only pair guaranteed to run in
+    sequence.
+    """
+
+    def _source(self, name):
+        import ast
+
+        with open(os.path.join(HERE, "worker.py"), encoding="utf-8") as handle:
+            src = handle.read()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == name)
+        return ast.get_source_segment(src, fn) or ""
+
+    def test_the_reader_gives_up_the_writer(self):
+        self.assertIn("_unload_writer()", self._source("_load_assistant"))
+
+    def test_the_writer_gives_up_the_reader(self):
+        self.assertIn("_release_assistant_only()", self._source("_load_writer"))
+
+    def test_the_writer_does_not_unload_itself_on_the_way_in(self):
+        """`_unload_assistant` drops both, which is wrong in this direction.
+
+        There the reader is being replaced *by* the writer, so releasing the
+        writer on the way to loading it is at best wasted work.
+        """
+        self.assertNotIn("_unload_assistant()", self._source("_load_writer"))
+
+    def test_releasing_the_reader_alone_leaves_the_writer(self):
+        saved = (dict(worker._ASSIST), dict(worker._WRITER))
+        try:
+            worker._ASSIST.update(key="reader", model=object())
+            worker._WRITER.update(key="writer", model=object())
+            worker._release_assistant_only()
+            self.assertIsNone(worker._ASSIST["model"])
+            self.assertIsNotNone(worker._WRITER["model"],
+                                 "the writer is what this makes room for")
+        finally:
+            worker._ASSIST.clear(); worker._ASSIST.update(saved[0])
+            worker._WRITER.clear(); worker._WRITER.update(saved[1])
+
+    def test_the_idle_path_still_releases_both(self):
+        saved = (dict(worker._ASSIST), dict(worker._WRITER))
+        try:
+            worker._ASSIST.update(key="reader", model=object())
+            worker._WRITER.update(key="writer", model=object())
+            worker._unload_assistant()
+            self.assertIsNone(worker._ASSIST["model"])
+            self.assertIsNone(worker._WRITER["model"])
+        finally:
+            worker._ASSIST.clear(); worker._ASSIST.update(saved[0])
+            worker._WRITER.clear(); worker._WRITER.update(saved[1])
+
+
+class CancelIsNotAFailedCheck(unittest.TestCase):
+    """Pressing Cancel was swallowed and the job carried on.
+
+    Both helpers sit behind a bare `except Exception`, which is right for a
+    missing writer and wrong for `Cancelled`: caught there it became an
+    ordinary negative result -- a DIFFERENT verdict, or a directly composed
+    instruction -- and the request went on to build a reply about a rewrite the
+    user had already stopped waiting for.
+    """
+
+    def _source(self, name):
+        import ast
+
+        with open(os.path.join(HERE, "worker.py"), encoding="utf-8") as handle:
+            src = handle.read()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == name)
+        return ast.get_source_segment(src, fn) or ""
+
+    def test_cancellation_is_re_raised_before_the_general_handler(self):
+        for name in ("_same_request", "_clarify_edit"):
+            src = self._source(name)
+            with self.subTest(fn=name):
+                self.assertIn("except Cancelled:", src)
+                self.assertLess(
+                    src.index("except Cancelled:"), src.index("except Exception"),
+                    f"{name} catches Exception before Cancelled, so Cancelled "
+                    "never reaches its own handler")
+
+    def test_a_cancelled_write_propagates_out_of_the_check(self):
+        def boom(*_a, **_k):
+            raise worker.Cancelled("stopped")
+
+        saved = worker._write
+        worker._write = boom
+        try:
+            with self.assertRaises(worker.Cancelled):
+                worker._same_request("t", "a cat", "a tabby cat", None)
+            with self.assertRaises(worker.Cancelled):
+                worker._clarify_edit("t", "make it red", {"subject": "a jacket"})
+        finally:
+            worker._write = saved
+
+    def test_an_ordinary_failure_is_still_absorbed(self):
+        """A missing writer must not become a failed request."""
+        def boom(*_a, **_k):
+            raise RuntimeError("no writer installed")
+
+        saved = worker._write
+        worker._write = boom
+        try:
+            self.assertFalse(worker._same_request("t", "a cat", "a dog", None))
+            line, why, _attempt = worker._clarify_edit(
+                "t", "make it red", {"subject": "a jacket"})
+            self.assertEqual(why, "composed")
+            self.assertIn("red", line)
+        finally:
+            worker._write = saved
+
+
 class ResourcePolicyReachesEveryRoute(unittest.TestCase):
     """The upscale route ran with no MLX cache ceiling at all.
 
@@ -2789,7 +2911,12 @@ class ResourcePolicyReachesEveryRoute(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_every_route_that_allocates_applies_it(self):
-        for name in ("_load_model", "_load_mflux_model", "op_upscale"):
+        # The two helper loaders were missing, which is how the 3.2 GiB writer
+        # came to be the one load in the engine with no ceiling on it -- on the
+        # route reached first, from a text box, while the machine is already
+        # holding whatever the user was working on.
+        for name in ("_load_model", "_load_mflux_model", "op_upscale",
+                     "_load_writer", "_load_assistant"):
             self.assertIn("_apply_policy_once(", self._source(name),
                           f"{name} allocates weights without bounding the "
                           "process first")
@@ -3215,6 +3342,67 @@ class CellTextStaysInItsCell(unittest.TestCase):
                     f"something was drawn in the gutter at row {row}")
             y += cell_h + style["gutter"]
 
+
+
+class CorrectEnglishIsNotATypo(unittest.TestCase):
+    """The user's own plurals were shown back to them as spelling mistakes.
+
+    `/usr/share/dict/words` holds base forms and nothing else -- `cars`,
+    `trees`, `houses`, `hands`, `holds`, `stands` and `wears` are all absent --
+    and the typo check's first question is whether the typed word is a word. It
+    is not in the list, so it became a candidate to be corrected: "trees in the
+    mist" rewritten as "tree trunks in the mist" reported trees -> tree as a
+    spelling the enhancer had fixed, and "Mira wears red" against a rewrite
+    mentioning a warm hallway reported wears -> warm.
+
+    Most plural nouns and third-person verbs in a real prompt were eligible.
+    """
+
+    def setUp(self):
+        if not worker._dictionary():
+            self.skipTest("no system word list on this machine")
+
+    def test_the_word_list_really_is_missing_these(self):
+        """Otherwise the tests below pass for the wrong reason."""
+        missing = [w for w in ("cars", "trees", "hands", "holds", "wears")
+                   if w not in worker._dictionary()]
+        self.assertEqual(missing, ["cars", "trees", "hands", "holds", "wears"],
+                         "this word list carries inflections, so the defect "
+                         "these tests describe cannot occur on it")
+
+    def test_an_inflection_counts_as_a_word(self):
+        for w in ("cars", "trees", "hands", "holds", "wears", "running",
+                  "walked", "houses", "rises"):
+            with self.subTest(word=w):
+                self.assertTrue(worker._is_word(w), f"{w} is English")
+
+    def test_a_plural_is_not_offered_as_a_correction(self):
+        for original, improved in (
+                ("trees in the mist", "tree trunks in the mist."),
+                ("hands holding a cup", "hand holds a cup."),
+                ("cars on a street", "a car on a wet street."),
+                ("Mira wears red", "A warm hallway with Mira in it.")):
+            with self.subTest(original=original):
+                self.assertEqual(worker._corrections(original, improved), [],
+                                 "correct English reported as a typo")
+
+    def test_a_real_typo_is_still_caught(self):
+        self.assertEqual(worker._corrections("a hous on a hill",
+                                             "a house on a hill."),
+                         [["hous", "house"]])
+        self.assertEqual(worker._corrections("a tabel", "a table."),
+                         [["tabel", "table"]])
+
+    def test_a_real_word_is_still_not_a_misspelling_of_another(self):
+        """The guard this whole mechanism exists for."""
+        self.assertEqual(worker._corrections("a cat on a chair",
+                                             "a hat on a chair."), [])
+        self.assertFalse(worker._misspelling_of("horse", "house"))
+
+    def test_a_misspelled_plural_is_still_a_typo(self):
+        # "housse" is not an inflection of anything, so the leniency above
+        # must not reach it.
+        self.assertFalse(worker._is_word("housse"))
 
 
 class RemovedAndDroppedAreDifferentFacts(unittest.TestCase):

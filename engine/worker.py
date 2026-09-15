@@ -1090,10 +1090,26 @@ def _load_assistant(req_id: str, repo: str) -> tuple[Any, Any, Any]:
     if _ASSIST["key"] == repo and _ASSIST["model"] is not None:
         return _ASSIST["model"], _ASSIST["processor"], _ASSIST["config"]
 
+    # Bound the process before any weights are allocated. Every other
+    # allocating route does this and the two helper loaders did not, so the
+    # 3.2 GiB writer was the one load in the engine running with no MLX cache
+    # ceiling -- on the route that is reached first, from a text box, on a
+    # machine already holding whatever the user was working on.
+    _apply_policy_once(req_id)
+
     # One model resident, always: give up the generator before taking memory.
     if CACHE.loaded is not None:
         log(req_id, f"releasing {CACHE.label} to make room for the assistant")
         CACHE.unload()
+    # And the other helper. `_helpers_resident` exists because there are two of
+    # them, and every guard that made room for "the assistant" was written when
+    # there was one -- but the guard between the two helpers themselves was
+    # never written at all. Reading a picture and then writing about it left
+    # both resident, 2B and 4B together, which is the one-resident rule broken
+    # by the only pair that always runs back to back.
+    if _WRITER["model"] is not None:
+        log(req_id, "releasing the prompt writer to make room for the reader")
+        _unload_writer()
 
     from mlx_vlm import load
     from mlx_vlm.utils import load_config
@@ -1124,9 +1140,17 @@ def _load_writer(req_id: str, repo: str | None = None) -> tuple[Any, Any]:
     if _WRITER["key"] == repo and _WRITER["model"] is not None:
         return _WRITER["model"], _WRITER["tokenizer"]
 
+    # See `_load_assistant`: the ceiling, then the generator, then the other
+    # helper. This is the larger of the two models and the one that was
+    # allocating unbounded.
+    _apply_policy_once(req_id)
+
     if CACHE.loaded is not None:
         log(req_id, f"releasing {CACHE.label} to make room for the writer")
         CACHE.unload()
+    if _ASSIST["model"] is not None:
+        log(req_id, "releasing the picture reader to make room for the writer")
+        _release_assistant_only()
 
     from mlx_lm import load as lm_load
 
@@ -1194,6 +1218,24 @@ def _write(req_id: str, system: str, user: str, max_tokens: int = 160,
 
 def _unload_writer() -> None:
     _WRITER.update(key=None, model=None, tokenizer=None)
+    gc.collect()
+    try:
+        import mlx.core as mx
+
+        mx.clear_cache()
+    except Exception:
+        pass
+
+
+def _release_assistant_only() -> None:
+    """Drop the picture reader and leave the writer alone.
+
+    `_unload_assistant` releases both, which is what the idle path and the
+    generator loader want. It is not what the writer's own loader wants: there
+    the reader is being replaced *by* the writer, and unloading the writer on
+    the way to loading it is at best wasted and at worst a loop.
+    """
+    _ASSIST.update(key=None, model=None, processor=None, config=None)
     gc.collect()
     try:
         import mlx.core as mx
@@ -1520,6 +1562,49 @@ def _dictionary() -> set[str]:
     return _DICTIONARY
 
 
+def _is_word(word: str) -> bool:
+    """Whether this is English, allowing for the way people actually write it.
+
+    `/usr/share/dict/words` holds base forms and nothing else. `cars`, `trees`,
+    `houses`, `hands`, `holds`, `stands` and `wears` are all absent from it, so
+    a check for membership alone answers "not a word" for most of the plural
+    nouns and third-person verbs in any real prompt.
+
+    That answer went straight into the typo machinery, whose first question is
+    whether the typed word is a word: it is not, so it is a candidate to be
+    corrected. "trees in the mist" rewritten as "tree trunks in the mist"
+    reported trees -> tree as a spelling the enhancer had fixed, and "hands
+    holding a cup" against "hand holds a cup" reported two of them. The user is
+    shown their own correct English, labelled as a mistake.
+
+    So an inflection of a word is a word. Stemming, and also the base form with
+    a doubled final consonant undone ("holds" -> "hold", "running" -> "run"),
+    because that is the other shape English inflections take.
+    """
+    words = _dictionary()
+    if not words:
+        return False
+    w = word.lower()
+    if w in words:
+        return True
+    stem = _stem(w)
+    if stem != w and stem in words:
+        return True
+    # "runing"/"running" -> "run": the stem keeps the doubled consonant that
+    # the base form does not have.
+    if len(stem) > 2 and stem[-1] == stem[-2] and stem[:-1] in words:
+        return True
+    # A plain -s plural on a word that already ends in e. `_stem` tries the
+    # suffixes in order and "es" matches first, so "trees" stems to "tre" and
+    # the word is not found -- which is the exact case that reported
+    # trees -> tree to the user as a spelling correction.
+    if w.endswith("s") and len(w) > 3 and w[:-1] in words:
+        return True
+    # "carries" -> "carri" -> "carry" is handled inside `_stem`; the -es plural
+    # of a word ending in a consonant is not.
+    return w.endswith("es") and len(w) > 4 and w[:-2] in words
+
+
 def _corrections(original: str, improved: str) -> list[list[str]]:
     """The spellings the rewrite fixed, as typed-then-written pairs.
 
@@ -1531,7 +1616,9 @@ def _corrections(original: str, improved: str) -> list[list[str]]:
     pairs: list[list[str]] = []
     for w in _significant(original):
         word = w.lower()
-        if word in _dictionary() or not _dictionary():
+        # An inflection of a word is a word. A bare membership test is not:
+        # see `_is_word`, and the plurals it stops being offered as typos.
+        if not _dictionary() or _is_word(word):
             continue
         for candidate in written:
             if candidate != word and _misspelling_of(word, candidate):
@@ -1554,7 +1641,10 @@ def _misspelling_of(typed: str, candidate: str) -> bool:
     words = _dictionary()
     if not words:
         return False
-    if typed in words or candidate not in words:
+    # The same guard from both sides. `typed` being an inflection makes it a
+    # word, so it is not a misspelling of anything; `candidate` being one makes
+    # it a real target rather than a word the list happens not to carry.
+    if _is_word(typed) or not _is_word(candidate):
         return False
     if len(typed) < 4 or typed[0] != candidate[0]:
         return False
@@ -1838,6 +1928,12 @@ def _same_request(req_id: str, original: str, rewritten: str,
             max_tokens=6, temperature=0.0, repo=writer,
             label="Checking the rewrite",
         )
+    except Cancelled:
+        # Pressing Cancel is not "the check failed". Swallowed here, it became
+        # a DIFFERENT verdict, the rewrite was refused for drifting, and the
+        # job carried on to write a reply about a rewrite the user had already
+        # stopped waiting for. Cancellation is the caller's to handle.
+        raise
     except Exception as exc:
         log(req_id, f"could not check the rewrite: {exc}", "warn")
         return False
@@ -2032,6 +2128,10 @@ def _clarify_edit(req_id: str, user_prompt: str, facts: dict[str, str],
             f"Observed: {observed}\nRequest: {user_prompt}",
             max_tokens=120, temperature=0.2, repo=writer,
         )
+    except Cancelled:
+        # See `_same_request`: a cancelled write is not an unavailable writer,
+        # and treating it as one composed an instruction and went on working.
+        raise
     except Exception as exc:
         log(req_id, f"writer unavailable, composing directly: {exc}", "warn")
         return _enrich_edit_instruction(user_prompt, facts), "composed", ""
@@ -4399,9 +4499,6 @@ def op_shotlist(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
 
 def op_assist(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
     """Rewrite a prompt, optionally looking at the image being edited."""
-    from mlx_vlm import generate as vlm_generate
-    from mlx_vlm.prompt_utils import apply_chat_template
-
     # An explicit null means the reader is not installed. Absent means the
     # caller did not care and the default applies. The distinction matters:
     # without it, a missing reader would fall back to the default repo and
@@ -4464,6 +4561,14 @@ def op_assist(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
             # Only the picture-reading path needs the vision model, and it is
             # loaded here rather than up front so a plain text request never
             # pays for it.
+            #
+            # The import belongs here for the same reason the load does. It sat
+            # at the top of this function, so every text-only rewrite -- which
+            # is most of them, and now every edit made without a reader --
+            # imported mlx_vlm and its dependencies before writing a word.
+            from mlx_vlm import generate as vlm_generate
+            from mlx_vlm.prompt_utils import apply_chat_template
+
             model, processor, config = _load_assistant(req_id, repo)
             formatted = apply_chat_template(
                 processor, config, text, num_images=len(images)
