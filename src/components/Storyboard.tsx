@@ -3,6 +3,7 @@ import { api, errText, isCancelled, newJobId, onEngineProgress, vaultUrl,
          type TextOverflow } from "../lib/api";
 import type { Cast, EngineProgress, ModelStatus, Panel } from "../lib/types";
 import { ImageDrop, JobProgress } from "./shared";
+import MaskCanvas from "./MaskCanvas";
 import { loadPref, savePref } from "../lib/prefs";
 import { loadBoardDraft, loadSavedBoard, type BoardDraft, type Coverage }
   from "../lib/boardDraft";
@@ -335,6 +336,18 @@ export default function Storyboard({
    * else. Kept in the draft, because they are kept too.
    */
   const [overflow, setOverflow] = useState<TextOverflow[]>([]);
+  /**
+   * The pictures each panel used to have, oldest first.
+   *
+   * A correction that makes a panel worse used to be unrecoverable: the id in
+   * `drawn` was overwritten and the board had no other reference to the
+   * picture, even though it was still sealed in the vault. Every draw that
+   * replaces an existing panel pushes the old id here first.
+   */
+  const [variants, setVariants] = useState<Record<number, string[]>>({});
+  /** The panel whose region is being painted, and the painted mask itself. */
+  const [repairing, setRepairing] = useState<number | null>(null);
+  const [maskBytes, setMaskBytes] = useState<Uint8Array | null>(null);
   /** A page sets panels in rows with gutters; a strip stacks them at one
    *  width for scrolling. Different things, and people want both. */
   const [layout, setLayout] = useState(() => loadPref("boardLayout", "page"));
@@ -392,6 +405,7 @@ export default function Storyboard({
         setNotes(draft.notes ?? {});
         setPages(Array.isArray(draft.pages) ? draft.pages : []);
         setOverflow(Array.isArray(draft.overflow) ? draft.overflow : []);
+        setVariants(draft.variants ?? {});
         setOwnSheet(Array.isArray(draft.ownSheet) ? draft.ownSheet : []);
         setPlaceSheets(draft.placeSheets ?? {});
         setCoverage(draft.coverage ?? null);
@@ -464,7 +478,7 @@ export default function Storyboard({
     const draft: BoardDraft = {
       version: 1, story, cast, projectId, style, character, panels, sheet, drawn,
       redraws, notes, pages, ownSheet, placeSheets,
-      coverage, overflow,
+      coverage, overflow, variants,
     };
     const timeout = window.setTimeout(() => {
       const body = JSON.stringify(draft);
@@ -482,7 +496,8 @@ export default function Storyboard({
       }
     }, 350);
     return () => window.clearTimeout(timeout);
-  }, [draftLoaded, overflow, story, cast, projectId, style, character, panels, sheet, drawn,
+  }, [draftLoaded, overflow, variants,
+      story, cast, projectId, style, character, panels, sheet, drawn,
       redraws, notes, pages, ownSheet, placeSheets, coverage, notify]);
 
   /**
@@ -951,6 +966,51 @@ export default function Storyboard({
     return made;
   };
 
+  // A painted mask belongs to one picture. Selecting a different panel, or
+  // that panel's picture being replaced under it, leaves a mask that lines up
+  // with nothing -- so the repair closes rather than being applied to the
+  // wrong frame.
+  useEffect(() => {
+    setRepairing(null);
+    setMaskBytes(null);
+  }, [selected, drawn]);
+
+  /**
+   * File the picture a panel is about to lose.
+   *
+   * Called before anything overwrites `drawn[i]`. The picture itself is not
+   * touched -- it is sealed in the vault and stays there -- this only keeps
+   * the board's own way back to it.
+   */
+  const supersede = (i: number, previous: string | null | undefined) => {
+    if (!previous) return;
+    setVariants((v) => {
+      const had = v[i] ?? [];
+      if (had.includes(previous)) return v;
+      return { ...v, [i]: [...had, previous] };
+    });
+  };
+
+  /**
+   * Put a previous picture of a panel back.
+   *
+   * The current one takes its place in the history rather than being dropped,
+   * so this is a swap and going back again is always possible.
+   */
+  const restoreVariant = (i: number, id: string) => {
+    const current = drawnRef.current[i] ?? drawn[i];
+    setVariants((v) => {
+      const rest = (v[i] ?? []).filter((x) => x !== id);
+      return { ...v, [i]: current ? [...rest, current] : rest };
+    });
+    setDrawn((d) => { const n = [...d]; n[i] = id; return n; });
+    drawnRef.current = (() => {
+      const n = [...drawnRef.current]; n[i] = id; return n;
+    })();
+    setPages([]); setOverflow([]);
+    notify(`Panel ${i + 1} put back to its previous picture.`);
+  };
+
   /** Draw a single panel against the sheet. Shared by the run and by redraw,
    *  so a board with one bad panel costs one panel to fix rather than six. */
   const drawOne = async (i: number, sheetId: string | null,
@@ -1000,6 +1060,9 @@ export default function Storyboard({
       const res = refs.length
         ? await api.editImage(params)
         : await api.generate(params);
+      // Before the id is overwritten, not after: this is the only moment the
+      // board still knows what the panel used to be.
+      if (res[0]) supersede(i, drawnRef.current[i]);
       setDrawn((d) => { const n = [...d]; n[i] = res[0] ?? null; return n; });
       // Immediately, not on the next render: the next panel in this batch asks
       // for it before React has committed the state above.
@@ -1068,6 +1131,85 @@ export default function Storyboard({
       const next = [...items]; next[i] = null; return next;
     });
     setPages([]); setOverflow([]);
+  };
+
+  /**
+   * Repair one painted region of a drawn panel.
+   *
+   * A note and a redraw are a different repair from this one, and the board
+   * only had the first. A note changes what was asked for and the whole frame
+   * is drawn again from it -- which is the right move when the panel is wrong,
+   * and the wrong one when it is nearly right: fixing a hand costs the face,
+   * because the seed moves and everything is reconsidered. The model already
+   * takes a mask and Studio already paints one; the board was the only surface
+   * sending `mask: null`.
+   *
+   * The panel itself is the input image here, not the cast sheet. A masked
+   * edit regenerates inside the painted region of the picture it is given, so
+   * the picture it is given has to be the one being corrected.
+   */
+  const repair = async (i: number) => {
+    const current = drawn[i];
+    if (!model || !panels || !current) return;
+    if (!maskBytes) { notify("Paint over the part to redraw first.", true); return; }
+    const id = newJobId();
+    stop.current = false;
+    setStage("drawing"); setJobId(id);
+    const un = await onEngineProgress((p) => { if (p.job_id === id) setProg(p); });
+    const nextRedraw = (redraws[i] ?? 0) + 1;
+    let maskId: string | null = null;
+    try {
+      // The mask is content like anything else: sealed into the vault, handed
+      // over by id, and removed once the engine has read it. It is working
+      // material and has no business outliving the repair.
+      maskId = await api.vaultImportBytes(
+        maskBytes, "mask.png", "image/png", "mask");
+      const note = notes[i]?.trim();
+      const res = await api.editImage({
+        job_id: id, model_id: model.id,
+        // What should be in the painted region. A note is written about a
+        // specific fault -- "older, grey at the temples" -- which is exactly
+        // the instruction a masked repair wants; without one there is nothing
+        // to say but the panel's own brief.
+        prompt: note ? `${note}. ${style.words}`
+                     : panelPrompt(panels[i], style, panelWho(panels[i])),
+        negative_prompt: null,
+        width: panelPx, height: panelPx,
+        steps: model.steps_default || 4,
+        guidance: Math.min(1.0, model.guidance_max),
+        seed: panelSeed(i, nextRedraw),
+        count: 1,
+        images: [current],
+        image_strength: null, i2i_mode: "edit",
+        low_ram: true, preview: false, cache_limit_gb: null,
+        allow_over_budget: false, loras: [], mask: maskId,
+        outpaint_padding: null, outpaint_fill: null,
+        project: projectId, project_name: projectName, project_index: i,
+      });
+      if (!res[0]) { notify("The engine returned no picture.", true); return; }
+      setRedraws((r) => { const n = [...r]; n[i] = nextRedraw; return n; });
+      supersede(i, current);
+      setDrawn((d) => { const n = [...d]; n[i] = res[0]; return n; });
+      drawnRef.current = (() => {
+        const n = [...drawnRef.current]; n[i] = res[0]; return n;
+      })();
+      setPages([]); setOverflow([]);
+      setRepairing(null); setMaskBytes(null);
+      onProduced();
+      notify(`Panel ${i + 1} repaired. The picture it replaces is kept — `
+             + "put it back from the panel's history if this is worse.");
+    } catch (e) {
+      // A model that cannot mask says so here rather than being asked to
+      // guess. Refusing is better than silently redrawing the whole frame,
+      // which is what an unmasked fallback would do behind the user's back.
+      notify(isCancelled(e) ? "Cancelled." : `Panel ${i + 1}: ${errText(e)}`,
+             !isCancelled(e));
+    } finally {
+      if (maskId) {
+        try { await api.vaultDelete(maskId); } catch { /* lock/cleanup race */ }
+      }
+      un(); setStage("idle"); setProg(null); setJobId(null);
+    }
   };
 
   /** Redraw one panel, keeping the rest of the board. */
@@ -1645,6 +1787,68 @@ export default function Storyboard({
                             disabled={busy} onClick={() => void redraw(selIndex)}>
                       {notes[selIndex]?.trim() ? "Redraw with note" : "Redraw this panel"}
                     </button>
+                    {/* The second kind of repair. A redraw reconsiders the
+                        whole frame, which is right when the panel is wrong and
+                        wasteful when it is nearly right -- correcting a hand
+                        should not cost the face. */}
+                    <button className="btn small full" style={{ marginTop: 6 }}
+                            disabled={busy}
+                            onClick={() => {
+                              setMaskBytes(null);
+                              setRepairing(repairing === selIndex ? null : selIndex);
+                            }}>
+                      {repairing === selIndex
+                        ? "Cancel the painted repair"
+                        : "Repair one part of it"}
+                    </button>
+                    {repairing === selIndex && (
+                      <div style={{ marginTop: 8 }}>
+                        <div style={{ fontSize: 10.5, color: "var(--text-faint)",
+                                      lineHeight: 1.55, marginBottom: 6 }}>
+                          Paint over what is wrong. Only the painted part is
+                          drawn again; the rest of the panel is kept exactly as
+                          it is. Your note above says what should be there.
+                        </div>
+                        <MaskCanvas
+                          sourceId={drawn[selIndex]!}
+                          onMaskChange={setMaskBytes}
+                          disabled={busy}
+                        />
+                        <button className="btn small full primary"
+                                style={{ marginTop: 6 }}
+                                disabled={busy || !maskBytes}
+                                onClick={() => void repair(selIndex)}>
+                          {maskBytes
+                            ? "Redraw the painted region"
+                            : "Paint a region first"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {(variants[selIndex]?.length ?? 0) > 0 && (
+                  <div className="field">
+                    <label>
+                      Earlier pictures <em>this panel has been drawn before</em>
+                    </label>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {variants[selIndex].map((id) => (
+                        <button key={id} className="btn small"
+                                disabled={busy}
+                                title="Put this picture back"
+                                style={{ padding: 3, lineHeight: 0 }}
+                                onClick={() => restoreVariant(selIndex, id)}>
+                          <img src={vaultUrl(id)} alt="An earlier version"
+                               style={{ width: 64, height: 64, objectFit: "cover",
+                                        borderRadius: 4, display: "block" }} />
+                        </button>
+                      ))}
+                    </div>
+                    <div style={{ fontSize: 10.5, color: "var(--text-faint)",
+                                  marginTop: 5, lineHeight: 1.55 }}>
+                      Click one to put it back. The current picture takes its
+                      place here, so nothing is lost either way.
+                    </div>
                   </div>
                 )}
               </>

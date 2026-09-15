@@ -60,6 +60,19 @@ export interface BoardDraft {
    * lost" -- the board says so.
    */
   overflow?: TextOverflow[];
+  /**
+   * The pictures a panel used to have, oldest first, by panel index.
+   *
+   * Every redraw and every repair used to replace `drawn[i]` outright. The
+   * old picture was never deleted -- it sits in the vault -- but the board
+   * kept no way back to it, so correcting a panel and getting something worse
+   * was a one-way trip through a five-minute render. Keeping the ids costs
+   * nothing and makes the previous version one click away.
+   *
+   * Optional: a draft written before this has none, which is correct. It has
+   * no history rather than an empty one.
+   */
+  variants?: Record<number, string[]>;
 }
 
 const LEGACY_PREFS = [
