@@ -1418,6 +1418,9 @@ async fn run_job(
             // One request can produce several pictures, so the index walks
             // from whatever the caller said this batch starts at.
             project_index: args.project_index.map(|n| n + i as u32),
+            // Only a composed page belongs to a composition. A panel, a sheet
+            // or a one-off generation is not a member of anything.
+            composition: None,
             // Everything needed to run this again and get this picture. All of
             // it was already resolved above and thrown away, which is why
             // "use these settings" restored the prompt and the seed and
@@ -2152,6 +2155,8 @@ pub struct TextOverflow {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct ComposedBoard {
     pub pages: Vec<String>,
+    /// Identity of this run, carried on every page it produced.
+    pub composition: String,
     pub overflow: Vec<TextOverflow>,
 }
 
@@ -2162,6 +2167,10 @@ pub struct ComposedBoard {
 /// that leaves as a folder of PNGs keeps its reading order in the file names,
 /// and the first person to sort them differently loses it.
 #[tauri::command]
+// Eight flat arguments, all of them the caller's own strings. A struct here
+// would be one more name to keep in step across TS, Rust and the command
+// registration, and the command is called from exactly one place.
+#[allow(clippy::too_many_arguments)]
 pub async fn bind_comic(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -2170,6 +2179,9 @@ pub async fn bind_comic(
     title: String,
     project: Option<String>,
     project_name: Option<String>,
+    // The composition these pages belong to, when they carry one. Pages
+    // composed before compositions were recorded do not.
+    composition: Option<String>,
 ) -> Result<String> {
     let _job = state.job_gate.read().await;
     state.require_unlocked()?;
@@ -2247,6 +2259,11 @@ pub async fn bind_comic(
         project_name,
         // Last, so it sorts after every page it was made from.
         project_index: Some(u32::MAX),
+        // Which composition these pages came from, so a PDF found later can
+        // be traced back to the version of the comic it is. The library does
+        // not count it as a page -- a page is a picture -- but a document with
+        // no provenance is how the wrong PDF gets exported with confidence.
+        composition,
         ..Default::default()
     })?;
     Ok(slot_id)
@@ -2345,6 +2362,11 @@ pub async fn compose_board(
         }
     };
 
+    // One identity for this run of the composer, stamped on every page it
+    // made. It is what makes these pages a comic rather than a heap of images
+    // that share a project.
+    let composition = uuid::Uuid::new_v4().to_string();
+
     let produced: Vec<String> = result["outputs"]
         .as_array()
         .map(|a| {
@@ -2390,6 +2412,7 @@ pub async fn compose_board(
             project: project.clone(),
             project_name: project_name.clone(),
             project_index: Some(i as u32),
+            composition: Some(composition.clone()),
             ..Default::default()
         })?;
     }
@@ -2418,6 +2441,7 @@ pub async fn compose_board(
 
     Ok(ComposedBoard {
         pages: produced,
+        composition,
         overflow,
     })
 }

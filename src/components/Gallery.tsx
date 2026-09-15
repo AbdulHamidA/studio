@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, errText, fmtBytes, fmtDuration, newJobId, vaultUrl } from "../lib/api";
 import type { ModelStatus, VaultItem } from "../lib/types";
 import { savedBoardIds } from "../lib/boardDraft";
+import { compositions } from "../lib/board";
 import { exportItem, exportMany } from "./shared";
 import SendTo, { type Destination } from "./SendTo";
 
@@ -39,6 +40,18 @@ export default function Gallery({
   const [confirmBoard, setConfirmBoard] = useState(false);
   /** Which comics kept their story, so the card knows what it can offer. */
   const [reopenable, setReopenable] = useState<Set<string>>(new Set());
+  /**
+   * Which composition of the open board is being shown.
+   *
+   * Empty means the most recent one, which is what someone opening a comic
+   * wants. Kept as an id rather than an index so it survives the board being
+   * composed again while the library is open.
+   */
+  const [selectedRun, setSelectedRun] = useState("");
+  // A composition id belongs to one board. Carried into another it selects
+  // nothing, and the fallback would quietly show the latest instead -- right
+  // by accident, and wrong the moment the fallback changes.
+  useEffect(() => { setSelectedRun(""); }, [open?.project]);
   const [binding, setBinding] = useState(false);
   useEffect(() => { void savedBoardIds().then(setReopenable); }, [items]);
 
@@ -239,7 +252,13 @@ export default function Gallery({
     : null;
 
   if (open && openProject && openProject.length > 1) {
-    const pagesOf = openProject.filter((i) => i.model === "composed");
+    // One composition is one comic; see `compositions`. Newest last, as the
+    // project sort already put them, so the current one is at the end.
+    const runs = compositions(openProject);
+    const current = runs.length
+      ? (runs.find((r) => r.id === selectedRun) ?? runs[runs.length - 1])
+      : null;
+    const pagesOf = current?.pages ?? [];
     const panelsOf = openProject.filter(
       (i) => i.project_index != null && i.model !== "composed");
     const sheets = openProject.filter(
@@ -264,6 +283,36 @@ export default function Gallery({
             {" · "}{new Date(open.created_at).toLocaleDateString()}
           </span>
         </div>
+
+        {runs.length > 1 && (
+          // A board composed more than once. The older pages are still here
+          // and still worth looking at -- they are what the comic used to be
+          // -- but they are a different comic, and everything below acts on
+          // exactly one of them.
+          <div style={{ display: "flex", alignItems: "center", gap: 6,
+                        flexWrap: "wrap", marginTop: 10 }}>
+            <span style={{ fontSize: 11, color: "var(--text-faint)" }}>
+              Composed {runs.length} times:
+            </span>
+            {runs.map((r, i) => (
+              <button key={r.id || "unknown"}
+                      className={"btn small" + (r === current ? " primary" : "")}
+                      onClick={() => setSelectedRun(r.id)}>
+                {r.id
+                  ? `${i === runs.length - 1 ? "Latest" : `Version ${i + 1}`}`
+                    + ` · ${r.pages.length} page${r.pages.length === 1 ? "" : "s"}`
+                  : `Earlier · ${r.pages.length} page`
+                    + `${r.pages.length === 1 ? "" : "s"}`}
+              </button>
+            ))}
+            {!current?.id && (
+              <span style={{ fontSize: 11, color: "var(--text-faint)" }}>
+                These pages were composed before versions were recorded, so
+                which run made them is not known.
+              </span>
+            )}
+          </div>
+        )}
 
         <div style={{ display: "flex", gap: 8, margin: "14px 0", flexWrap: "wrap" }}>
           {/* The comic, in one action, named and in order.
@@ -297,7 +346,8 @@ export default function Gallery({
                   const id = await api.bindComic(
                     newJobId(), pagesOf.map((p) => p.id),
                     open.project_name || "Picture board",
-                    open.project ?? null, open.project_name ?? null);
+                    open.project ?? null, open.project_name ?? null,
+                    current?.id || null);
                   onChanged();
                   notify("Bound into a PDF. It is in this comic, ready to export.");
                   void id;

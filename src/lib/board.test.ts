@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { CHAIN_LIMIT, continuesFrom, CUSTOM_STYLE, isKnownStyle, lockCustomStyle, lockStyle,
+import { CHAIN_LIMIT, compositions, continuesFrom, CUSTOM_STYLE, isKnownStyle, lockCustomStyle, lockStyle,
          panelPrompt, previousPanel,
          panelReferences, panelSeed, placeKey, placePrompt, placeSeed,
          reviveLock, sheetPrompt, shotBackground, styleHasMoved, styleWords,
          STYLES } from "./board";
-import type { Panel } from "./types";
+import type { Panel, VaultItem } from "./types";
 
 const CHAR = "a young woman with short black hair and a red scarf";
 
@@ -686,5 +686,112 @@ describe("one room per place, not per scene number", () => {
   it("draws one room from one seed wherever the story returns to it", () => {
     expect(placeSeed("kitchen")).toBe(placeSeed("kitchen"));
     expect(placeSeed("kitchen")).not.toBe(placeSeed("station platform"));
+  });
+});
+
+
+describe("a composed chapter is exactly one composition", () => {
+  /** A vault item with only the fields the grouping reads. */
+  const page = (
+    index: number, composition: string | null, at: string,
+    over: Partial<VaultItem> = {},
+  ): VaultItem => ({
+    id: `${composition ?? "old"}-${index}`,
+    kind: "image", name: `page-${index}.png`, mime: "image/png", bytes: 1,
+    model: "composed", prompt: "", seed: 0, inputs: [],
+    created_at: at, duration_ms: 0,
+    project: "board", project_index: index, composition,
+    ...over,
+  } as VaultItem);
+
+  /** How the library holds a project: page number, then time. */
+  const inProjectOrder = (items: VaultItem[]) => [...items].sort(
+    (a, b) => (a.project_index ?? 1e9) - (b.project_index ?? 1e9)
+      || a.created_at.localeCompare(b.created_at));
+
+  it("keeps two runs of the same board apart", () => {
+    // The defect this exists for: composing twice used to export page one old,
+    // page one new, page two old, page two new.
+    const items = inProjectOrder([
+      page(0, "first", "2026-01-01T10:00:00"),
+      page(1, "first", "2026-01-01T10:01:00"),
+      page(0, "second", "2026-02-02T10:00:00"),
+      page(1, "second", "2026-02-02T10:01:00"),
+    ]);
+    const runs = compositions(items);
+    expect(runs.map((r) => r.id)).toEqual(["first", "second"]);
+    expect(runs.every((r) => r.pages.length === 2)).toBe(true);
+  });
+
+  it("puts the newest run last, so it is the one shown", () => {
+    const items = inProjectOrder([
+      page(0, "first", "2026-01-01T10:00:00"),
+      page(0, "second", "2026-02-02T10:00:00"),
+    ]);
+    expect(compositions(items).at(-1)!.id).toBe("second");
+  });
+
+  it("keeps each run's pages in reading order", () => {
+    const items = inProjectOrder([
+      page(2, "one", "2026-01-01T10:02:00"),
+      page(0, "one", "2026-01-01T10:00:00"),
+      page(1, "one", "2026-01-01T10:01:00"),
+    ]);
+    expect(compositions(items)[0].pages.map((p) => p.project_index))
+      .toEqual([0, 1, 2]);
+  });
+
+  it("does not let a run with fewer pages absorb the longer one", () => {
+    // Three pages became two after the board was re-divided. The short run
+    // must not inherit the third page of the long one.
+    const items = inProjectOrder([
+      page(0, "long", "2026-01-01T10:00:00"),
+      page(1, "long", "2026-01-01T10:01:00"),
+      page(2, "long", "2026-01-01T10:02:00"),
+      page(0, "short", "2026-02-02T10:00:00"),
+      page(1, "short", "2026-02-02T10:01:00"),
+    ]);
+    const runs = compositions(items);
+    expect(runs.map((r) => r.pages.length)).toEqual([3, 2]);
+  });
+
+  it("groups pages composed before runs were recorded, without claiming them", () => {
+    // Not members of the current composition merely because nothing
+    // contradicts it. They are their own group, and the empty id is what the
+    // interface labels as unknown.
+    const items = inProjectOrder([
+      page(0, null, "2026-01-01T10:00:00"),
+      page(0, "now", "2026-02-02T10:00:00"),
+    ]);
+    const runs = compositions(items);
+    expect(runs.map((r) => r.id)).toEqual(["", "now"]);
+  });
+
+  it("does not count the bound PDF as a page of the comic", () => {
+    // It is stamped `composed` and sorts after every page, so it was the
+    // comic's last page, exported as a PNG, and bound into the next PDF.
+    const items = inProjectOrder([
+      page(0, "one", "2026-01-01T10:00:00"),
+      page(1, "one", "2026-01-01T10:01:00"),
+      page(4294967295, "one", "2026-01-01T10:05:00",
+           { kind: "document", mime: "application/pdf", name: "comic.pdf" }),
+    ]);
+    const runs = compositions(items);
+    expect(runs).toHaveLength(1);
+    expect(runs[0].pages.map((p) => p.mime)).toEqual(["image/png", "image/png"]);
+  });
+
+  it("ignores the panels and sheets the pages were made from", () => {
+    const items = inProjectOrder([
+      page(0, null, "2026-01-01T09:00:00", { model: "flux", composition: null }),
+      page(0, "one", "2026-01-01T10:00:00"),
+    ]);
+    expect(compositions(items)).toEqual([
+      { id: "one", pages: [expect.objectContaining({ model: "composed" })] },
+    ]);
+  });
+
+  it("has nothing to show for a board that was never composed", () => {
+    expect(compositions([])).toEqual([]);
   });
 });

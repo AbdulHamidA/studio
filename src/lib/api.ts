@@ -130,8 +130,10 @@ export const api = {
    * export, which is the only sanctioned way for plaintext to leave.
    */
   bindComic: (jobId: string, pages: string[], title: string,
-              project: string | null, projectName: string | null) =>
-    invoke<string>("bind_comic", { jobId, pages, title, project, projectName }),
+              project: string | null, projectName: string | null,
+              composition: string | null = null) =>
+    invoke<string>("bind_comic",
+                   { jobId, pages, title, project, projectName, composition }),
   /**
    * Compose the drawn panels into pages.
    *
@@ -145,7 +147,8 @@ export const api = {
     jobId: string, panels: string[], captions: string[], shots: string[],
     dialogue: { speaker: string; text: string }[][], scenes: number[],
     layout: string, project: string | null, projectName: string
-  ) => invoke<{ pages: string[]; overflow: TextOverflow[] }>(
+  ) => invoke<{ pages: string[]; composition: string;
+                overflow: TextOverflow[] }>(
     "compose_board",
     { jobId, board: { panels, captions, shots, dialogue,
                       scenes, layout, project,

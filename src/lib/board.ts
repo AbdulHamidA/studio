@@ -1,4 +1,4 @@
-import type { Panel } from "./types";
+import type { Panel, VaultItem } from "./types";
 
 /**
  * How a picture board turns panels into prompts.
@@ -574,4 +574,46 @@ export function previousPanel(
     }
   }
   return null;
+}
+
+/**
+ * One board's composed pages, split into the runs that made them.
+ *
+ * Composing a board does not replace the pages composed last time. Those are
+ * sealed vault items and they stay -- which is right, because the previous
+ * version of a comic is worth keeping -- but it means "every composed item in
+ * this project" is not the current chapter. It is every chapter this board has
+ * ever had.
+ *
+ * The library grouped them exactly that way and sorted them by page number, so
+ * a board composed twice showed, exported and bound as page one old, page one
+ * new, page two old, page two new: the comic twice over, interleaved, half of
+ * it the version the user had already rejected, and nothing anywhere said so.
+ *
+ * `items` must already be in project order (page number, then time), which is
+ * the order the library holds a project in. Runs come back oldest first, so
+ * the last one is the current comic.
+ *
+ * A page composed before runs were recorded carries no id. Those are grouped
+ * together under the empty id, which is unknown provenance rather than
+ * membership -- they are not the current composition merely because nothing
+ * contradicts it.
+ *
+ * The bound PDF is deliberately not a page. It is stamped `composed` like the
+ * pages are and sorts after all of them, so it was counted as the comic's last
+ * page, exported alongside them as a PNG, and handed to the next bind as a
+ * page to bind -- a comic ending with a PDF of itself.
+ */
+export function compositions(items: VaultItem[]): {
+  id: string; pages: VaultItem[];
+}[] {
+  const runs: { id: string; pages: VaultItem[] }[] = [];
+  for (const item of items) {
+    if (item.model !== "composed" || !item.mime.startsWith("image/")) continue;
+    const id = item.composition ?? "";
+    const run = runs.find((r) => r.id === id);
+    if (run) run.pages.push(item);
+    else runs.push({ id, pages: [item] });
+  }
+  return runs;
 }

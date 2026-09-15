@@ -134,6 +134,17 @@ export interface VaultItem {
   project?: string | null;
   project_name?: string | null;
   project_index?: number | null;
+  /**
+   * Which run of the composer made this page.
+   *
+   * Set on composed pages only. Composing a board again does not replace the
+   * pages composed last time -- those are sealed vault items and they stay --
+   * so without this the library grouped every composed item in a project
+   * together and exported a twice-composed board as both versions interleaved
+   * by page number. Absent on a page composed before this existed, which is
+   * unknown provenance rather than membership.
+   */
+  composition?: string | null;
 
   /**
    * How this was actually made.

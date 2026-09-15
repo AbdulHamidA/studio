@@ -199,6 +199,20 @@ pub struct VaultItem {
     /// members back into the order they were meant to be read in.
     #[serde(default)]
     pub project_index: Option<u32>,
+    /// Which run of the composer made this page.
+    ///
+    /// Composing a board does not replace the pages it composed last time --
+    /// they are sealed vault items and they stay. Without this the library had
+    /// no way to tell one run's pages from another's and grouped every
+    /// composed item in the project together, so a board composed twice
+    /// exported as both versions interleaved by page number: page one old,
+    /// page one new, page two old. Every page of the comic appeared twice and
+    /// half of them were the version the user had already rejected.
+    ///
+    /// Set on pages only. `None` means a page composed before this existed,
+    /// which is honestly unknown provenance rather than membership.
+    #[serde(default)]
+    pub composition: Option<String>,
 
     // ---- How this was actually made -------------------------------------
     //
