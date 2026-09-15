@@ -4497,6 +4497,62 @@ def op_shotlist(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
             "words": words, "coverage": _story_coverage(story, panels)}
 
 
+# The version of the shape `_assist_reply` returns.
+#
+# Not a compatibility negotiation -- the engine and the interface ship
+# together. It is a stamp on the reply, so a log, a bug report or a saved
+# response says which contract it was written against rather than leaving the
+# reader to infer it from which fields happen to be present.
+ASSIST_REPLY_VERSION = 1
+
+# Every field of an assist reply, and what it means when nothing set it.
+#
+# A reply used to be whichever dict literal the branch that returned it
+# happened to write, and there were five of them with five different key sets.
+# The interface then reconstructed what it had not been told: `outcome` was
+# absent on two paths, so it fell through a chain of guesses that ended at the
+# card for a successful rewrite -- and the user was shown their own untouched
+# prompt, folklore and all, headed "Suggested prompt", above a button that
+# replaced it with itself.
+#
+# Guessing is the wrong repair. The reply says everything, every time, and a
+# branch that forgets a field gets the default below rather than an absence for
+# something downstream to interpret.
+_ASSIST_DEFAULTS: dict[str, Any] = {
+    "outcome": "proposal",
+    "changed": False,
+    "saw_image": False,
+    "unclear": False,
+    "description": "",
+    "note": "",
+    "attempt": "",
+    "rejected_because": "",
+    "added": [],
+    "dropped": [],
+    "corrected": [],
+    "removed": [],
+}
+
+
+def _assist_reply(prompt: str, original: str, **fields: Any) -> dict[str, Any]:
+    """One shape for every answer this operation can give.
+
+    Keyword arguments are checked against the known fields rather than merged
+    blindly: a typo in a field name is otherwise a field the interface silently
+    never sees, which is the same failure as omitting it and harder to find.
+    """
+    unknown = set(fields) - set(_ASSIST_DEFAULTS)
+    if unknown:
+        raise ValueError(f"unknown assist reply field(s): {sorted(unknown)}")
+    return {
+        "version": ASSIST_REPLY_VERSION,
+        "prompt": prompt,
+        "original": original,
+        **_ASSIST_DEFAULTS,
+        **fields,
+    }
+
+
 def op_assist(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
     """Rewrite a prompt, optionally looking at the image being edited."""
     # An explicit null means the reader is not installed. Absent means the
@@ -4509,12 +4565,11 @@ def op_assist(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("write something first, then ask for help improving it")
     user_prompt, removed = _clean_prompt_request(original_prompt)
     if not user_prompt:
-        return {
-            "prompt": original_prompt, "original": original_prompt,
-            "saw_image": False, "unclear": True,
-            "note": "Name something visible instead of quality labels.",
-            "removed": removed,
-        }
+        return _assist_reply(
+            original_prompt, original_prompt,
+            unclear=True, outcome="unclear", removed=removed,
+            note="Name something visible instead of quality labels.",
+        )
 
     mode = req.get("mode", "generate")
     # Sources normally arrive sealed as `vault_inputs`, which are decrypted to
@@ -4609,25 +4664,25 @@ def op_assist(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
                 log(req_id,
                     f"edit rewrite rejected ({why}); keeping the request",
                     "warn")
-                return {
-                    "prompt": original_prompt, "original": original_prompt,
-                    "saw_image": bool(staged) and not blind,
+                return _assist_reply(
+                    original_prompt, original_prompt,
+                    saw_image=bool(staged) and not blind,
                     # What the cleaner stripped before anything was judged.
                     # Absent from every rejection reply, so a rejected rewrite
                     # handed back the original with its folklore intact and no
                     # sign that a cleaned version had ever existed -- which is
                     # the one fact explaining why a rewrite was attempted.
-                    "removed": removed,
-                    "changed": False, "outcome": "rewrite_rejected",
-                    "description": description, "rejected_because": why,
+                    removed=removed,
+                    outcome="rewrite_rejected",
+                    description=description, rejected_because=why,
                     # What it wrote, so the choice is the user's. The edit
                     # checks are the same literal ones as below, so the text
                     # they refuse is often the text that was wanted.
-                    "attempt": attempt,
-                    "note": _WHY_REJECTED.get(
+                    attempt=attempt,
+                    note=_WHY_REJECTED.get(
                         why, "Your words were kept: the rewrite drifted from "
                              "them. Try again, or add a detail yourself."),
-                }
+                )
         else:
             emit({"id": req_id, "type": "progress", "phase": "denoise",
                   "progress": None, "message": "Writing the prompt"})
@@ -4707,37 +4762,31 @@ def op_assist(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
                     # A fact about the request: it names nothing that could be
                     # drawn. Inventing a subject to fill the gap is what made
                     # this useless before.
-                    return {
-                        "prompt": original_prompt, "original": original_prompt,
-                        "saw_image": bool(staged) and not blind,
-                        "unclear": True, "changed": False,
-                        "outcome": "unclear", "description": description,
-                        "note": ("This does not say what to draw yet. Name "
-                                 "the thing you want and I can make it "
-                                 "specific."),
-                    }
+                    return _assist_reply(
+                        original_prompt, original_prompt,
+                        saw_image=bool(staged) and not blind,
+                        unclear=True,
+                        outcome="unclear", description=description,
+                        removed=removed,
+                        note=("This does not say what to draw yet. Name "
+                              "the thing you want and I can make it "
+                              "specific."),
+                    )
                 # Everything else is a fact about the *rewrite*, not the
                 # request: it drifted, dropped something, or ran long. The
                 # request was fine, so it is kept as written rather than the
                 # user being told their prompt is the problem.
                 log(req_id, f"rewrite rejected ({why}); keeping the request",
                     "warn")
-                return {
-                    "prompt": original_prompt, "original": original_prompt,
-                    "saw_image": bool(staged) and not blind,
+                return _assist_reply(
+                    original_prompt, original_prompt,
+                    saw_image=bool(staged) and not blind,
                     # What the cleaner stripped before anything was judged. See
                     # the edit rejection above: without it the user is handed
                     # back their folklore with no sign a cleaned version existed.
-                    "removed": removed,
-                    # `outcome` and `changed` belong on every reply, and this
-                    # was the one path that omitted both. With neither set, the
-                    # interface's fallback chain reaches its last branch and
-                    # renders the card for a successful rewrite -- so the user
-                    # was shown their own untouched prompt, folklore and all,
-                    # headed "Suggested prompt", above a button that replaced
-                    # it with itself. The rejection is the whole message here.
-                    "changed": False, "outcome": "rewrite_rejected",
-                    "description": description, "rejected_because": why,
+                    removed=removed,
+                    outcome="rewrite_rejected",
+                    description=description, rejected_because=why,
                     # What it wrote, so a rejection is a choice rather than a
                     # loss. This path had no `attempt` at all, so the whole
                     # rewrite was discarded in silence -- and the checks here
@@ -4746,54 +4795,62 @@ def op_assist(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
                     # "setting" on a chair the writer says "sitting", which is
                     # certainly what was meant and cannot be proven so by any
                     # string comparison. Show it and let them decide.
-                    "attempt": _first_line(raw),
-                    "note": _WHY_REJECTED.get(
+                    attempt=_first_line(raw),
+                    note=_WHY_REJECTED.get(
                         why, "Your words were kept: the rewrite drifted from "
                              "them. Try again, or add a detail yourself."),
-                }
+                )
 
         if not _keeps_intent(user_prompt, improved):
             log(req_id, f"discarding rewrite {improved!r}: it lost the request", "warn")
-            return {"prompt": original_prompt, "original": original_prompt,
-                    "saw_image": bool(staged) and not blind, "changed": False,
-                    # See the rejection above: without this the user is handed
-                    # back their folklore with no sign a cleaned version existed.
-                    "removed": removed,
-                    "outcome": "rewrite_rejected", "rejected_because": "lost_intent",
-                    "attempt": improved,
-                    "note": _WHY_REJECTED["lost_intent"],
-                    "description": description}
+            return _assist_reply(
+                original_prompt, original_prompt,
+                saw_image=bool(staged) and not blind,
+                # See the rejection above: without this the user is handed back
+                # their folklore with no sign a cleaned version existed.
+                removed=removed,
+                outcome="rewrite_rejected", rejected_because="lost_intent",
+                attempt=improved,
+                note=_WHY_REJECTED["lost_intent"],
+                description=description)
     finally:
         # Never `staged`: it may hold a path the caller owns.
         _discard_staged(derived)
         _discard_staged(raw_staged)
 
     changed = improved.strip() != original_prompt.strip()
-    out = {"prompt": improved, "original": original_prompt,
-           "saw_image": bool(staged) and not blind, "description": description,
-           "removed": removed, "changed": changed,
-           # Every reply says which of these happened, so the interface never
-           # has to guess from whether the text came back the same. "Yours was
-           # already fine" and "I tried and the result was worse" look
-           # identical otherwise, and saying the first when the second is true
-           # is why this feature reads as doing nothing.
-           "outcome": "proposal" if changed else "already_specific",
-           "added": _added_words(original_prompt, improved),
-           # Spellings it fixed, named so they are visible rather than slipped
-           # in. The retention check used to count a corrected word as a lost
-           # one and throw the whole rewrite away, so an enhancer that could
-           # not fix a typo was the entire behaviour anyone saw.
-           "corrected": _corrections(original_prompt, improved),
-           # Words the rewrite no longer says. Reported rather than refused:
-           # a request cannot be put into good English without losing some of
-           # the words it was typed in, and the person approving the rewrite
-           # can see for themselves whether the one it dropped mattered.
-           "dropped": _dropped_words(original_prompt, improved)}
-    if blind:
-        out["note"] = ("Rewritten from your words only. Install the prompt "
-                       "assistant (1.2 GiB) if you want it to look at the "
-                       "picture as well.")
-    return out
+    return _assist_reply(
+        improved, original_prompt,
+        saw_image=bool(staged) and not blind, description=description,
+        removed=removed, changed=changed,
+        # Every reply says which of these happened, so the interface never has
+        # to guess from whether the text came back the same. "Yours was already
+        # fine" and "I tried and the result was worse" look identical
+        # otherwise, and saying the first when the second is true is why this
+        # feature reads as doing nothing.
+        outcome="proposal" if changed else "already_specific",
+        added=_added_words(original_prompt, improved),
+        # Spellings it fixed, named so they are visible rather than slipped in.
+        # The retention check used to count a corrected word as a lost one and
+        # throw the whole rewrite away, so an enhancer that could not fix a
+        # typo was the entire behaviour anyone saw.
+        corrected=_corrections(original_prompt, improved),
+        # Words the rewrite no longer says. Reported rather than refused: a
+        # request cannot be put into good English without losing some of the
+        # words it was typed in, and the person approving the rewrite can see
+        # for themselves whether the one it dropped mattered.
+        #
+        # Diffed against the prompt that was judged, not the one that was
+        # typed. Against the typed one, every word the cleaner had already
+        # stripped came back a second time as a word the rewrite had dropped --
+        # "a masterpiece 8k cat" reported `removed: [masterpiece, 8k]` and
+        # `dropped: [masterpiece]`, and the interface drew both as the same red
+        # chip. The user was told one word had been deliberately removed and
+        # accidentally lost.
+        dropped=_dropped_words(user_prompt, improved),
+        note=("Rewritten from your words only. Install the prompt assistant "
+              "(1.2 GiB) if you want it to look at the picture as well."
+              if blind else ""))
 
 
 def op_unload_assistant(req_id: str, _req: dict[str, Any]) -> dict[str, Any]:

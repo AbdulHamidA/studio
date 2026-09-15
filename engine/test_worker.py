@@ -3620,6 +3620,65 @@ class CorrectEnglishIsNotATypo(unittest.TestCase):
         self.assertFalse(worker._is_word("housse"))
 
 
+class EveryAnswerHasTheSameShape(unittest.TestCase):
+    """A reply used to be whichever dict the returning branch happened to write.
+
+    There were five of them with five different key sets, and the interface
+    reconstructed what it had not been told: `outcome` was absent on two paths,
+    so it fell through a chain of guesses ending at the card for a successful
+    rewrite. The user was shown their own untouched prompt, folklore and all,
+    headed "Suggested prompt", above a button that replaced it with itself.
+
+    Guessing is the wrong repair. One constructor, every field every time, and
+    a stamp saying which contract it was written against.
+    """
+
+    def _assist_source(self):
+        import ast
+
+        with open(os.path.join(HERE, "worker.py"), encoding="utf-8") as handle:
+            src = handle.read()
+        return src, next(n for n in ast.walk(ast.parse(src))
+                         if isinstance(n, ast.FunctionDef) and n.name == "op_assist")
+
+    def test_no_branch_builds_a_reply_of_its_own(self):
+        import ast
+
+        _src, fn = self._assist_source()
+        literals = [n.lineno for n in ast.walk(fn)
+                    if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict)]
+        self.assertEqual(literals, [],
+                         f"dict-literal replies at lines {literals}; a branch "
+                         "that writes its own shape can omit a field")
+
+    def test_every_field_is_present_whatever_happened(self):
+        shapes = [
+            worker._assist_reply("a", "a"),
+            worker._assist_reply("a", "a", unclear=True, outcome="unclear"),
+            worker._assist_reply("a", "a", outcome="rewrite_rejected",
+                                 rejected_because="dropped", attempt="b"),
+            worker._assist_reply("b", "a", changed=True, added=["b"]),
+        ]
+        keys = {frozenset(shape) for shape in shapes}
+        self.assertEqual(len(keys), 1, "the replies do not agree on their keys")
+        for shape in shapes:
+            self.assertEqual(shape["version"], worker.ASSIST_REPLY_VERSION)
+            for field in ("outcome", "changed", "saw_image", "unclear",
+                          "description", "note", "attempt", "rejected_because",
+                          "added", "dropped", "corrected", "removed"):
+                self.assertIn(field, shape)
+
+    def test_a_mistyped_field_is_an_error_not_a_silent_absence(self):
+        """Otherwise the interface simply never sees it, which is harder to find."""
+        with self.assertRaises(ValueError):
+            worker._assist_reply("a", "a", sawimage=True)
+
+    def test_the_caller_cannot_be_overridden_on_prompt_or_original(self):
+        reply = worker._assist_reply("rewritten", "typed")
+        self.assertEqual(reply["prompt"], "rewritten")
+        self.assertEqual(reply["original"], "typed")
+
+
 class RemovedAndDroppedAreDifferentFacts(unittest.TestCase):
     """The same word was reported twice, as two contradictory things.
 
@@ -3646,6 +3705,35 @@ class RemovedAndDroppedAreDifferentFacts(unittest.TestCase):
         self.assertNotIn("masterpiece", dropped)
         self.assertFalse(set(dropped) & set(removed),
                          "a word cannot be both deliberately removed and lost")
+
+    def test_the_reply_diffs_against_the_prompt_that_was_judged(self):
+        """Asserted at the call site, because that is where it was wrong.
+
+        The first attempt at this fixed the comment and the test and not the
+        code: `_dropped_words` was still being called with `original_prompt` in
+        `op_assist` while a test called it with the cleaned prompt directly and
+        passed. A test of a pure function cannot see which argument production
+        hands it.
+        """
+        import ast
+
+        with open(os.path.join(HERE, "worker.py"), encoding="utf-8") as handle:
+            src = handle.read()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "op_assist")
+        calls = [n for n in ast.walk(fn)
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Name)
+                 and n.func.id == "_dropped_words"]
+        self.assertTrue(calls, "op_assist no longer reports dropped words")
+        for call in calls:
+            first = call.args[0]
+            self.assertIsInstance(first, ast.Name)
+            self.assertEqual(
+                first.id, "user_prompt",
+                "dropped words are diffed against the prompt that was judged, "
+                "not the one that was typed -- otherwise every word the "
+                "cleaner stripped is reported a second time as a loss")
 
     def test_a_word_the_rewrite_really_loses_is_still_named(self):
         cleaned, _removed = worker._clean_prompt_request(

@@ -413,8 +413,26 @@ export type AssistOutcome =
   | "unclear";          // the request names nothing that could be drawn
 
 export interface AssistResult {
+  /**
+   * Which contract this reply was written against.
+   *
+   * Not a negotiation -- the engine and this interface ship together. It is a
+   * stamp, so a log or a bug report says which shape it is rather than leaving
+   * the reader to infer it from which fields happen to be present. Optional
+   * here because a reply from a build before it existed carries none.
+   */
+  version?: number;
   prompt: string;
   original: string;
+  /**
+   * Every field below is now sent on every reply.
+   *
+   * They stay optional in the type on purpose: a reply from an older engine
+   * genuinely may not carry them, and the fallback chain in PromptProposal is
+   * what handles that. What changed is that a current engine cannot omit one
+   * by accident -- there was one constructor's worth of shape and five dict
+   * literals writing it, and two of them left `outcome` out.
+   */
   outcome?: AssistOutcome;
   changed?: boolean;
   /** Significant words the rewrite introduced. */

@@ -16,10 +16,26 @@ prompt.
 
 ## Inputs and outputs
 
-- Input: the user's prompt, task (`image`, `edit`, or `video`), and optionally
-  the selected model's constraints.
-- Output: `prompt`, `changed`, and `removed`. If the request is too unclear to
-  edit safely, it returns the original prompt with a rejection reason.
+- Input: the user's prompt and the mode it was written in. The wire values are
+  `generate`, `edit` and `video` — not `image`, which this file said for a
+  while and no code has ever sent. The selected model's constraints are *not*
+  passed today: the host sends the job id, the prompt, the mode and the staged
+  images, and nothing else. A rewrite that depends on what the model supports
+  cannot be written against the request as it stands.
+- Output: one shape, stamped with a `version`, carrying every field on every
+  reply — `prompt`, `original`, `outcome`, `changed`, `added`, `dropped`,
+  `corrected`, `removed`, `attempt`, `rejected_because`, `saw_image`,
+  `description`, `unclear` and `note`. There were five reply shapes with five
+  different key sets before this, and a field's absence was something the
+  interface had to interpret.
+- `removed` is on rejections too. A rejected rewrite hands back the original
+  prompt, and without it there was no sign that a cleaned version had ever been
+  judged — which is the one fact explaining why a rewrite was attempted.
+- `dropped` is diffed against the cleaned prompt, not the typed one, so it
+  cannot name a word `removed` has already named. They are different facts and
+  the interface draws them as the same red chip under different labels.
+- If the request is too unclear to edit safely, it returns the original prompt
+  with `outcome: "unclear"` and a reason.
 - Empty modifiers such as “masterpiece”, “best quality”, resolution labels,
   and stock-art-site boilerplate are removed before the local writer runs.
 - The interface shows whether the prompt changed and exactly which phrases
@@ -42,5 +58,17 @@ kind of review:
 
 Coverage, character membership, and source anchoring are validated in code;
 they are not entrusted to model arithmetic. Editing the manuscript invalidates
-every downstream stage. Editing one panel invalidates only its existing image
-and composed pages.
+every downstream stage.
+
+Editing one panel invalidates what that change actually reaches, decided in one
+place — `staleness` in [boardDoc.ts](../src/lib/boardDoc.ts). A picture is a
+drawing of an action, in a place, of these people: changing one of those
+retires the picture, and changing the caption or the dialogue does not. Every
+edit retires the composed pages. A retired picture goes to the panel's history
+rather than being abandoned in the vault, and a worked-up description is
+cleared when the fields it was written from change, because the prompt prefers
+it to those fields.
+
+Panels carry ids and their work is stored against them, so a panel can be
+moved, split, joined, inserted or removed without its picture and its notes
+staying behind for whatever lands in that position.
