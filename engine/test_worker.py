@@ -3344,6 +3344,90 @@ class CellTextStaysInItsCell(unittest.TestCase):
 
 
 
+class TheExpectedRangeIsACheckNotACap(unittest.TestCase):
+    """The range was enforced, and enforcing it cut the end off the story.
+
+    `_panel_bounds` says what it is for in its own docstring: "Not a target. It
+    exists so a writer that returns three panels for three thousand words, or
+    ninety for three hundred, is recognised as having failed rather than
+    believed." The division was then sliced to the top of that range, which is
+    not recognising anything -- it is deleting the evidence and reporting the
+    shortened length.
+
+    Measured on FX-01 with the installed 4B writer. 74 words derives a range of
+    2-4, and the key requires five essential beats, so a correct board was
+    already impossible. The writer returned eight sensible beats; four were
+    kept. The slice takes the front, and the back of a scene is where its
+    reveal is: the unlocking and the empty platform both went, and the board
+    scored 67% with the ending missing. Unsliced, the same request on the same
+    writer returns seven or eight panels and anchors every essential beat.
+    """
+
+    def test_the_writers_division_is_not_sliced_to_the_range(self):
+        import ast
+
+        with open(os.path.join(HERE, "worker.py"), encoding="utf-8") as handle:
+            src = handle.read()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "op_shotlist")
+        calls = [n for n in ast.walk(fn)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id == "_clean_shotlist"]
+        self.assertTrue(calls)
+        for call in calls:
+            sliced = call.args[0]
+            self.assertIsInstance(sliced, ast.Subscript, "expected beats[:n]")
+            upper = sliced.slice.upper
+            self.assertIsInstance(upper, ast.Name)
+            self.assertEqual(
+                upper.id, "_MAX_PANELS",
+                "the division is bounded by what a board holds, not by the "
+                "expected range -- slicing to `high` cut the last beats off "
+                "the story, and the last beats are where the reveal is")
+
+    def test_a_short_scene_can_still_have_more_beats_than_the_range(self):
+        """The case the bound made impossible.
+
+        FX-01 is 74 words and needs five essential beats. Nothing may stop a
+        division of it from having five panels.
+        """
+        low, high = worker._panel_bounds(74)
+        self.assertLess(high, 5, "this test describes a story the range "
+                                 "cannot accommodate; pick another length")
+        beats = [{"shot": "medium", "subject": "Mira", "action": f"beat {i}",
+                  "setting": "a waiting room", "caption": ""}
+                 for i in range(8)]
+        kept = worker._clean_shotlist(beats[:worker._MAX_PANELS], "")
+        self.assertEqual(len(kept), 8,
+                         f"a division of 8 was cut to the range {low}-{high}")
+
+    def test_a_board_is_still_bounded_by_what_it_holds(self):
+        """Sixty panels is a real limit; the range was not."""
+        beats = [{"shot": "medium", "subject": "x", "action": f"a{i}",
+                  "setting": "y", "caption": ""}
+                 for i in range(worker._MAX_PANELS + 20)]
+        kept = worker._clean_shotlist(beats[:worker._MAX_PANELS], "")
+        self.assertEqual(len(kept), worker._MAX_PANELS)
+
+    def test_the_range_is_still_computed_and_still_reported(self):
+        """Removing the cap must not remove the warning.
+
+        A division far outside what this much prose should produce is worth
+        seeing before forty minutes of drawing. It is now said rather than
+        silently applied.
+        """
+        import ast
+
+        with open(os.path.join(HERE, "worker.py"), encoding="utf-8") as handle:
+            src = handle.read()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "op_shotlist")
+        body = ast.get_source_segment(src, fn) or ""
+        self.assertIn("_panel_bounds(", body)
+        self.assertIn("out_of_range", body)
+        self.assertIn("truncated_from", body)
+
+
 class FixtureFX01(unittest.TestCase):
     """The fixture is a contract, so it is checked before anything uses it.
 

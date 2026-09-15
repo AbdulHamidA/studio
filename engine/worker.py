@@ -4463,7 +4463,32 @@ def op_shotlist(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
         # than quietly becoming a shorter board.
         beats = _shotlist_beats(raw)
         returned = len(beats)
-        panels = _clean_shotlist(beats[:high], story)
+        # Bounded by what a board holds, not by the expected range.
+        #
+        # `_panel_bounds` says so itself: "Not a target. It exists so a writer
+        # that returns three panels for three thousand words, or ninety for
+        # three hundred, is recognised as having failed rather than believed."
+        # It was a check and it was being enforced -- the extra beats sliced
+        # off the end -- which is the opposite of recognising a division and
+        # reporting it.
+        #
+        # Measured on FX-01, whose answer key requires five essential beats.
+        # 74 words divides to a range of 2-4, so five was already impossible;
+        # the writer returned eight sensible beats and four were kept. The
+        # four dropped were the last four, because the slice takes the front,
+        # and the last four are where a scene keeps its reveal: the unlocking
+        # and the empty platform both went, and the board scored 67% with the
+        # ending missing. Asked for eight explicitly -- same story, same
+        # writer, same settings, the bound the only variable -- coverage was
+        # 83% and the one unanchored sentence was the one the key declares
+        # context that no panel has to draw.
+        #
+        # A ratio of one panel to thirty words is not a rule anyone here
+        # established. The project's own research register already says there
+        # is no supported fixed ratio of prose to panels; this is what
+        # enforcing one costs. The range is still computed and still reported
+        # through `out_of_range`, which is what it was written to do.
+        panels = _clean_shotlist(beats[:_MAX_PANELS], story)
         dropped = max(0, returned - len(panels))
         log(req_id, f"{words} words divided into {returned} beats, "
                     f"{len(panels)} kept (expected {low}-{high})")
