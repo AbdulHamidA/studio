@@ -3344,6 +3344,221 @@ class CellTextStaysInItsCell(unittest.TestCase):
 
 
 
+class FixtureFX01(unittest.TestCase):
+    """The fixture is a contract, so it is checked before anything uses it.
+
+    An answer key that has drifted from its own source is worse than no answer
+    key: every test built on it still passes, and all of them are now asserting
+    the wrong thing. These verify the fixture against itself -- the spans quote
+    the source exactly, the beat graph is closed, the entities referenced exist
+    -- so a later edit to either half cannot quietly separate them.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+
+        path = os.path.join(HERE, "fixtures", "fx01.json")
+        with open(path, encoding="utf-8") as handle:
+            cls.fx = json.load(handle)
+
+    def test_every_span_quotes_the_source_exactly(self):
+        source = self.fx["source"]
+        for group in ("beats", "places", "speech"):
+            for item in self.fx[group]:
+                if "span" not in item:
+                    continue
+                start, end = item["span"]
+                with self.subTest(item=item.get("id") or item.get("text")):
+                    self.assertGreaterEqual(start, 0)
+                    self.assertLessEqual(end, len(source))
+                    self.assertLess(start, end, "an empty span anchors nothing")
+                    self.assertTrue(source[start:end].strip())
+
+    def test_the_quoted_text_is_unique_in_the_source(self):
+        """Otherwise an offset and a search disagree about which one is meant."""
+        source = self.fx["source"]
+        for beat in self.fx["beats"]:
+            start, end = beat["span"]
+            with self.subTest(beat=beat["id"]):
+                self.assertEqual(source.count(source[start:end]), 1)
+
+    def test_the_beats_cover_the_story_in_order(self):
+        spans = [b["span"] for b in self.fx["beats"]]
+        self.assertEqual(spans, sorted(spans),
+                         "beats are listed out of source order")
+        for (_a, end), (start, _b) in zip(spans, spans[1:]):
+            self.assertLessEqual(end, start, "two beats claim the same text")
+
+    def test_every_actor_and_dependency_resolves(self):
+        ids = {e["id"] for e in self.fx["entities"]}
+        beats = {b["id"] for b in self.fx["beats"]}
+        for beat in self.fx["beats"]:
+            with self.subTest(beat=beat["id"]):
+                self.assertTrue(set(beat["actors"]) <= ids,
+                                f"{beat['actors']} names someone not in the cast")
+                self.assertTrue(set(beat.get("depends_on", [])) <= beats)
+                self.assertNotIn(beat["id"], beat.get("depends_on", []))
+        for move in self.fx["state_transitions"]:
+            self.assertIn(move["at_beat"], beats)
+
+    def test_the_reveal_runs_to_the_end_of_the_source(self):
+        """FX-05 tests chunking; this is why the case matters.
+
+        "The train had gone" is not a separate beat, it is what the empty
+        platform means -- and it is the last sentence, so any division that
+        stops early loses the point of the scene rather than a detail.
+        """
+        last = self.fx["beats"][-1]
+        self.assertTrue(last["essential"])
+        self.assertEqual(last["span"][1], len(self.fx["source"]))
+
+    def test_no_run_of_words_is_left_unassigned(self):
+        """Every clause belongs to a beat, a place, a line, or to context.
+
+        Character by character rather than sentence by sentence, because the
+        interesting gaps are inside sentences: the setting clause that opens
+        the second one, and the speech embedded in the fourth. Punctuation and
+        spacing between spans are not claimed by anything and do not need to
+        be -- what must not survive is a run of words nothing accounts for.
+        """
+        source = self.fx["source"]
+        covered = [False] * len(source)
+        for group in ("beats", "places", "speech", "context_only"):
+            for item in self.fx[group]:
+                start, end = item["span"]
+                for i in range(start, end):
+                    covered[i] = True
+        gap, orphans = [], []
+        for i, ch in enumerate(source):
+            if covered[i] or not ch.isalnum():
+                if gap:
+                    orphans.append("".join(gap))
+                    gap = []
+            else:
+                gap.append(ch)
+        if gap:
+            orphans.append("".join(gap))
+        self.assertEqual(orphans, [], f"words no part of the key claims: {orphans}")
+
+    def test_the_narrator_is_one_entity_with_the_named_one(self):
+        narrators = [e for e in self.fx["entities"] if e.get("narrator")]
+        self.assertEqual(len(narrators), 1)
+        self.assertIn("Mi", narrators[0]["aliases"])
+        self.assertIn("I", narrators[0]["aliases"])
+
+    def test_the_key_says_what_must_not_be_claimed(self):
+        """A key of only what should be present passes on invented output."""
+        self.assertGreaterEqual(len(self.fx["must_not"]), 4)
+        for item in self.fx["must_not"]:
+            self.assertTrue(item["claim"] and item["why"])
+
+
+class WhatTheCastReadMustNotDoToFX01(unittest.TestCase):
+    """The fixture, pointed at the deterministic parts of the pipeline.
+
+    Nothing here loads a model. What it checks is the code that runs either
+    side of one: how a story is cut into units, how a panel's quote is matched
+    back onto it, and what the coverage figure means -- measured against a
+    human-authored key rather than against the pipeline's own last output.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+
+        with open(os.path.join(HERE, "fixtures", "fx01.json"),
+                  encoding="utf-8") as handle:
+            cls.fx = json.load(handle)
+        cls.story = cls.fx["source"]
+
+    def test_the_story_divides_into_sentences_that_rebuild_it(self):
+        units = worker._story_units(self.story)
+        self.assertGreater(len(units), 4)
+        for unit in units:
+            self.assertIn(unit.strip(), self.story)
+
+    def _quotes(self, *groups):
+        out = []
+        for group in groups:
+            for item in group:
+                start, end = item["span"]
+                out.append({"source": self.story[start:end]})
+        return out
+
+    def test_the_beats_and_the_context_account_for_the_whole_story(self):
+        """Every sentence is assigned to something, or the key is incomplete.
+
+        Source accounting has four dispositions and this fixture uses two of
+        them: a sentence carries a beat, or it is context that no panel has to
+        depict. Anything left over is a sentence the answer key has no opinion
+        about, which makes every coverage assertion below ambiguous.
+        """
+        panels = self._quotes(self.fx["beats"], self.fx["context_only"])
+        coverage = worker._story_coverage(self.story, panels)
+        self.assertEqual(coverage["missing_total"], 0,
+                         f"unaccounted for: {coverage['missing']}")
+
+    def test_the_essential_beats_alone_leave_only_context_behind(self):
+        """What a board can legitimately not draw, and nothing more."""
+        panels = self._quotes(
+            [b for b in self.fx["beats"] if b["essential"]])
+        missing = worker._story_coverage(self.story, panels)["missing"]
+        context = [self.story[c["span"][0]:c["span"][1]] for c in
+                   self.fx["context_only"]]
+        for unit in missing:
+            self.assertTrue(
+                any(unit.strip() in c for c in context),
+                f"{unit!r} is not a beat and is not declared context")
+
+    def test_dropping_the_reveal_is_reported_as_missing(self):
+        """The case the coverage figure exists for."""
+        keep = [b for b in self.fx["beats"] if b["id"] != "b5"]
+        panels = [{"source": self.story[b["span"][0]:b["span"][1]]}
+                  for b in keep]
+        coverage = worker._story_coverage(self.story, panels)
+        self.assertGreater(coverage["missing_total"], 0)
+        self.assertLess(coverage["percent"], 100)
+
+    def test_a_paraphrase_is_snapped_back_to_the_author_s_words(self):
+        """The anchor stores what the user wrote, not what the writer said."""
+        snapped = worker._snap_source(
+            "Mira hands Jonas the brass key from her coat", self.story)
+        self.assertTrue(snapped)
+        self.assertIn(snapped.strip().rstrip("."), self.story)
+
+    def test_anchoring_everything_does_not_prove_the_panels_are_right(self):
+        """BT-024, as a test rather than as a paragraph.
+
+        Every sentence is quoted, so the coverage figure is perfect -- and the
+        panel says Jonas gave Mira the key. Source accounting verifies
+        provenance, not depicted meaning, and a board can score 100% while
+        reversing the one action the scene is about.
+        """
+        units = worker._story_units(self.story)
+        panels = [{"source": u, "action": "Jonas hands Mira the brass key"}
+                  for u in units]
+        coverage = worker._story_coverage(self.story, panels)
+        self.assertEqual(coverage["percent"], 100)
+        self.assertEqual(coverage["missing_total"], 0)
+        # And the key says so.
+        self.assertTrue(
+            any("Mira gave it to Jonas" in q["a"]
+                for q in self.fx["comprehension"]),
+            "the fixture must carry the fact this board gets backwards")
+
+    def test_the_speaker_of_the_only_line_is_not_in_the_cast_of_the_beat(self):
+        """Speech is not presence: the guard is heard through a locked door."""
+        line = next(s for s in self.fx["speech"])
+        self.assertFalse(line["visible"])
+        beat = next(b for b in self.fx["beats"] if b.get("speaker") == "guard")
+        self.assertEqual(beat["actors"], ["guard"])
+        self.assertNotIn("mira", beat["actors"])
+
+    def test_the_narrator_is_detected_so_a_name_can_be_asked_for(self):
+        self.assertTrue(worker._is_first_person(self.story))
+
+
 class CorrectEnglishIsNotATypo(unittest.TestCase):
     """The user's own plurals were shown back to them as spelling mistakes.
 

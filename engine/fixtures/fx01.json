@@ -1,0 +1,215 @@
+{
+  "id": "FX-01",
+  "version": 1,
+  "language": "en",
+  "rights": "Written for this test plan. Redistributable with the project.",
+  "source": "My name is Mira Vale, though Jonas calls me Mi. In the station waiting room, I unhooked the brass key from my red coat and placed it in Jonas's open hand. He closed his fingers around it. A guard called from behind the locked door, “Last train!” I stayed beside the bench while Jonas used the key to unlock the door. When he opened it, he found the platform empty. The train had gone.",
+  "entities": [
+    {
+      "id": "mira",
+      "canonical": "Mira Vale",
+      "aliases": [
+        "Mira",
+        "Mi",
+        "I",
+        "my",
+        "me"
+      ],
+      "narrator": true,
+      "appearance_stated": [
+        "red coat"
+      ],
+      "note": "Appearance is deliberately otherwise unspecified. A cast read must not invent a face, and must not return the narrator as a second person."
+    },
+    {
+      "id": "jonas",
+      "canonical": "Jonas",
+      "aliases": [
+        "Jonas",
+        "he",
+        "his"
+      ],
+      "narrator": false,
+      "appearance_stated": []
+    },
+    {
+      "id": "guard",
+      "canonical": "the guard",
+      "aliases": [
+        "a guard"
+      ],
+      "narrator": false,
+      "appearance_stated": [],
+      "note": "Heard, not necessarily seen. Speaking is not a reason to put someone in frame."
+    }
+  ],
+  "places": [
+    {
+      "id": "waiting-room",
+      "canonical": "the station waiting room",
+      "span": [
+        48,
+        75
+      ]
+    },
+    {
+      "id": "platform",
+      "canonical": "the platform",
+      "span": [
+        336,
+        363
+      ],
+      "note": "Beyond the door, seen only once it is opened."
+    }
+  ],
+  "beats": [
+    {
+      "id": "b1",
+      "essential": true,
+      "actors": [
+        "mira",
+        "jonas"
+      ],
+      "event": "Mira takes the brass key from her red coat and puts it in Jonas's open hand.",
+      "span": [
+        77,
+        153
+      ]
+    },
+    {
+      "id": "b2",
+      "essential": true,
+      "actors": [
+        "jonas"
+      ],
+      "event": "Jonas closes his fingers around the key. Possession has changed.",
+      "span": [
+        155,
+        186
+      ]
+    },
+    {
+      "id": "b3",
+      "essential": true,
+      "actors": [
+        "guard"
+      ],
+      "event": "A guard calls a warning from behind the locked door.",
+      "span": [
+        188,
+        230
+      ],
+      "speaker": "guard",
+      "speech": "Last train!",
+      "note": "Offscreen speech. The door is established as locked here."
+    },
+    {
+      "id": "b4",
+      "essential": true,
+      "actors": [
+        "mira",
+        "jonas"
+      ],
+      "event": "Jonas unlocks the door with the key while Mira stays by the bench.",
+      "span": [
+        246,
+        315
+      ],
+      "depends_on": [
+        "b1",
+        "b2"
+      ],
+      "note": "He can open it because he was given the key. The causal link is the point of the scene."
+    },
+    {
+      "id": "b5",
+      "essential": true,
+      "actors": [
+        "jonas"
+      ],
+      "event": "He opens the door and finds the platform empty. The train has gone.",
+      "span": [
+        317,
+        384
+      ],
+      "depends_on": [
+        "b4"
+      ],
+      "note": "The reveal. It is the last thing in the source and must survive any chunking."
+    }
+  ],
+  "state_transitions": [
+    {
+      "subject": "the brass key",
+      "from": "mira",
+      "to": "jonas",
+      "at_beat": "b2"
+    },
+    {
+      "subject": "the door",
+      "from": "locked",
+      "to": "unlocked and open",
+      "at_beat": "b5"
+    }
+  ],
+  "speech": [
+    {
+      "text": "Last train!",
+      "speaker": "guard",
+      "visible": false,
+      "span": [
+        232,
+        245
+      ]
+    }
+  ],
+  "must_not": [
+    {
+      "claim": "the narrator is a separate person from Mira Vale",
+      "why": "First person. Mira, Mi and I are one entity."
+    },
+    {
+      "claim": "the guard must appear in frame",
+      "why": "Heard from behind a locked door. Speech is not presence."
+    },
+    {
+      "claim": "a train is visible",
+      "why": "The train had gone. Showing one is an adaptation choice, not a fact the source licenses."
+    },
+    {
+      "claim": "Mira opens the door",
+      "why": "She stays beside the bench. Jonas opens it."
+    },
+    {
+      "claim": "Mira's face or hair is described",
+      "why": "The source says only the red coat. Anything else is invention presented as source."
+    }
+  ],
+  "comprehension": [
+    {
+      "q": "Who gave whom the key?",
+      "a": "Mira gave it to Jonas."
+    },
+    {
+      "q": "Who warned them?",
+      "a": "A guard, from behind the door."
+    },
+    {
+      "q": "Why could Jonas open the door?",
+      "a": "Mira had given him the key."
+    },
+    {
+      "q": "What did he find?",
+      "a": "An empty platform. The train had gone."
+    }
+  ],
+  "context_only": [
+    {
+      "span": [
+        0,
+        47
+      ],
+      "why": "Identity, not an event. It establishes that Mira, Mi and the narrator are one person, which the cast read must get right and which no panel has to depict."
+    }
+  ]
+}
