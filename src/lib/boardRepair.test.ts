@@ -23,9 +23,11 @@ const SOURCE = Object.values(
   }) as Record<string, string>,
 )[0];
 
-/** The body of one `const <name> = async (...) => { ... }` in the component. */
+/** The body of one `const <name> = (...) => { ... }` in the component. */
 function fn(name: string): string {
-  const at = SOURCE.indexOf(`const ${name} = async (`);
+  const at = [`const ${name} = async (`, `const ${name} = (`]
+    .map((decl) => SOURCE.indexOf(decl))
+    .find((i) => i > -1) ?? -1;
   expect(at, `${name} is declared`).toBeGreaterThan(-1);
   const open = SOURCE.indexOf("{", at);
   let depth = 0;
@@ -70,12 +72,24 @@ describe("the board repairs a region without redrawing the frame", () => {
   });
 
   it("files the previous picture before overwriting the panel", () => {
+    // `putArt` is the write, since the board keeps its work by panel identity
+    // rather than in an array indexed by position.
     for (const name of ["repair", "drawOne"]) {
       const body = fn(name);
       const filed = body.indexOf("supersede(");
-      const replaced = body.indexOf("setDrawn(");
+      const replaced = body.indexOf("putArt(");
       expect(filed, `${name} files the old picture`).toBeGreaterThan(-1);
+      expect(replaced, `${name} writes the new one`).toBeGreaterThan(-1);
       expect(filed, `${name} files it before replacing it`).toBeLessThan(replaced);
+    }
+  });
+
+  it("writes a picture against the panel, never against a position", () => {
+    // The defect the document exists for. An index written into a shared
+    // array is correct only until something moves.
+    for (const name of ["repair", "drawOne", "restoreVariant"]) {
+      expect(fn(name), `${name} writes by position`)
+        .not.toMatch(/setDrawn\(|setRedraws\(|setVariants\(/);
     }
   });
 
@@ -84,5 +98,41 @@ describe("the board repairs a region without redrawing the frame", () => {
     for (const name of ["repair", "drawOne"]) {
       expect(fn(name)).toContain("setPages([]); setOverflow([]);");
     }
+  });
+});
+
+describe("the board edits a panel without destroying its picture", () => {
+  it("decides staleness in one place rather than at the call site", () => {
+    // Every edit used to retire the picture, including a caption fix, so
+    // correcting a comma cost a five-minute render and came back with a
+    // different face. The rule is `staleness` in boardDoc and is tested there.
+    const body = fn("edit");
+    expect(body).toContain("editPanel(doc, panel.id, patch)");
+    expect(body).toContain("stale.art");
+    expect(body).not.toMatch(/setDrawn\(|next\[i\] = null/);
+  });
+
+  it("retires the pages on any edit and the art only on some", () => {
+    const body = fn("edit");
+    const art = body.indexOf("if (stale.art)");
+    const pages = body.indexOf("if (stale.pages)");
+    expect(art).toBeGreaterThan(-1);
+    expect(pages).toBeGreaterThan(-1);
+  });
+
+  it("moves a panel by identity, through the tested operations", () => {
+    for (const [name, op] of [
+      ["movePanel", "movePanelIn"], ["addPanelAfter", "insertPanel"],
+      ["deletePanel", "removePanel"], ["splitPanel", "splitPanelIn"],
+      ["mergePanel", "mergePanelIn"],
+    ]) {
+      expect(fn(name), `${name} uses ${op}`).toContain(op);
+    }
+  });
+
+  it("renders the panel list keyed by identity", () => {
+    // React reuses a row by key. Keyed by position, a reordered board reused
+    // the wrong row for the panel now standing there.
+    expect(SOURCE).toContain("key={p.id}");
   });
 });

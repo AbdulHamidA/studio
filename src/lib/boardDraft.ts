@@ -21,6 +21,21 @@ export interface Coverage {
 }
 
 export interface BoardDraft {
+  /**
+   * Still 1, and deliberately.
+   *
+   * The board stores its work by panel identity now rather than by position,
+   * but the draft on disk did not have to change to carry that: the panels
+   * gained an `id` field, which an older build ignores, and the parallel
+   * arrays are still written out beside them. They are derived from the
+   * identities at the moment of saving, so they are exactly what they always
+   * were, and the round trip through them loses nothing.
+   *
+   * That makes a draft readable by both builds, which matters more here than
+   * a version number does. A migration that cannot be opened by the build the
+   * user had yesterday is a migration that has to be right the first time,
+   * and this one holds every manuscript they have written.
+   */
   version: 1;
   story: string;
   cast: Cast | null;
@@ -59,7 +74,7 @@ export interface BoardDraft {
    * this carries none, which reads correctly as "nothing known", not "nothing
    * lost" -- the board says so.
    */
-  overflow?: TextOverflow[];
+  overflow?: (TextOverflow & { panelId?: string })[];
   /**
    * The pictures a panel used to have, oldest first, by panel index.
    *

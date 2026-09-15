@@ -5,6 +5,10 @@ import type { Cast, EngineProgress, ModelStatus, Panel } from "../lib/types";
 import { ImageDrop, JobProgress } from "./shared";
 import MaskCanvas from "./MaskCanvas";
 import { loadPref, savePref } from "../lib/prefs";
+import { anchorOverflow, artOf, fromArrays, identify, setArt, toArrays,
+         edit as editPanel, insert as insertPanel, merge as mergePanelIn,
+         move as movePanelIn, remove as removePanel, split as splitPanelIn,
+         type BoardDoc, type PanelArt } from "../lib/boardDoc";
 import { loadBoardDraft, loadSavedBoard, type BoardDraft, type Coverage }
   from "../lib/boardDraft";
 import { CUSTOM_STYLE, STYLES, isKnownStyle, lockCustomStyle, lockStyle,
@@ -122,9 +126,38 @@ export default function Storyboard({
     () => lockStyle(loadPref("boardStyle", STYLES[0].id)));
   const [character, setCharacter] = useState("");
 
-  const [panels, setPanels] = useState<Panel[] | null>(null);
+  /**
+   * The board's panels and the work attached to them, by identity.
+   *
+   * This used to be five arrays lined up by position -- panels, drawn,
+   * redraws, notes, variants -- and position is not identity. Nothing could
+   * move: reordering two panels swapped their pictures and notes, inserting
+   * one at the top shifted every note down by one, and deleting one moved the
+   * whole board up. The arrays stayed the right length, so nothing was
+   * detectably wrong until someone read the pages.
+   *
+   * The arrays below are derived from it, so every place that reads
+   * `drawn[i]` is unchanged. Nothing is written by position any more.
+   */
+  const [doc, setDoc] = useState<BoardDoc>({ panels: [], art: {} });
+  /**
+   * Whether this story has been divided at all.
+   *
+   * Distinct from having no panels. `null` panels is the state before the
+   * board has been planned, and it is what gates the whole workflow; an empty
+   * division would be a different and much stranger thing.
+   */
+  const [divided, setDivided] = useState(false);
+  const panels = useMemo(
+    () => (divided ? doc.panels : null), [divided, doc.panels]);
+  const { drawn, redraws, notes, variants } = useMemo(
+    () => toArrays(doc), [doc]);
+  /** One panel's work, by the position the interface is showing it at. */
+  const artAt = (i: number) => artOf(doc, doc.panels[i]?.id ?? "");
+  /** Change one panel's work, found by position and stored by identity. */
+  const putArt = (i: number, patch: Partial<PanelArt>) =>
+    setDoc((d) => (d.panels[i] ? setArt(d, d.panels[i].id, patch) : d));
   const [sheet, setSheet] = useState<string | null>(null);
-  const [drawn, setDrawn] = useState<(string | null)[]>([]);
   /**
    * The same list, readable inside a running batch.
    *
@@ -309,17 +342,6 @@ export default function Storyboard({
   /** Set when the user cancels, checked between panels. Cancelling the job in
    *  flight only ever stopped one panel; the loop then started the next. */
   const stop = useRef(false);
-  /** How many times each panel has been redrawn, so a retry gets a new seed. */
-  const [redraws, setRedraws] = useState<number[]>([]);
-  /**
-   * A written correction for one panel, kept with it.
-   *
-   * The repair for a wrong frame is a sentence about what is wrong with it --
-   * "older, grey at the temples", "pull back so the window is in frame" --
-   * not another roll of the dice. It is appended to that panel's brief and
-   * survives every later redraw, so the panel stays the one you asked for.
-   */
-  const [notes, setNotes] = useState<Record<number, string>>({});
   const [elapsed, setElapsed] = useState(0);
   const [composing, setComposing] = useState(false);
   const [pages, setPages] = useState<string[]>([]);
@@ -335,16 +357,22 @@ export default function Storyboard({
    * Cleared wherever `pages` is, because it describes those pages and nothing
    * else. Kept in the draft, because they are kept too.
    */
-  const [overflow, setOverflow] = useState<TextOverflow[]>([]);
+  const [overflow, setOverflow] =
+    useState<(TextOverflow & { panelId?: string })[]>([]);
   /**
-   * The pictures each panel used to have, oldest first.
+   * The overflow report, pointing at where its panels are now.
    *
-   * A correction that makes a panel worse used to be unrecoverable: the id in
-   * `drawn` was overwritten and the board had no other reference to the
-   * picture, even though it was still sealed in the vault. Every draw that
-   * replaces an existing panel pushes the old id here first.
+   * Stored with the identity of the panel that lost text, because a stored
+   * position stops being true the moment the board is reordered -- and a
+   * warning that names the wrong panel is worse than none.
    */
-  const [variants, setVariants] = useState<Record<number, string[]>>({});
+  const overflowNow = useMemo(
+    () => overflow.flatMap((o) => {
+      if (!o.panelId) return [o];
+      const at = doc.panels.findIndex((x) => x.id === o.panelId);
+      return at < 0 ? [] : [{ ...o, panel: at }];
+    }),
+    [overflow, doc.panels]);
   /** The panel whose region is being painted, and the painted mask itself. */
   /**
    * Why the board is not being written down, when it is not.
@@ -358,6 +386,8 @@ export default function Storyboard({
   const [unsaved, setUnsaved] = useState<string | null>(null);
   /** An earlier state of this board, offered when one is worth offering. */
   const [previous, setPrevious] = useState<Partial<BoardDraft> | null>(null);
+  /** Which panel's Remove button is asking to be pressed again. */
+  const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
   const [repairing, setRepairing] = useState<number | null>(null);
   const [maskBytes, setMaskBytes] = useState<Uint8Array | null>(null);
   /** A page sets panels in rows with gutters; a strip stacks them at one
@@ -410,14 +440,21 @@ export default function Storyboard({
         setCast(draft.cast ?? null);
         setProjectId(draft.projectId ?? null);
         setCharacter(typeof draft.character === "string" ? draft.character : "");
-        setPanels(Array.isArray(draft.panels) ? draft.panels : null);
+        // A v1 draft holds the parallel arrays; a v2 one holds the same
+        // work already keyed by panel id. `fromArrays` reads the arrays by
+        // position exactly once -- here, where the positions are still the
+        // truth -- and identify() keeps ids a v2 draft already has, so a
+        // reopen does not renumber the board and detach every picture.
+        setDivided(Array.isArray(draft.panels));
+        setDoc(fromArrays(
+          Array.isArray(draft.panels) ? draft.panels : null,
+          Array.isArray(draft.drawn) ? draft.drawn : [],
+          Array.isArray(draft.redraws) ? draft.redraws : [],
+          draft.notes ?? {},
+          draft.variants ?? {}));
         setSheet(typeof draft.sheet === "string" ? draft.sheet : null);
-        setDrawn(Array.isArray(draft.drawn) ? draft.drawn : []);
-        setRedraws(Array.isArray(draft.redraws) ? draft.redraws : []);
-        setNotes(draft.notes ?? {});
         setPages(Array.isArray(draft.pages) ? draft.pages : []);
         setOverflow(Array.isArray(draft.overflow) ? draft.overflow : []);
-        setVariants(draft.variants ?? {});
         setOwnSheet(Array.isArray(draft.ownSheet) ? draft.ownSheet : []);
         setPlaceSheets(draft.placeSheets ?? {});
         setCoverage(draft.coverage ?? null);
@@ -600,8 +637,9 @@ export default function Storyboard({
     setStory(next);
     // Every downstream decision was made from the previous manuscript. Keeping
     // any of it would quietly mix two different stories.
-    setCast(null); setPanels(null); setProjectId(null); setSheet(null);
-    setDrawn([]); setRedraws([]); setNotes({}); setPages([]); setOverflow([]);
+    setCast(null); setProjectId(null); setSheet(null);
+    setDoc({ panels: [], art: {} }); setDivided(false);
+    setPages([]); setOverflow([]);
     setPlaceSheets({}); setCoverage(null); setSelected(0);
   };
 
@@ -631,7 +669,8 @@ export default function Storyboard({
     if (next.id === style.id && next.words === style.words) return;
     if (drawnInStyle && confirmStyle !== id) { setConfirmStyle(id); return; }
     setStyle(next);
-    setSheet(null); setDrawn([]); setRedraws([]);
+    setSheet(null);
+    setDoc((d) => ({ ...d, art: {} }));
     setPlaceSheets({}); setPages([]); setOverflow([]);
     setConfirmStyle(null);
   };
@@ -702,13 +741,14 @@ export default function Storyboard({
   const divide = async () => {
     if (!story.trim()) { notify("Write the story first.", true); return; }
     const id = newJobId();
-    setStage("dividing"); setJobId(id); setPanels(null); setDrawn([]); setSheet(null);
+    setStage("dividing"); setJobId(id); setSheet(null);
+    setDoc({ panels: [], art: {} }); setDivided(false);
     // Everything keyed by panel index has to go with the panels. A note is a
     // correction to one moment in the story; carried across a fresh division
     // it silently attaches to a different moment, and the panel it was written
     // for is drawn without it. Same for the redraw counters, which move the
     // seed on, and for the selection, which can now point past the end.
-    setNotes({}); setRedraws([]); setSelected(0); setPages([]); setOverflow([]);
+    setSelected(0); setPages([]); setOverflow([]);
     // Rooms are keyed by scene number, and scene 1 of a new story is not scene
     // 1 of the last one. Kept, they would be reused: buildPlaces skips any
     // scene that already has a sheet, so the new comic would quietly inherit
@@ -717,7 +757,10 @@ export default function Storyboard({
     const un = await onEngineProgress((p) => { if (p.job_id === id) setProg(p); });
     try {
       const r = await api.shotList(id, story, null);
-      setPanels(r.panels);
+      // A fresh division, so fresh identities and no art: these are not the
+      // panels that were drawn before, whatever their positions were.
+      setDoc(fromArrays(r.panels));
+      setDivided(true);
       setCoverage(r.coverage ?? null);
       // The writer is told to vary the shot sizes and nothing checked whether
       // it had. Said now, before any of it is drawn, because the fix is to
@@ -734,7 +777,6 @@ export default function Storyboard({
       // A fresh division is a different comic, so it gets its own identity
       // rather than adding panels to whatever was in the library before.
       setProjectId(newJobId());
-      setDrawn(new Array(r.panels.length).fill(null));
       if (r.too_long) {
         // Sixty panels is as much as one board holds, so a chapter this long
         // becomes a part of itself. Say that, rather than quoting a range.
@@ -873,21 +915,16 @@ export default function Storyboard({
 
     stop.current = false;
     setDone(0);
-    setRedraws((current) => Array.from(
-      { length: panels.length }, (_, i) => current[i] ?? 0));
+    // The two blocks that used to sit here resized `redraws` and `drawn` to
+    // the panel count and copied the old values across by position. Art is
+    // keyed by panel now, so there is no length to keep in step and nothing
+    // to copy: a later batch already adds to what is there, because what is
+    // there is attached to the panels rather than to their positions.
     setElapsed(0);
     const started = Date.now();
     if (timer.current) window.clearInterval(timer.current);
     timer.current = window.setInterval(
       () => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
-    // Only a first run starts from nothing. A later batch adds to what is
-    // already there, which is the whole point of drawing in batches.
-    setDrawn((d) => {
-      const n = new Array(panels.length).fill(null);
-      for (let i = 0; i < Math.min(d.length, n.length); i++) n[i] = d[i];
-      return n;
-    });
-
     // The sheet is the anchor. Every panel references it, which is the whole
     // reason the character survives from one shot to the next -- so if the
     // user brought their own, there is nothing to cast.
@@ -1010,6 +1047,7 @@ export default function Storyboard({
   useEffect(() => {
     setRepairing(null);
     setMaskBytes(null);
+    setConfirmDelete(null);
   }, [selected, drawn]);
 
   /**
@@ -1021,11 +1059,9 @@ export default function Storyboard({
    */
   const supersede = (i: number, previous: string | null | undefined) => {
     if (!previous) return;
-    setVariants((v) => {
-      const had = v[i] ?? [];
-      if (had.includes(previous)) return v;
-      return { ...v, [i]: [...had, previous] };
-    });
+    const had = artAt(i).variants;
+    if (had.includes(previous)) return;
+    putArt(i, { variants: [...had, previous] });
   };
 
   /**
@@ -1036,11 +1072,11 @@ export default function Storyboard({
    */
   const restoreVariant = (i: number, id: string) => {
     const current = drawnRef.current[i] ?? drawn[i];
-    setVariants((v) => {
-      const rest = (v[i] ?? []).filter((x) => x !== id);
-      return { ...v, [i]: current ? [...rest, current] : rest };
+    const rest = artAt(i).variants.filter((x) => x !== id);
+    putArt(i, {
+      drawn: id,
+      variants: current ? [...rest, current] : rest,
     });
-    setDrawn((d) => { const n = [...d]; n[i] = id; return n; });
     drawnRef.current = (() => {
       const n = [...drawnRef.current]; n[i] = id; return n;
     })();
@@ -1100,7 +1136,7 @@ export default function Storyboard({
       // Before the id is overwritten, not after: this is the only moment the
       // board still knows what the panel used to be.
       if (res[0]) supersede(i, drawnRef.current[i]);
-      setDrawn((d) => { const n = [...d]; n[i] = res[0] ?? null; return n; });
+      putArt(i, { drawn: res[0] ?? null });
       // Immediately, not on the next render: the next panel in this batch asks
       // for it before React has committed the state above.
       drawnRef.current = (() => {
@@ -1140,7 +1176,15 @@ export default function Storyboard({
     const un = await onEngineProgress((p) => { if (p.job_id === id) setProg(p); });
     try {
       const r = await api.enrichPanels(id, panels, style.words, cast?.places ?? []);
-      setPanels(r.panels);
+      // The same panels, worked up. The engine returns them in order and does
+      // not carry ids, so the ids are put back by position -- which is safe
+      // here and only here, because this is the round trip that cannot
+      // reorder or drop one. Everything that can goes through boardDoc.
+      setDoc((d) => ({
+        ...d,
+        panels: identify(r.panels.map(
+          (p, i) => ({ ...p, id: d.panels[i]?.id }) as Panel)),
+      }));
       const filled = r.panels.filter((p) => (p.description ?? "").trim()).length;
       notify(filled === r.panels.length
         ? "Every panel worked up. Read them before drawing."
@@ -1152,22 +1196,94 @@ export default function Storyboard({
     }
   };
 
-  /** Change one field of one panel. The division is a draft, not a verdict. */
+  /**
+   * Change one field of one panel. The division is a draft, not a verdict.
+   *
+   * What the change invalidates is decided in one place -- `staleness` in
+   * boardDoc -- rather than here. Every edit used to retire the picture,
+   * including a caption fix, so correcting a comma cost a five-minute render
+   * and came back with a different face. A picture is a drawing of an action,
+   * in a place, of these people; change one of those and it is a picture of
+   * something else, and change the lettering and it is not.
+   */
   const edit = (i: number, patch: Partial<Panel>) => {
-    setPanels((ps) => {
-      if (!ps) return ps;
-      const n = [...ps];
-      n[i] = { ...n[i], ...patch };
-      return n;
+    const panel = doc.panels[i];
+    if (!panel) return;
+    const { doc: next, stale } = editPanel(doc, panel.id, patch);
+    setDoc(next);
+    if (stale.art) {
+      // Retired, not deleted: it goes to the panel's history, where it is one
+      // click away if the edit turns out to be the mistake.
+      drawnRef.current = (() => {
+        const n = [...drawnRef.current]; n[i] = null; return n;
+      })();
+    }
+    if (stale.pages) { setPages([]); setOverflow([]); }
+  };
+
+  /**
+   * Move, add, remove, split or join a panel.
+   *
+   * None of this was possible while the board's work lived in arrays lined up
+   * by position: moving a panel left its picture and its note behind for
+   * whatever landed in that slot. The operations are in boardDoc, by identity,
+   * and tested there -- this keeps the selection pointing at the panel the
+   * user was looking at rather than at the position it used to occupy.
+   */
+  const structural = (
+    op: (d: BoardDoc) => BoardDoc, keep: string | null, at?: number,
+  ) => {
+    setDoc((d) => {
+      const next = op(d);
+      const to = keep ? next.panels.findIndex((x) => x.id === keep) : at ?? 0;
+      setSelected(Math.max(0, Math.min(to === -1 ? 0 : to,
+                                       next.panels.length - 1)));
+      return next;
     });
-    // The existing picture represents the old brief. Keep it in the Vault,
-    // but mark this slot for drawing again instead of presenting stale art as
-    // though it matched the edited panel.
-    setDrawn((items) => {
-      if (!items[i]) return items;
-      const next = [...items]; next[i] = null; return next;
-    });
+    // The pages were composed from an order that no longer exists.
     setPages([]); setOverflow([]);
+  };
+
+  const movePanel = (i: number, by: number) => {
+    const panel = doc.panels[i];
+    if (!panel) return;
+    const to = i + by;
+    if (to < 0 || to >= doc.panels.length) return;
+    structural((d) => movePanelIn(d, panel.id, to), panel.id);
+  };
+
+  const addPanelAfter = (i: number) => {
+    structural((d) => insertPanel(d, i + 1, {
+      shot: "medium", subject: "", action: "", setting: "",
+      character_in_frame: false, caption: "",
+      scene: doc.panels[i]?.scene ?? 1,
+    }), null, i + 1);
+    notify("An empty panel. Describe it, then draw it on the next run.");
+  };
+
+  const deletePanel = (i: number) => {
+    const panel = doc.panels[i];
+    if (!panel) return;
+    const had = artOf(doc, panel.id).drawn;
+    structural((d) => removePanel(d, panel.id).doc, null, Math.max(0, i - 1));
+    notify(had
+      ? `Panel ${i + 1} removed. Its picture stays in the Vault.`
+      : `Panel ${i + 1} removed.`);
+  };
+
+  const splitPanel = (i: number) => {
+    const panel = doc.panels[i];
+    if (!panel) return;
+    structural((d) => splitPanelIn(d, panel.id, { action: "" }), panel.id);
+    notify("Split in two. The picture stays with the first half — which half "
+           + "it really belongs to is a judgement about the picture.");
+  };
+
+  const mergePanel = (i: number) => {
+    const panel = doc.panels[i];
+    if (!panel || i + 1 >= doc.panels.length) return;
+    structural((d) => mergePanelIn(d, panel.id), panel.id);
+    notify("Joined. The second panel's picture is kept in this one's history.");
   };
 
   /**
@@ -1224,9 +1340,8 @@ export default function Storyboard({
         project: projectId, project_name: projectName, project_index: i,
       });
       if (!res[0]) { notify("The engine returned no picture.", true); return; }
-      setRedraws((r) => { const n = [...r]; n[i] = nextRedraw; return n; });
       supersede(i, current);
-      setDrawn((d) => { const n = [...d]; n[i] = res[0]; return n; });
+      putArt(i, { drawn: res[0], redraws: nextRedraw });
       drawnRef.current = (() => {
         const n = [...drawnRef.current]; n[i] = res[0]; return n;
       })();
@@ -1254,7 +1369,7 @@ export default function Storyboard({
     if (!drawn[i]) { notify("Draw this panel first.", true); return; }
     stop.current = false;
     const nextRedraw = (redraws[i] ?? 0) + 1;
-    setRedraws((r) => { const n = [...r]; n[i] = nextRedraw; return n; });
+    putArt(i, { redraws: nextRedraw });
     setStage("drawing");
     await drawOne(i, sheet, placeSheets, nextRedraw);
     setStage("idle"); setProg(null); setJobId(null);
@@ -1275,8 +1390,8 @@ export default function Storyboard({
                         dialogue: p.dialogue ?? [], scene: p.scene ?? 1,
                         at: i }))
       .filter((x): x is Ready => Boolean(x.id));
-    /** Board panel index for each panel the engine will be handed. */
-    const sources = pairs.map((x) => x.at);
+    /** Panel identity for each panel the engine will be handed, in order. */
+    const sentIds = pairs.map((x) => doc.panels[x.at]?.id ?? "");
     if (pairs.length === 0) { notify("Draw at least one panel first.", true); return; }
 
     setComposing(true);
@@ -1290,13 +1405,14 @@ export default function Storyboard({
         pairs.map((p) => p.scene),
         layout, projectId, projectName);
       setPages(made.pages);
-      // The engine counts the panels it was given, which are the drawn ones.
-      // The user counts panels on the board, and the two differ by every gap
-      // in it -- so a report about "panel 3" would point at the wrong panel on
-      // any board that is not finished. Mapped back here, once.
-      const lost = made.overflow.map((o) => ({
-        ...o, panel: sources[o.panel] ?? o.panel,
-      }));
+      // The engine counts the panels it was given, which are the drawn ones
+      // in the order they were sent. The user counts panels on the board, and
+      // the two differ by every gap in it -- so a report about "panel 3" would
+      // name the wrong panel on any board that is not finished. Anchored to
+      // identity rather than position, so it also survives the board being
+      // reordered afterwards, and a report about a panel that has since been
+      // deleted is dropped rather than left naming whatever is there now.
+      const lost = anchorOverflow(made.overflow, sentIds, doc);
       setOverflow(lost);
       onProduced();
       notify(made.pages.length === 1
@@ -1435,7 +1551,7 @@ export default function Storyboard({
                     so the story and the board point at each other. */}
                 {panels.map((p, i) => (
                   <span
-                    key={i}
+                    key={p.id}
                     className={"ms-beat" + (i === selected ? " lit" : "")}
                     onClick={() => setSelected(i)}
                   >
@@ -1474,8 +1590,9 @@ export default function Storyboard({
                       setConfirmReset("prose"); return;
                     }
                     setConfirmReset(null);
-                    setPanels(null); setProjectId(null); setSheet(null);
-                    setDrawn([]); setRedraws([]); setNotes({}); setPages([]); setOverflow([]);
+                    setProjectId(null); setSheet(null);
+                    setDoc({ panels: [], art: {} }); setDivided(false);
+                    setPages([]); setOverflow([]);
                     setPlaceSheets({}); setCoverage(null); setSelected(0);
                   }}>
                   {confirmReset === "prose"
@@ -1552,10 +1669,10 @@ export default function Storyboard({
                 <div className="sub-head">
                   {pages.length === 1 ? "The page" : `${pages.length} pages`}
                 </div>
-                {overflow.length > 0 && (
+                {overflowNow.length > 0 && (
                   <div className="notice warn" style={{ marginBottom: 10 }}>
                     <strong>
-                      {overflow.length} panel{overflow.length === 1 ? "" : "s"}
+                      {overflowNow.length} panel{overflowNow.length === 1 ? "" : "s"}
                       {" "}lost text on the page
                     </strong>
                     <details>
@@ -1564,7 +1681,7 @@ export default function Storyboard({
                         the whole script. Shorten the text or give the panel a
                         wider cell, then compose again.
                       </summary>
-                      {overflow.map((o) => {
+                      {overflowNow.map((o) => {
                         const missed = o.spoken - o.lettered;
                         const parts = [
                           missed > 0
@@ -1845,6 +1962,53 @@ export default function Storyboard({
                   </div>
                 )}
                 <div className="field">
+                  <label>
+                    This panel's place in the board
+                    <em>the division is a draft</em>
+                  </label>
+                  {/* Every one of these was unsafe until the board stopped
+                      keeping its work in arrays lined up by position. Moving a
+                      panel left its picture and its note behind for whatever
+                      landed in the slot, and the arrays stayed the right
+                      length, so nothing looked wrong until the pages were
+                      read. */}
+                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                    <button className="btn small" disabled={busy || selIndex === 0}
+                            title="Move this panel earlier"
+                            onClick={() => movePanel(selIndex, -1)}>↑ Earlier</button>
+                    <button className="btn small"
+                            disabled={busy || selIndex >= panels.length - 1}
+                            title="Move this panel later"
+                            onClick={() => movePanel(selIndex, 1)}>↓ Later</button>
+                    <button className="btn small" disabled={busy}
+                            title="Add an empty panel after this one"
+                            onClick={() => addPanelAfter(selIndex)}>+ After</button>
+                    <button className="btn small" disabled={busy}
+                            title="Split this beat into two panels"
+                            onClick={() => splitPanel(selIndex)}>Split</button>
+                    <button className="btn small"
+                            disabled={busy || selIndex >= panels.length - 1}
+                            title="Join this panel with the one after it"
+                            onClick={() => mergePanel(selIndex)}>Join next</button>
+                    <button className={"btn small"
+                            + (confirmDelete === selIndex ? " danger" : "")}
+                            disabled={busy || panels.length < 2}
+                            onClick={() => {
+                              if (confirmDelete !== selIndex) {
+                                setConfirmDelete(selIndex); return;
+                              }
+                              setConfirmDelete(null);
+                              deletePanel(selIndex);
+                            }}>
+                      {confirmDelete === selIndex
+                        ? (drawn[selIndex]
+                            ? "Remove it? The picture stays in the Vault"
+                            : "Remove it?")
+                        : "Remove"}
+                    </button>
+                  </div>
+                </div>
+                <div className="field">
                   <label>The brief <em>the exact words asked for</em></label>
                   <div style={{ fontSize: 11, lineHeight: 1.6, color: "var(--text-dim)",
                                 background: "var(--bg-sunk)", borderRadius: 5,
@@ -1862,7 +2026,7 @@ export default function Storyboard({
                       placeholder="older, grey at the temples"
                       style={{ borderStyle: notes[selIndex]?.trim() ? "solid" : "dashed" }}
                       onChange={(e) =>
-                        setNotes((n) => ({ ...n, [selIndex]: e.target.value }))}
+                        putArt(selIndex, { note: e.target.value })}
                     />
                     <button className="btn small full" style={{ marginTop: 6 }}
                             disabled={busy} onClick={() => void redraw(selIndex)}>
@@ -2147,9 +2311,10 @@ export default function Storyboard({
                 setConfirmReset("new"); return;
               }
               setConfirmReset(null);
-              setStory(""); setCast(null); setPanels(null); setProjectId(null);
-              setCharacter(""); setSheet(null); setDrawn([]); setRedraws([]);
-              setNotes({}); setPages([]); setOverflow([]); setOwnSheet([]); setPlaceSheets({});
+              setStory(""); setCast(null); setProjectId(null);
+              setCharacter(""); setSheet(null);
+              setDoc({ panels: [], art: {} }); setDivided(false);
+              setPages([]); setOverflow([]); setOwnSheet([]); setPlaceSheets({});
               setCoverage(null);
               setSelected(0);
             }}>
