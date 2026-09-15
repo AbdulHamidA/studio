@@ -98,11 +98,11 @@ three needs a schema field.
 
 | Milestone | Goal | Advances | Status |
 | --- | --- | --- | --- |
-| N1 | An edit is routed as an edit, with or without a reader | PE-103, AF-02 | TODO |
-| N2 | A rewrite cannot swap the subject for a longer word | — (gap 1) | TODO |
-| N3 | The proposal shows what it knows and says each thing once | PE-404, AF-12 | TODO |
+| N1 | An edit is routed as an edit, with or without a reader | PE-103, AF-02 | DONE — `1d24b43` |
+| N2 | A rewrite cannot swap the subject for a longer word | — (gap 1) | DONE — `1d24b43`, partial |
+| N3 | The proposal shows what it knows and says each thing once | PE-404, AF-12 | DONE — `1d24b43` |
 | N4 | Cancel cancels; both helpers release each other | PE-402, AF-09/10 | TODO |
-| N5 | A rejection says what was stripped | — (gap 3, pipeline doc) | TODO |
+| N5 | A rejection says what was stripped | — (gap 3, pipeline doc) | DONE — `1d24b43` |
 | N6 | The typo list stops flagging plurals | — (gap 2) | TODO |
 | N7 | A UI harness, before the tasks that assume one | PE-401 | TODO |
 | N8 | Versioned request/result schema | PE-101 | TODO |
@@ -120,11 +120,25 @@ mode alone and make the vision call conditional inside the branch.
 
 ### N2 — bound the prefix match
 
-Three lines in `_dropped_words`: require the lengths to be within one before
-accepting a prefix match. Verified against the full suite on a scratch copy —
-289 passing, no regressions, `rainy` → `wet asphalt` still succeeds through the
-existing repair path — and afterwards `cat → catalogue`, `car → cardigan`,
-`man → mango` and `cars → carts` are all rejected.
+Done in `_dropped_words`: stems must agree to within one letter. `cat →
+catalogue`, `car → cardigan`, `man → mango` and `bell → bellows` are now
+reported as losses, and `_carries` refuses them.
+
+**Partial, and the residue is named.** The bound is one letter and not zero
+because zero fails two of the file's own inflection tests — `a man runs`
+against `running`, and the `RepairDroppedWords` cases. That leaves `cars →
+carts` accepted, since the stems `car` and `cart` agree to within a letter. One
+letter of slack is the price of not calling every English verb a dropped word.
+
+`_keeps_intent` is **deliberately unchanged**, against the audit's framing. It
+is an `any` over content words — one survivor passes, which is what a floor is
+for — so `a catalogue on a chair` passes on `chair` alone, and correctly. Its
+prefix match also cannot be bounded by length: `red → reddish` grows four
+letters legitimately while `man → mango` grows two and does not, so no
+threshold separates them. The place to catch a swapped subject is the stem
+comparison, and that is where the bound went. The deeper fix the audit points
+at — routing the enhancer through `_carries`, which already exists and already
+checks every content word — is still open and belongs with N8.
 
 ### N3 — the proposal tells the truth about itself
 
@@ -143,9 +157,9 @@ Small, and each one is a specific line.
 
 ### N5 — a rejection is not silent about cleaning
 
-Carry `removed` on the rejection replies. Today a rejected rewrite hands back
-the original prompt with its folklore intact and no indication that anything was
-ever stripped from the version that was judged.
+Done alongside N3: all three rejection replies carry `removed`. A rejected
+rewrite no longer hands back the original prompt with its folklore intact and
+no indication that a cleaned version was ever judged.
 
 ### N6 — the dictionary
 
@@ -174,9 +188,22 @@ better-formed prompt produces a better picture. A paired-image probe on the
 current build, before any of this, would cost far less than PE-501 and would
 say whether the writer is worth the scaffolding.
 
+## What N1–N3 and N5 do not establish
+
+No image has been generated or compared. The routing change means an edit with
+no reader installed now takes the edit path, and the composed instruction is the
+one that was already tested — but whether the resulting picture is better is
+unmeasured, and this is exactly the claim §6.5 of the audit warns against
+making. The paired-image probe below is still the right next thing.
+
 ## Change log
 
 - 2026-09-16: Created. Verified the three enhancer documents against the code,
   corrected five claims, named four already-shipped capabilities the tracker
   prices as new and seven gaps it does not mention, and set an execution order
   that does not begin with a schema.
+- 2026-09-16: N1, N3 and N5 landed at `1d24b43`; N2 landed partially, with its
+  residue named above. `scripts/preflight.sh` clean. One correction to this
+  file's own first draft: hardening `_keeps_intent` was attempted, broke
+  existing inflection tests, and was reverted — the audit's AF-04 reading of
+  that function was right that it is weak and wrong about where to fix it.
