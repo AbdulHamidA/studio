@@ -124,22 +124,35 @@ The UI's existing remedy does not fire here: it asks for a narrator name only
 when `first_person && !people.some(p => p.tier === 1)`, and there *is* a tier-1
 person — the wrong one.
 
-## Finding 4 — the installed runtime cannot run the installed image models
+## Not a finding — a mistake in the harness
 
-**Open, and not a Board defect.** The HF cache holds
-`FLUX.1-schnell-mflux-4bit` and `FLUX.1-Kontext-dev-mflux-4bit`, ~9 GiB each.
-The installed mflux refuses both:
+An earlier version of this document claimed the installed mflux could not run
+the FLUX.1 models in the cache, on the strength of this error:
 
 ```
 Could not infer a supported backend from model 'dhairyashil/FLUX.1-schnell-mflux-4bit'.
-Pass family='qwen', 'flux2', 'fibo', 'z-image', 'ernie-image', 'wan',
-'bonsai', 'minimax-h3', 'seedvr2', or 'swiftvr'.
+Pass family='qwen', 'flux2', 'fibo', 'z-image', ...
 ```
 
-Plain `flux` is not in that list. `catalog.rs` still declares
-`family: Some("flux")` for all three FLUX.1 entries, so against this runtime
-they are dead entries that a user can install and then fail to use. Worth a
-capability probe at catalog load rather than at generation time.
+That was wrong, and the claim should not have been written. FLUX.1 is routed by
+`backend`, not by `family` — `catalog.rs` carries `backend: Some("schnell")`
+and `backend: Some("dev_kontext")` for exactly this reason, with the comment
+"Names an mflux backend for FLUX.1, which the unified router does not cover" —
+and `commands.rs` sends it on every generation. The harness used for this run
+sent neither field, so mflux had nothing to route on. The models work; the
+script driving them did not.
+
+The cost of that mistake was a 4.3 GiB download of FLUX.2 Klein that was not
+needed, on a machine that already had a working text-to-image and
+image-to-image pair installed. The image results recorded above were produced
+with Klein and are real, but they could and should have been produced with what
+was already there.
+
+The lesson is narrow and worth keeping: an error message from a dependency
+describes the call that was made, not the capability of the system. A harness
+written from scratch that disagrees with the shipping host is more likely to be
+missing a parameter than to have found a platform defect, and the first place
+to look is what the host sends that the harness does not.
 
 ## What this run does not establish
 
