@@ -101,11 +101,11 @@ three needs a schema field.
 | N1 | An edit is routed as an edit, with or without a reader | PE-103, AF-02 | DONE — `1d24b43` |
 | N2 | A rewrite cannot swap the subject for a longer word | — (gap 1) | DONE — `1d24b43`, partial |
 | N3 | The proposal shows what it knows and says each thing once | PE-404, AF-12 | DONE — `1d24b43` |
-| N4 | Cancel cancels; both helpers release each other | PE-402, AF-09/10 | TODO |
+| N4 | Cancel cancels; both helpers release each other | PE-402, AF-09/10 | DONE — `42d589f` |
 | N5 | A rejection says what was stripped | — (gap 3, pipeline doc) | DONE — `1d24b43` |
-| N6 | The typo list stops flagging plurals | — (gap 2) | TODO |
-| N7 | A UI harness, before the tasks that assume one | PE-401 | TODO |
-| N8 | Versioned request/result schema | PE-101 | TODO |
+| N6 | The typo list stops flagging plurals | — (gap 2) | DONE — `42d589f` |
+| N7 | A UI harness, before the tasks that assume one | PE-401 | DONE — `0473710` |
+| N8 | Versioned request/result schema | PE-101 | DONE — `e39929a`, partial |
 
 ### N1 — an edit is routed as an edit
 
@@ -150,10 +150,26 @@ blind mode the common edit path. Deduplicating `removed` against `dropped`
 
 ### N4 — cancellation and helper residency
 
-`except Cancelled: raise` before the bare `except Exception` in `_clarify_edit`
-and `_same_request`; `_unload_writer()` in `_load_assistant` and the reader
-release in `_load_writer`; `_apply_policy_once` in both helper loaders (gap 4).
-Small, and each one is a specific line.
+Done at `42d589f`. Cancellation propagates rather than becoming an ordinary
+negative result — caught by the bare handler it became a DIFFERENT verdict or a
+directly composed instruction, and the request carried on building a reply
+about a rewrite the user had stopped waiting for.
+
+The helper guard was missing in the one direction that always happens: reading
+a picture then writing about it is every assisted edit, and it held both the 2B
+reader and the 4B writer. The writer's loader releases the reader alone, since
+`_unload_assistant` would release the writer on its way to loading it.
+
+Neither helper loader bounded the process, so the 3.2 GiB writer was the one
+allocating route in the engine with no MLX cache ceiling — reached first, from
+a text box, while the machine already holds whatever the user was working on.
+The test enumerating those routes now names all five.
+
+Two further things from the gap list came with it: `mlx_vlm` was imported at
+the top of `op_assist`, so every text-only rewrite loaded the vision stack
+before writing a word; and the video assist button was still the spinner
+`dbff986` removed from Studio, registering the progress listener and discarding
+`p.text`.
 
 ### N5 — a rejection is not silent about cleaning
 
@@ -163,22 +179,56 @@ no indication that a cleaned version was ever judged.
 
 ### N6 — the dictionary
 
-`/usr/share/dict/words` cannot answer "is this a word" for English as users
-write it. Either stem before the lookup, or stop reporting corrections for words
-that differ from a dictionary entry only by an inflection.
+Done at `42d589f`. An inflection of a word is a word. Stemming covers most of
+it; two shapes it misses are handled beside it — the doubled final consonant,
+and the plain `-s` plural on a word already ending in `e`, where the suffix
+table matches `es` first and stems `trees` to `tre`. That last one is why
+`trees → tree` survived the first attempt.
+
+Real typos are untouched: `hous`, `tabel` and `pictuer` still correct, and a
+real word is still never a misspelling of another real word.
 
 ### N7 — the harness
 
-jsdom or happy-dom plus testing-library, standing up before PE-401 rather than
-being discovered inside it. Until it exists, component behaviour is guarded at
-source level (see `boardRepair.test.ts`) or not at all, and the milestone that
-depends on it should say which.
+Done at `0473710`. jsdom plus testing-library, with the default environment
+still `node`: a component test opts in with `@vitest-environment jsdom` in its
+own docblock, so the file that needs a DOM is the file that says so.
+
+The Tauri host stub throws by default. A test reaching an undeclared command
+fails naming it, rather than receiving `undefined` and asserting something
+about a screen the real app cannot reach — the particular way a mocked test
+lies.
+
+Seven cases on `PromptProposal`, verified by deleting the note line and
+watching exactly one of them fail.
+
+**Not used yet on the screens that most need it.** `Storyboard` has no
+component test; M6 rebuilt its state model and is guarded only at source level
+and by the type checker.
 
 ### N8 — the schema
 
-PE-101, last, for the same reason M6 is last on the Board: N1 through N6 are
-about forty lines between them and none of them needs a schema field, so a
-three-layer version should not stand in front of them.
+Done at `e39929a`, and narrower than PE-101 as written.
+
+What shipped is the half that was causing defects: one constructor for every
+assist reply, every field present every time, stamped with a version, and a
+mistyped field name raising rather than becoming a field the interface silently
+never sees. There were five reply shapes with five key sets, and two omitted
+`outcome` — which is how the user came to be shown their own untouched prompt
+headed "Suggested prompt".
+
+`prompt-pipeline.md` is corrected: the wire mode is `generate`, not `image`.
+
+**Not done:**
+
+- **The request is still not versioned or validated.** The host sends job id,
+  prompt, mode and images. A rewrite that depends on the model's capabilities
+  still cannot be written, which is PE-101's actual motivation.
+- **No Rust or Python validation of the reply.** The shape is enforced by one
+  Python constructor and described in a TypeScript interface. Nothing checks
+  that they agree; the test asserts the Python side only.
+- **`version` is a stamp, not a negotiation.** Nothing reads it. It is there so
+  a log says which contract it was written against.
 
 ## What is not claimed
 
@@ -202,6 +252,15 @@ making. The paired-image probe below is still the right next thing.
   corrected five claims, named four already-shipped capabilities the tracker
   prices as new and seven gaps it does not mention, and set an execution order
   that does not begin with a schema.
+- 2026-09-16: N4, N6, N7 and N8 landed (`42d589f`, `0473710`, `e39929a`),
+  preflight clean at each. N8 is partial and its remainder is named above.
+  **A correction to the entry below:** the `dropped` fix claimed for `1d24b43`
+  did not land in the code. A later assertion in the same edit aborted before
+  the file was written, and the test added with it called `_dropped_words`
+  directly rather than through `op_assist`, so it passed against a call site
+  that was never changed. Fixed at `e39929a` and now asserted at the call site,
+  because a test of a pure function cannot see which argument production hands
+  it.
 - 2026-09-16: N1, N3 and N5 landed at `1d24b43`; N2 landed partially, with its
   residue named above. `scripts/preflight.sh` clean. One correction to this
   file's own first draft: hardening `_keeps_intent` was attempted, broke

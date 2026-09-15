@@ -48,9 +48,9 @@ carries its reason. Nothing here is marked from inspection alone.
 | M1 | No approved text is lost between the writer and the page | BP-402, DR-04 | DONE — `8b02cd1` |
 | M2 | A correction can correct one region instead of rerolling the panel | BP-503, SP-05 | DONE — `fb34483` |
 | M3 | A composed chapter is exactly one composition | BP-601, BP-603 | DONE — `0e68ac5` |
-| M4 | The board survives its own save | BP-104 | TODO |
-| M5 | FX-01 exists as a machine-readable fixture with its oracle | BP-002 | TODO |
-| M6 | Versioned board document with stable IDs | BP-101, BP-102, BP-103 | TODO |
+| M4 | The board survives its own save | BP-104 | DONE — `20e9845` |
+| M5 | FX-01 exists as a machine-readable fixture with its oracle | BP-002 | DONE — `ba0026d` |
+| M6 | Versioned board document with stable IDs | BP-101, BP-102, BP-103 | DONE — `1094075` |
 
 Gates G2, G5 and G7 are `DEFERRED — no pilot cohort`. They require readers and
 pilot creators who have not been recruited. Recording that is more useful than
@@ -153,31 +153,96 @@ is BT-063's requirement and cannot be met by a unit test.
 
 ## M4 — The board survives its own save
 
-BP-104, reduced to the part that can be done before the schema changes: keep
-the previous serialised draft until the new one is written, and surface a
-failed write instead of leaving the user believing their board is saved.
+Done at `20e9845`. The index write was already atomic — temp file, rename, with
+the previous index kept as a backup — so a crash mid-write could not corrupt
+it. The risk was the other one: a correct write of wrong content, where
+whatever the board holds in memory becomes the only copy 350ms later. That has
+happened here once already.
+
+So the previous state is kept before the new one replaces it, under a key
+outside the `board-` namespace — inside it, `board_state_list` would have
+offered it as a second comic named "draft-prev" holding a copy of the
+manuscript. A board that opens empty while an earlier version exists is offered
+that version with its first line and panel count; putting it back is the user's
+decision, because which of two versions of a manuscript is the right one is not
+a question this can answer.
+
+A failed save now stays on screen instead of raising a toast that is gone in
+seconds while the board goes on looking exactly as it did.
+
+**Not done:** one step back, not a history. A second bad save overwrites the
+good copy. That is the shape BP-101's revisioned artifacts want and this is not
+that.
 
 ## M5 — FX-01 as a real fixture
 
-BP-002, narrowed from twelve fixtures to the one whose oracle is already
-written. Mira, Jonas and the brass key are the de facto fixture across
-`board.test.ts`, `test_worker.py` and the comments in `worker.py` and
-`board.ts` — this milestone formalises what is already being tested against,
-with exact spans and expected records. The other eleven fixtures are authored
-by the phase that needs them, not up front.
+Done at `ba0026d`: `engine/fixtures/fx01.json`, with the contract in
+`engine/fixtures/README.md`.
+
+It carries what a correct adaptation must **not** claim, with reasons,
+alongside what it should — a key made only of expected content passes on output
+that invents things beside it. Every sentence resolves to a beat or to declared
+context, so a coverage assertion against it is unambiguous.
+
+Pointed at the deterministic pipeline it makes BT-024 a test rather than a
+paragraph: a board quoting every sentence verbatim while saying Jonas handed
+Mira the key scores 100% coverage with nothing missing.
+
+One correction to the story's own division came out of writing it — the reveal
+is both final sentences, so the beat runs to the end of the source.
+
+The other eleven fixtures are authored by the milestone that needs them.
 
 ## M6 — Versioned board document
 
-BP-101 through BP-103: stable IDs, revisioned artifacts, dependency
-invalidation, structural editing. The large one. It is last of these six
-deliberately — M1 to M4 are all independent of it, and a schema migration
-landing before any user-visible improvement is how a plan like this stalls.
+Done at `1094075`, in the parts that were blocking work; see below for what was
+not.
+
+Panels carry ids and their work is stored against them. The board rendered from
+five arrays lined up by position, and position is not identity: moving two
+panels swapped their pictures and notes while each kept its own text, inserting
+one at the top shifted every note down, deleting one moved the whole board up —
+with the arrays still the right length, so nothing looked wrong until the pages
+were read. That is why reorder, insert, delete, split and join did not exist:
+every one of them was unsafe to offer. They exist now, as pure functions in
+`boardDoc.ts` with 31 tests, and the rail offers them.
+
+Dependency invalidation is one tested rule. Every edit used to retire the
+picture, so fixing a comma cost a five-minute render and a different face.
+
+The arrays the interface renders from are derived, so every read site was
+unchanged — the diff is in the writes.
+
+**The draft is still version 1, deliberately.** Panels gained an `id` an older
+build ignores, and the arrays are still written beside them, derived at save
+time. A draft opens in either build. A migration that cannot be opened by
+yesterday's build must be right the first time, and this one holds every
+manuscript the user has written.
+
+**Not done, and named rather than implied:**
+
+- **No undo.** BP-103 asks for it. A structural operation is currently final.
+- **No revisioned artifacts or approval records.** BP-101's `Approval` table and
+  BP-105 are untouched; nothing carries an input hash, so nothing can go stale
+  against one. The invalidation above is eager rather than recorded.
+- **No Rust or Python validation of the document.** The contract lives in
+  TypeScript. BP-101 asks for shared validation at the boundary.
+- **Untested in a browser.** `boardDoc` is covered; `Storyboard` is guarded at
+  source level and by type-checking. No test renders it — see N7 for the
+  harness that now makes that possible, and it has not been used here.
 
 ## Change log
 
 - 2026-09-16: Created. Corrected three gap-register entries against the code,
   recorded the whole-blob save risk, deferred the gates that have no cohort,
   and set the execution order.
+- 2026-09-16: M4, M5 and M6 landed (`20e9845`, `ba0026d`, `1094075`), with
+  `scripts/preflight.sh` clean at each. M6 is partial by intent: the structural
+  and invalidation work is done and the revision/approval half is not. Two more
+  defects surfaced while doing them and are fixed: the overflow report named a
+  position captured at compose time, which stops being true the moment anything
+  moves, and the panel list was keyed by position, so React reused the wrong
+  row for the panel now standing there.
 - 2026-09-16: M1, M2 and M3 landed (`8b02cd1`, `fb34483`, `0e68ac5`), each with
   `scripts/preflight.sh` clean. Two defects were found while fixing them that
   the gap register did not carry: the vertical scroll measured its lettering
