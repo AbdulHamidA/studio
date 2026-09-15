@@ -3217,6 +3217,93 @@ class CellTextStaysInItsCell(unittest.TestCase):
 
 
 
+class RemovedAndDroppedAreDifferentFacts(unittest.TestCase):
+    """The same word was reported twice, as two contradictory things.
+
+    `removed` is what the cleaner stripped on the way in -- quality folklore
+    the user typed and the enhancer does not pass on. `dropped` is what the
+    rewrite no longer says. They are different facts and the interface draws
+    them as the same red chip under different labels.
+
+    `dropped` was diffed against the prompt as typed rather than the cleaned
+    one that was actually judged, so every stripped word came back a second
+    time as a word the rewrite had lost. "a masterpiece 8k cat on a chair"
+    reported `removed: [masterpiece, 8k]` and `dropped: [masterpiece]`: the
+    user was told the same word had been taken out on purpose and lost by
+    accident.
+    """
+
+    def test_the_cleaner_and_the_rewrite_do_not_report_the_same_word(self):
+        typed = "a masterpiece 8k cat on a chair"
+        cleaned, removed = worker._clean_prompt_request(typed)
+        self.assertIn("masterpiece", removed)
+        # The rewrite is judged against the cleaned prompt, so the diff that
+        # names what it lost has to be against the same text.
+        dropped = worker._dropped_words(cleaned, "a tabby cat on an oak chair.")
+        self.assertNotIn("masterpiece", dropped)
+        self.assertFalse(set(dropped) & set(removed),
+                         "a word cannot be both deliberately removed and lost")
+
+    def test_a_word_the_rewrite_really_loses_is_still_named(self):
+        cleaned, _removed = worker._clean_prompt_request(
+            "a masterpiece cat on a chair")
+        self.assertIn("chair", worker._dropped_words(cleaned, "a tabby cat."))
+
+
+class ALongerWordIsADifferentWord(unittest.TestCase):
+    """A rewrite could swap the subject for a word that starts the same way.
+
+    `_dropped_words` compared stems with an unbounded prefix match, which is
+    not a stem match -- it is "starts with the same letters", and a longer word
+    starting with the same letters is a different thing rather than an
+    inflection. So every one of these was accepted as having kept the subject:
+
+        a cat on a chair  ->  a catalogue on a chair
+        a red car         ->  a red cardigan
+        a man on a boat   ->  a mango on a boat
+
+    which is the failure `_misspelling_of` was written to stop, reopened from
+    the other side: cat -> hat was caught and cat -> catalogue was not.
+    """
+
+    SWAPS = (
+        ("a cat on a chair", "a catalogue on a chair.", "cat"),
+        ("a red car", "a red cardigan.", "car"),
+        ("a man on a boat", "a mango on a boat.", "man"),
+        ("a bell over the door", "a bellows over the door.", "bell"),
+    )
+
+    def test_a_longer_word_does_not_stand_in_for_the_subject(self):
+        for original, line, lost in self.SWAPS:
+            with self.subTest(original=original):
+                self.assertIn(lost, worker._dropped_words(original, line))
+
+    def test_the_swap_reaches_the_check_that_gates_a_rewrite(self):
+        """`_carries` is the all-words check, and it must see the loss too.
+
+        `_keeps_intent` is not the check to assert this on. It is an `any` over
+        content words -- one survivor passes it, which is what it is for -- so
+        "a catalogue on a chair" passes on "chair" alone and correctly. Its
+        prefix match is left unbounded on purpose: "red" -> "reddish" grows by
+        four letters legitimately while "man" -> "mango" grows by two and does
+        not, so no length threshold tells them apart. Stems do, which is why
+        the bound belongs where it is.
+        """
+        for original, line, _lost in self.SWAPS:
+            with self.subTest(original=original):
+                self.assertFalse(
+                    worker._carries(original, line),
+                    f"{line!r} was accepted as carrying {original!r}")
+
+    def test_an_inflection_is_still_the_same_word(self):
+        """The bound is one letter, which is what an inflection needs."""
+        for original, line in (("the sun rises", "the sun rising over the roofs."),
+                               ("trees in the mist", "a tree line in the mist."),
+                               ("a man runs", "a man running down the street.")):
+            with self.subTest(original=original):
+                self.assertEqual(worker._dropped_words(original, line), [])
+
+
 class TextThatDoesNotFitIsReported(unittest.TestCase):
     """A composed page used to lose speech without saying so.
 

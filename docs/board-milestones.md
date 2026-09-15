@@ -45,9 +45,9 @@ carries its reason. Nothing here is marked from inspection alone.
 
 | Milestone | Goal | Advances | Status |
 | --- | --- | --- | --- |
-| M1 | No approved text is lost between the writer and the page | BP-402, DR-04 | ACTIVE |
-| M2 | A correction can correct one region instead of rerolling the panel | BP-503, SP-05 | TODO |
-| M3 | A composed chapter is exactly one composition | BP-601, BP-603 | TODO |
+| M1 | No approved text is lost between the writer and the page | BP-402, DR-04 | DONE — `8b02cd1` |
+| M2 | A correction can correct one region instead of rerolling the panel | BP-503, SP-05 | DONE — `fb34483` |
+| M3 | A composed chapter is exactly one composition | BP-601, BP-603 | DONE — `0e68ac5` |
 | M4 | The board survives its own save | BP-104 | TODO |
 | M5 | FX-01 exists as a machine-readable fixture with its oracle | BP-002 | TODO |
 | M6 | Versioned board document with stable IDs | BP-101, BP-102, BP-103 | TODO |
@@ -75,9 +75,19 @@ be composed, look finished, and be missing speech that the user approved.
   quietly setting fewer of them.
 - The Board surfaces that report as a blocker on the composed page.
 
-**Acceptance.** Engine tests: text longer than the old caps survives parsing
-intact; a cell too small for its dialogue returns a structured overflow rather
-than a reduced count. Frontend test: the overflow report reaches the Board.
+**Acceptance.** Met at `8b02cd1`. `TextThatDoesNotFitIsReported` and the two
+parser cases in `test_worker.py` cover it: every spoken line survives parsing
+at full length, a cell too small for its dialogue returns a record naming the
+panel, the ordinary page reports nothing, and the scroll — which capped at two
+balloons and measured nothing at all — measures against the panel it draws
+over. The report travels through `compose_board` and the Board shows it as a
+blocker before binding.
+
+**Left open deliberately.** The writer's own caption is still bounded at 120
+characters when it is parsed, and that slice is silent. It is a bound on
+generated narration rather than on approved text — the user edits the caption
+afterwards and that edit is not bounded anywhere — but it is the same shape of
+defect and belongs in M6's invalidation work, not here.
 
 ## M2 — A correction can be a correction
 
@@ -94,9 +104,21 @@ painted-region regeneration; Board sends `mask: null`.
   asked for, a mask changes where it applies.
 - The previous image is kept, not replaced, so a worse result can be rejected.
 
-**Acceptance.** Board can regenerate a painted region of a drawn panel; the
-prior image remains reachable; a model without mask support produces an
-explanation rather than a silently unmasked redraw.
+**Acceptance.** Met at `fb34483`, with a caveat worth stating plainly. The
+guards in `boardRepair.test.ts` are source-level, in the manner of
+`hookOrder.test.ts`: they assert the repair sends its mask, repairs the panel's
+own picture rather than the cast sheet, removes the mask from the vault
+afterwards, and files the previous picture before overwriting it. That is not
+the same as having run it. **There is no harness in this project that renders a
+component**, so the behaviour itself — that the painted region changes and the
+rest of the panel does not — is unverified by any test and needs a real run on
+a real model before M2 can be called proven rather than built. That run is
+SP-05's, and it has not happened.
+
+A model that cannot mask fails with the engine's own words. There is no mask
+capability in the catalogue to check against — Studio has always worked the
+same way — so this is the honest behaviour available, not a capability query.
+Adding one belongs with the model catalogue, not here.
 
 ## M3 — A composed chapter is exactly one composition
 
@@ -113,9 +135,21 @@ the old pages in the vault, where the Gallery still finds them.
 - Pages from an earlier composition remain in the vault and remain openable.
   They are history, not members.
 
-**Acceptance.** Composing twice over a changed board yields two separately
-bindable sets; the exported PDF contains the pages of the selected one, in
-order, and none of the other.
+**Acceptance.** Met at `0e68ac5` for the grouping, which is now `compositions`
+in `board.ts` and tested against the case that produced the defect: two runs
+stay apart, the newest is last, each run keeps reading order, a shorter later
+run does not absorb the longer one's third page, and pages predating the
+records are grouped without being claimed as current.
+
+One more defect surfaced while fixing it. The bound PDF is stamped
+`model: "composed"` and given `project_index: u32::MAX` so it sorts after every
+page — so it *was* a page: shown in the strip, exported alongside them as a
+PNG, and handed to the next bind as a page to bind. A comic ending with a PDF
+of itself. A page is a picture, and the PDF now carries the composition it was
+bound from.
+
+**Still to verify at runtime:** the exported PDF opened outside the app, which
+is BT-063's requirement and cannot be met by a unit test.
 
 ## M4 — The board survives its own save
 
@@ -144,3 +178,10 @@ landing before any user-visible improvement is how a plan like this stalls.
 - 2026-09-16: Created. Corrected three gap-register entries against the code,
   recorded the whole-blob save risk, deferred the gates that have no cohort,
   and set the execution order.
+- 2026-09-16: M1, M2 and M3 landed (`8b02cd1`, `fb34483`, `0e68ac5`), each with
+  `scripts/preflight.sh` clean. Two defects were found while fixing them that
+  the gap register did not carry: the vertical scroll measured its lettering
+  against nothing at all, and the bound PDF counted as a page of the comic it
+  was bound from. Both are fixed. What is *not* established: no real model has
+  been run against any of this, so M2's painted repair is built and guarded but
+  not demonstrated, and no exported PDF has been opened outside the app.

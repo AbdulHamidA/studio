@@ -1611,7 +1611,30 @@ def _dropped_words(original: str, line: str) -> list[str]:
         if any(word == n or _misspelling_of(word, n) for n in _NOT_A_SUBJECT):
             continue
         stem = _stem(word)
-        if any(stem == k or k.startswith(stem) or stem.startswith(k)
+        # A prefix match with no bound on the difference is not a stem match,
+        # it is "starts with the same letters" -- and a longer word that starts
+        # with the same letters is a different thing, not an inflection of this
+        # one. Unbounded, the check accepted every one of these as intact:
+        #
+        #   a cat on a chair    -> a catalogue on a chair
+        #   a red car           -> a red cardigan
+        #   a man on a boat     -> a mango on a boat
+        #   2 red cars          -> three red carts
+        #
+        # which is exactly what `_misspelling_of` below exists to stop, arrived
+        # at from the other side: cat -> hat is caught and cat -> catalogue was
+        # not.
+        #
+        # One letter, not zero. Zero fails two of this file's own tests: "a man
+        # runs" against "running", and the inflection cases in
+        # `RepairDroppedWords`. That leaves one substitution still accepted --
+        # "cars" against "carts", which agree after stemming to within a letter
+        # -- and one letter of slack is the price of not calling every English
+        # verb a dropped word. The bound is the tested contract; the residue is
+        # known and is not claimed to be closed.
+        if any(stem == k
+               or ((k.startswith(stem) or stem.startswith(k))
+                   and abs(len(k) - len(stem)) <= 1)
                for k in kept):
             continue
         # A corrected spelling is the same word, not a missing one.
@@ -1829,6 +1852,17 @@ def _keeps_intent(original: str, rewritten: str) -> bool:
     correctly read as a rewrite about something else, and the correction was
     thrown away for being one -- the same bug the retention check had, in the
     one place it had not been fixed.
+
+    This is a floor, not a guarantee: one surviving word passes it. The check
+    that every content word survived is `_carries`, and this is deliberately
+    not that. What this stops is a rewrite about something else entirely.
+
+    Its prefix match is deliberately left unbounded, unlike the one in
+    `_dropped_words`. Bounding it by length was tried and does not work here:
+    "red" -> "reddish" is a legitimate four-letter growth and "man" -> "mango"
+    is a two-letter substitution, so no length threshold separates them. The
+    place to catch a swapped subject is `_dropped_words`, which compares
+    stems -- and it does.
     """
     def words(text: str) -> set[str]:
         cleaned = "".join(c.lower() if c.isalnum() else " " for c in text)
@@ -4407,8 +4441,23 @@ def op_assist(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
         # for it. When the reader is absent the rewrite still happens, just
         # from the words alone, which is far more use than refusing.
         can_read = bool(repo)
-        editing = mode == "edit" and bool(staged) and can_read
-        animating = mode == "video" and bool(staged) and can_read
+        # An edit is an edit whether or not anything can look at the picture.
+        #
+        # This used to require a staged image and an installed reader, so an
+        # edit request with no reader fell through to the `else` below and was
+        # handed the scene-direction system prompt -- the one that writes a
+        # fresh picture from nothing. That is the opposite of what was asked
+        # for, on the one request where the user has already said exactly what
+        # they want changed about a picture that exists.
+        #
+        # The edit path does not need the reader. `_clarify_edit` composes the
+        # instruction from the user's own words and, handed no facts, returns
+        # them with "keeping everything else in the picture unchanged" and no
+        # inference at all -- which is the conservative answer, and the right
+        # one when nothing has seen the picture.
+        editing = mode == "edit"
+        looking = bool(staged) and can_read
+        animating = mode == "video" and looking
         blind = bool(staged) and not can_read
 
         def ask(text: str, images: list[str], max_tokens: int, temperature: float) -> str:
@@ -4429,12 +4478,19 @@ def op_assist(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
         if editing:
             # One narrow question: what is this? The instruction itself is
             # composed from the user's words, not written by the model.
-            emit({"id": req_id, "type": "progress", "phase": "denoise",
-                  "progress": None, "message": "Looking at your picture"})
-            raw = ask(SCENE_SYSTEM, staged, 90, 0.1)
-            facts = _parse_scene(raw)
-            description = " · ".join(f"{k.lower()}: {v}" for k, v in facts.items())
-            log(req_id, f"scene: {description or 'nothing readable'}")
+            #
+            # Asked only when there is a picture and something to read it with.
+            # With no facts the composer does not guess: it keeps the words as
+            # given and says the rest of the picture is unchanged.
+            facts: dict[str, str] = {}
+            if looking:
+                emit({"id": req_id, "type": "progress", "phase": "denoise",
+                      "progress": None, "message": "Looking at your picture"})
+                raw = ask(SCENE_SYSTEM, staged, 90, 0.1)
+                facts = _parse_scene(raw)
+                description = " · ".join(
+                    f"{k.lower()}: {v}" for k, v in facts.items())
+                log(req_id, f"scene: {description or 'nothing readable'}")
             improved, why, attempt = _clarify_edit(req_id, user_prompt, facts,
                                                    req.get("writer"))
             if why not in ("ok", "composed"):
@@ -4451,6 +4507,12 @@ def op_assist(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
                 return {
                     "prompt": original_prompt, "original": original_prompt,
                     "saw_image": bool(staged) and not blind,
+                    # What the cleaner stripped before anything was judged.
+                    # Absent from every rejection reply, so a rejected rewrite
+                    # handed back the original with its folklore intact and no
+                    # sign that a cleaned version had ever existed -- which is
+                    # the one fact explaining why a rewrite was attempted.
+                    "removed": removed,
                     "changed": False, "outcome": "rewrite_rejected",
                     "description": description, "rejected_because": why,
                     # What it wrote, so the choice is the user's. The edit
@@ -4558,6 +4620,10 @@ def op_assist(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
                 return {
                     "prompt": original_prompt, "original": original_prompt,
                     "saw_image": bool(staged) and not blind,
+                    # What the cleaner stripped before anything was judged. See
+                    # the edit rejection above: without it the user is handed
+                    # back their folklore with no sign a cleaned version existed.
+                    "removed": removed,
                     # `outcome` and `changed` belong on every reply, and this
                     # was the one path that omitted both. With neither set, the
                     # interface's fallback chain reaches its last branch and
@@ -4585,6 +4651,9 @@ def op_assist(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
             log(req_id, f"discarding rewrite {improved!r}: it lost the request", "warn")
             return {"prompt": original_prompt, "original": original_prompt,
                     "saw_image": bool(staged) and not blind, "changed": False,
+                    # See the rejection above: without this the user is handed
+                    # back their folklore with no sign a cleaned version existed.
+                    "removed": removed,
                     "outcome": "rewrite_rejected", "rejected_because": "lost_intent",
                     "attempt": improved,
                     "note": _WHY_REJECTED["lost_intent"],

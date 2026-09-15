@@ -82,6 +82,14 @@ export default function PromptProposal({
   return (
     <div className="proposal">
       <b>Suggested prompt</b>
+      {/* The engine writes a note on the success reply too -- it is how a
+          rewrite made without looking at the picture says so -- and this was
+          the one branch of three that did not render it. So the warning was
+          built, typed, styled, sent, and dropped on the floor. It matters more
+          now than it did: an edit is routed as an edit whether or not a reader
+          is installed, which makes "rewritten from your words only" the common
+          case rather than a rare one. */}
+      {result.note && <div className="body">{result.note}</div>}
       <div className="text">{result.prompt}</div>
 
       {!!result.added?.length && (
@@ -110,6 +118,12 @@ export default function PromptProposal({
       )}
       {!!result.removed?.length && (
         <div className="chips">
+          {/* A different fact from "no longer says", and they used to collide:
+              `dropped` was diffed against the prompt as typed, so a word the
+              cleaner had already stripped appeared in both lists, drawn as the
+              same red chip. The user was told one word had been deliberately
+              removed and accidentally lost. `dropped` is now diffed against
+              the cleaned prompt, so these two lists cannot overlap. */}
           <span className="label">removed</span>
           {result.removed.map((w) => (
             <span className="chip drop" key={w}>{w}</span>
