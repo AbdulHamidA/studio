@@ -59,7 +59,7 @@ impl AppState {
             if !e.is_dead() {
                 return Ok(e.clone());
             }
-            *guard = None;
+            replace_dead_engine(&mut guard).await;
         }
         let script = self.paths().worker_script(app)?;
         let engine = Engine::spawn(app, &self.paths(), &script).await?;
@@ -84,6 +84,17 @@ impl AppState {
             return Err(AppError::VaultLocked);
         }
         Ok(())
+    }
+}
+
+/// Clear a dead worker's slot, killing whatever is left of its process.
+///
+/// Dropping the handle used to be all this did, and a dropped `Child` is not
+/// a killed one: a worker whose stdout had closed but which was still alive
+/// kept its memory while the replacement loaded a model beside it.
+async fn replace_dead_engine(slot: &mut Option<Arc<Engine>>) {
+    if let Some(old) = slot.take() {
+        old.kill().await;
     }
 }
 
@@ -2049,8 +2060,8 @@ pub fn remove_lora(state: State<'_, AppState>, handle: String) -> Result<Vec<Lor
 mod tests {
     use super::{
         app_owned_model_entries, begin_runtime_repair, dest_holds_other_files,
-        foreign_model_entries, memory_verdict, normalize_repo, sweep_orphans_gated, AppPaths,
-        AppState, MemoryVerdict, Vault, MOVE_STAGING_PREFIX,
+        foreign_model_entries, memory_verdict, normalize_repo, replace_dead_engine,
+        sweep_orphans_gated, AppPaths, AppState, MemoryVerdict, Vault, MOVE_STAGING_PREFIX,
     };
     use std::sync::Arc;
 
@@ -2181,6 +2192,31 @@ mod tests {
         );
         assert!(engine.has_exited().await, "the worker is still running");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A worker replaced for being dead was only dropped, and a dropped child
+    /// process keeps running.
+    #[tokio::test]
+    async fn a_replaced_worker_is_killed() {
+        let child = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let engine = crate::engine::Engine::for_test(child);
+        let mut slot = Some(engine.clone());
+
+        replace_dead_engine(&mut slot).await;
+        assert!(slot.is_none());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !engine.has_exited().await {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the old worker is still running"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 
     #[test]

@@ -69,6 +69,13 @@ impl Engine {
         self.dead.load(Ordering::Relaxed)
     }
 
+    /// Kill the process outright. For a worker already given up on: its
+    /// stdout closed, so it cannot be asked to shut down, but a closed pipe
+    /// does not mean the process has gone.
+    pub async fn kill(&self) {
+        let _ = self.child.lock().await.start_kill();
+    }
+
     /// A handle around an already-running stand-in process, for tests that
     /// need an engine without a Python runtime or an `AppHandle`.
     #[cfg(test)]
@@ -115,6 +122,10 @@ impl Engine {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            // A handle dropped without `shutdown` -- a worker replaced after
+            // its stdout closed -- must not leave the process behind still
+            // holding the GPU and gigabytes of weights.
+            .kill_on_drop(true)
             .env("HF_HOME", paths.hf_home())
             .env("HF_HUB_ENABLE_HF_TRANSFER", "1")
             .env("PYTHONUNBUFFERED", "1")
