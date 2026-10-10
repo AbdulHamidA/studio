@@ -23,14 +23,21 @@ type Tab = "generate" | "edit" | "board" | "audiobook" | "video" | "upscale" | "
 const TABS: [Tab, string, string][] = [
   ["generate", "✦", "Generate"],
   ["edit", "✎", "Edit"],
+  ["upscale", "⤢", "Upscale"],
+  ["video", "▷", "Video"],
   ["board", "▤", "Board"],
   ["audiobook", "♫", "Audiobook"],
-  ["video", "▷", "Video"],
-  ["upscale", "⤢", "Upscale"],
-  ["models", "◍", "Models"],
   ["gallery", "▦", "Vault"],
+  ["models", "◍", "Models"],
   ["activity", "◷", "Activity"],
   ["security", "⚿", "Security"],
+];
+/** Sidebar sections, macOS-style, so ten flat tabs read as four kinds of work. */
+const SECTIONS: [string, Tab[]][] = [
+  ["Create", ["generate", "edit", "upscale", "video"]],
+  ["Story", ["board", "audiobook"]],
+  ["Library", ["gallery"]],
+  ["Manage", ["models", "activity", "security"]],
 ];
 
 /** Lock the vault after this long without interaction. */
@@ -427,31 +434,35 @@ export default function App() {
           Model Studio
           <span>Local · Encrypted · Apple Silicon</span>
         </div>
-        <nav className="nav">
-          {TABS.map(([id, glyph, label]) => (
-            <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>
-              <span className="glyph">{glyph}</span>
-              {label}
-              {id === "models" && installedCount > 0 && (
-                <span className="badge">{installedCount}</span>
-              )}
-              {id === "gallery" && vaultCount > 0 && (
-                <span className="badge">{vaultCount}</span>
-              )}
-            </button>
+        <nav className="nav" aria-label="Sections">
+          {SECTIONS.map(([heading, ids]) => (
+            <div key={heading} className="nav-section" role="group" aria-labelledby={`nav-${heading}`}>
+              <div className="nav-heading" id={`nav-${heading}`}>{heading}</div>
+              {TABS.filter(([id]) => ids.includes(id)).map(([id, glyph, label]) => (
+                <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}
+                  aria-current={tab === id ? "page" : undefined}>
+                  <span className="glyph" aria-hidden="true">{glyph}</span>
+                  {label}
+                  {id === "models" && installedCount > 0 && (
+                    <span className="badge" aria-label={`${installedCount} installed`}>{installedCount}</span>
+                  )}
+                  {id === "gallery" && vaultCount > 0 && (
+                    <span className="badge" aria-label={`${vaultCount} items`}>{vaultCount}</span>
+                  )}
+                </button>
+              ))}
+            </div>
           ))}
         </nav>
 
         <div className="sidebar-foot">
           {host && (
             <>
+              {/* A label, not a meter: it was a bar that was always full. */}
               <div className="meter">
                 <div className="meter-label">
                   <span>Memory for models</span>
                   <span>{host.usable_ram_gib.toFixed(1)} GB</span>
-                </div>
-                <div className="meter-track">
-                  <div className="meter-fill" style={{ width: "100%" }} />
                 </div>
               </div>
               <div className="meter">
