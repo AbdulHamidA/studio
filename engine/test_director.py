@@ -106,6 +106,12 @@ class Plan(unittest.TestCase):
         self.assertTrue(all(p['weight'] == 3 and not p['dialogue'] for p in spreads))
 
 
+class SentencePicking(unittest.TestCase):
+    def test_bare_speech_tags_are_not_moments(self):
+        self.assertEqual(director._sentences('“Late,” she said. “Early,” I said. Agnes laughed, a short bark.'),
+                         ['Agnes laughed, a short bark.'])
+
+
 class Refinement(unittest.TestCase):
     def test_valid_choices_are_taken_invalid_ones_ignored_and_rules_reapplied(self):
         b = book()

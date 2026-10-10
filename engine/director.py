@@ -76,13 +76,18 @@ def _human(place):
     return re.sub(r"[_-]+", " ", place or "").strip()
 
 
+TAG_ONLY = re.compile(r"^(?:and\s+)?(?:\w+\s+){0,2}(?:" + story.SPEECH_VERBS + r")(?:\s+\w+){0,2}[.!?]?$", re.I)
+
+
 def _sentences(text):
-    """Sentences of narration, quotes removed; empty pieces dropped."""
+    """Sentences of narration, quotes removed; empty pieces and bare speech
+    tags ("she said.") dropped -- a tag is not a moment, and a writer given
+    one invents something to draw."""
     out = []
     for unit in story.units(text):
         bare = story.QUOTE.sub(" ", unit["text"])
         bare = re.sub(r"\s+", " ", bare).strip(" ,;:—–-")
-        if len(re.findall(r"\w+", bare)) >= 2:
+        if len(re.findall(r"\w+", bare)) >= 2 and not TAG_ONLY.match(bare):
             out.append(bare)
     return out
 
@@ -352,6 +357,9 @@ def rules(panels):
     out = []
     for p in panels:
         p = dict(p)
+        # Establishing a place and pulling back at the end are calm by nature.
+        if p["framing"] == "establishing" and p["angle"] in ("dutch", "worm", "low"):
+            p["angle"] = "bird" if p["role"] == "R" else "high"
         if p["shot"] not in SHOTS:
             p["shot"] = "MS"
         if p["angle"] not in ANGLES:
@@ -391,7 +399,7 @@ words -- subject, pose, gesture, foreground and background, light. Every panel
 must look different from the one before it. Low angles give power, high angles
 vulnerability, dutch unease; close shots carry feeling, wide shots place and
 isolate. Do not invent events, people or objects the panel's text lacks. Do not
-add or remove panels.
+add or remove panels. In first-person text, "I", "me" and "my" are the Narrator.
 """
 
 
