@@ -101,8 +101,18 @@ export function keepBook(library: StoryLibrary, book: StoryBook): StoryLibrary {
   }
   const merged = { ...book, chapters: [...chapters.values()], characters: [...characters.values()],
     references: { ...existing?.references, ...book.references } };
-  return { ...library, activeBookId: book.id,
-    books: [...library.books.filter((b) => b.id !== book.id), merged] };
+  // Dividing the same text again made a new book every time and kept the old
+  // one, so retrying a chapter filled the library until it refused to save at
+  // all. A book holding nothing but text this book now holds is superseded.
+  const held = new Set(merged.chapters.map((c) => c.source_hash));
+  const superseded = new Set(existing ? [] : library.books
+    .filter((b) => b.id !== book.id && b.chapters.length > 0
+      && b.chapters.every((c) => held.has(c.source_hash)))
+    .map((b) => b.id));
+  const audio = library.audio && Object.fromEntries(
+    Object.entries(library.audio).filter(([id]) => !superseded.has(id)));
+  return { ...library, activeBookId: book.id, ...(audio ? { audio } : {}),
+    books: [...library.books.filter((b) => b.id !== book.id && !superseded.has(b.id)), merged] };
 }
 export function castFromBook(book: StoryBook) {
   return { people: book.characters.map((c, i) => ({

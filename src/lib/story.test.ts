@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { castFromBook, keepBook, type StoryBook, type StoryLibrary } from "./story";
+import { castFromBook, EMPTY_LIBRARY, keepBook, type StoryBook, type StoryLibrary } from "./story";
 import { CHAIN_LIMIT, lockStyle, panelPrompt, identityPrompt, storyContinuityReference, storyPanelReferences } from "./board";
 import { staleness } from "./boardDoc";
 import type { Panel } from "./types";
@@ -15,6 +15,16 @@ describe("shared story model", () => {
     expect(result.books.map((b) => b.id)).toEqual(["other", "book"]);
     expect(result.audio).toEqual(library.audio);
     expect(library.activeBookId).toBe("other");
+  });
+  it("replaces a book when the same text is divided again, and keeps books with other chapters", () => {
+    const chapter = (hash: string) => ({ id: hash, title: hash, source: hash, source_hash: hash, scenes: [] });
+    const first: StoryBook = { ...book, id: "first", chapters: [chapter("h1")] };
+    const longer: StoryBook = { ...book, id: "longer", chapters: [chapter("h3"), chapter("h1")] };
+    let library = keepBook(keepBook(EMPTY_LIBRARY, longer), first);
+    library = { ...library, audio: { first: { narrator: "ryan", voices: {}, rate: 160, outputs: {} } } };
+    const retry = keepBook(library, { ...book, id: "retry", chapters: [chapter("h1")] });
+    expect(retry.books.map((b) => b.id)).toEqual(["longer", "retry"]);
+    expect(retry.audio).toEqual({});
   });
   it("carries canonical IDs and aliases into the editable Board cast", () => {
     expect(castFromBook(book).people[0]).toMatchObject({ id: "mira", aliases: ["Mi"], description: "red coat" });
