@@ -5856,6 +5856,11 @@ def _run_generation(req_id: str, req: dict[str, Any], task: str,
     # low-RAM default is 1 GiB), releasing the text encoder after encoding, and
     # dropping the model once the run ends. The per-transformer-block cache
     # clearing the CLI does is not exposed here.
+    #
+    # The policy goes first, as in op_upscale: applied later by the first
+    # `_load_model`, its quarter-of-budget ceiling silently raised the 1 GiB
+    # cap low-RAM mode had just set, on exactly the first run that needed it.
+    _apply_policy_once(req_id)
     cache_limit = req.get("cache_limit_gb")
     if cache_limit is None and low_ram:
         cache_limit = 1.0
@@ -6782,6 +6787,9 @@ def op_video(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
         # plan_kw above *and* passed explicitly as 0 here, which is a
         # TypeError before any work starts -- so animating a still has never
         # reached the model on a first-frame route, whatever model was chosen.
+        # Bounded before the headroom check, like every other route that
+        # allocates, so the check measures against the process's own ceiling.
+        _apply_policy_once(req_id)
         _check_headroom(req_id, float(req.get("peak_gib") or 0))
         _check_video_size(req_id, int(req.get("width", 480)),
                           int(req.get("height", 320)))
