@@ -209,6 +209,59 @@ pub fn open(dek: &[u8; 32], data: &[u8]) -> Result<Vec<u8>, CryptoError> {
     Ok(out)
 }
 
+/// Plaintext length of a sealed file of `sealed_len` bytes, from its header.
+pub fn sealed_layout(header: &[u8], sealed_len: u64) -> Result<(u64, u64, u64), CryptoError> {
+    let (_, chunk_size) = parse_header(header)?;
+    let body = sealed_len
+        .checked_sub(HEADER_LEN as u64)
+        .filter(|b| *b >= TAG_LEN as u64)
+        .ok_or(CryptoError::Truncated)?;
+    let sealed_chunk = chunk_size as u64 + TAG_LEN as u64;
+    let n_chunks = body.div_ceil(sealed_chunk).max(1);
+    let plain = body
+        .checked_sub(n_chunks * TAG_LEN as u64)
+        .ok_or(CryptoError::Truncated)?;
+    Ok((plain, chunk_size as u64, n_chunks))
+}
+
+/// Decrypt chunks `first..first + count` of a file with `n_chunks` in all.
+///
+/// `sealed` holds exactly those chunks. Each chunk is authenticated with its
+/// index and whether it is the last, so a range read detects truncation and
+/// reordering exactly as a whole-file `open` does.
+pub fn open_chunks(
+    dek: &[u8; 32],
+    header: &[u8],
+    sealed: &[u8],
+    first: u64,
+    n_chunks: u64,
+) -> Result<Vec<u8>, CryptoError> {
+    let (file_id, chunk_size) = parse_header(header)?;
+    let mut key = file_key(dek, file_id);
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    let sealed_chunk = chunk_size as usize + TAG_LEN;
+    let mut out = Vec::with_capacity(sealed.len());
+    for (n, piece) in sealed.chunks(sealed_chunk).enumerate() {
+        let i = first + n as u64;
+        match cipher.decrypt(
+            &nonce_for(i),
+            Payload { msg: piece, aad: &aad_for(&header[..HEADER_LEN], i, i == n_chunks - 1) },
+        ) {
+            Ok(mut pt) => {
+                out.extend_from_slice(&pt);
+                pt.zeroize();
+            }
+            Err(_) => {
+                key.zeroize();
+                out.zeroize();
+                return Err(CryptoError::Decrypt);
+            }
+        }
+    }
+    key.zeroize();
+    Ok(out)
+}
+
 /// Wrap or unwrap the data key with a key-encryption key.
 pub fn wrap_dek(kek: &[u8; 32], dek: &[u8; 32]) -> ([u8; 12], Vec<u8>) {
     let nonce_bytes = random_bytes::<12>();

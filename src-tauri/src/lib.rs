@@ -100,20 +100,24 @@ fn vault_protocol(
         Ok(i) => i,
         Err(_) => return deny(404, "no such item"),
     };
-    let bytes = match state.vault.get(&id) {
-        Ok(b) => b,
-        Err(_) => return deny(404, "could not read item"),
-    };
-
-    let total = bytes.len();
     let range = request.headers().get("Range").and_then(|h| h.to_str().ok());
     let (status, bytes, content_range) = if let Some(range) = range {
+        // Only the chunks a range spans are decrypted, and an open-ended range
+        // gets a bounded slice -- WebKit asks for `bytes=0-` and then seeks,
+        // which copied a whole decrypted narration into every response.
+        const MAX_RANGE: usize = 8 * 1024 * 1024;
+        let total = match state.vault.plain_len(&id) {
+            Ok(n) => n as usize,
+            Err(_) => return deny(404, "could not read item"),
+        };
         match media::byte_range(range, total) {
-            Some((start, end)) => (
-                206,
-                bytes[start..=end].to_vec(),
-                Some(format!("bytes {start}-{end}/{total}")),
-            ),
+            Some((start, end)) => {
+                let end = end.min(start + MAX_RANGE - 1);
+                match state.vault.get_range(&id, start as u64, end as u64) {
+                    Ok(b) => (206, b, Some(format!("bytes {start}-{end}/{total}"))),
+                    Err(_) => return deny(404, "could not read item"),
+                }
+            }
             None => {
                 return http::Response::builder()
                     .status(416)
@@ -124,7 +128,10 @@ fn vault_protocol(
             }
         }
     } else {
-        (200, bytes, None)
+        match state.vault.get(&id) {
+            Ok(b) => (200, b, None),
+            Err(_) => return deny(404, "could not read item"),
+        }
     };
     let mut response = http::Response::builder()
         .status(status)

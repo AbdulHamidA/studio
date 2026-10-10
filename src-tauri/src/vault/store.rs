@@ -853,6 +853,51 @@ impl Vault {
         })
     }
 
+    /// Plaintext length of an item, read from its header and file size.
+    pub fn plain_len(&self, id: &str) -> Result<u64, VaultError> {
+        Self::validate_id(id)?;
+        self.with_unlocked(|_| {
+            let mut file = std::fs::File::open(self.blob_path(id))
+                .map_err(|_| VaultError::NoSuchItem(id.to_string()))?;
+            let mut header = [0u8; crypto::HEADER_LEN];
+            std::io::Read::read_exact(&mut file, &mut header)?;
+            Ok(crypto::sealed_layout(&header, file.metadata()?.len())?.0)
+        })
+    }
+
+    /// Bytes `start..=end` of an item, decrypting only the chunks they span.
+    ///
+    /// Media playback asks for ranges on every seek. Decrypting a whole
+    /// three-hour narration for each of them cost hundreds of megabytes of
+    /// work and memory per request.
+    pub fn get_range(&self, id: &str, start: u64, end: u64) -> Result<Vec<u8>, VaultError> {
+        use std::io::{Read, Seek, SeekFrom};
+        Self::validate_id(id)?;
+        self.with_unlocked(|u| {
+            if !u.index.items.iter().any(|item| item.id == id) {
+                return Err(VaultError::NoSuchItem(id.to_string()));
+            }
+            let mut file = std::fs::File::open(self.blob_path(id))
+                .map_err(|_| VaultError::NoSuchItem(id.to_string()))?;
+            let mut header = [0u8; crypto::HEADER_LEN];
+            file.read_exact(&mut header)?;
+            let (plain, chunk, n_chunks) = crypto::sealed_layout(&header, file.metadata()?.len())?;
+            if start > end || end >= plain {
+                return Err(VaultError::Corrupt("range outside the item".into()));
+            }
+            let (first, last) = (start / chunk, end / chunk);
+            let sealed_chunk = chunk + crypto::TAG_LEN as u64;
+            file.seek(SeekFrom::Start(crypto::HEADER_LEN as u64 + first * sealed_chunk))?;
+            let mut sealed = Vec::new();
+            file.take((last - first + 1) * sealed_chunk).read_to_end(&mut sealed)?;
+            let mut opened = crypto::open_chunks(&u.dek, &header, &sealed, first, n_chunks)?;
+            let from = (start - first * chunk) as usize;
+            let bytes = opened[from..from + (end - start + 1) as usize].to_vec();
+            opened.zeroize();
+            Ok(bytes)
+        })
+    }
+
     pub fn delete(&self, id: &str) -> Result<(), VaultError> {
         Self::validate_id(id)?;
         let mut guard = write_guard!(self.inner);
@@ -1093,6 +1138,29 @@ mod tests {
 
     fn scratch(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("modelstudio-{name}-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn range_reads_match_the_whole_item_and_still_detect_truncation() {
+        let root = scratch("range");
+        let vault = Vault::new(root.clone());
+        vault.create("a long test passphrase", false).unwrap();
+        let chunk = crypto::CHUNK_SIZE as u64;
+        let data: Vec<u8> = (0..chunk * 3 + 1234).map(|i| (i * 31 % 251) as u8).collect();
+        let id = vault.put(&data, an_item("narration.wav")).unwrap();
+        assert_eq!(vault.plain_len(&id).unwrap(), data.len() as u64);
+        let last = data.len() as u64 - 1;
+        for (a, b) in [(0, 1), (0, last), (chunk - 1, chunk), (chunk * 2 + 5, chunk * 3 + 9), (last, last)] {
+            assert_eq!(vault.get_range(&id, a, b).unwrap(), data[a as usize..=b as usize]);
+        }
+        assert!(vault.get_range(&id, 0, last + 1).is_err());
+        // Cut at a chunk boundary: the new last chunk was not sealed as final.
+        let path = vault.blob_path(&id);
+        let sealed = std::fs::read(&path).unwrap();
+        let cut = crypto::HEADER_LEN + 3 * (chunk as usize + crypto::TAG_LEN);
+        std::fs::write(&path, &sealed[..cut]).unwrap();
+        assert!(vault.get_range(&id, chunk * 2, chunk * 2 + 1).is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
