@@ -1,55 +1,95 @@
-## Model Studio 0.3.0 preview 2
+## Model Studio 0.3.0 preview 3
 
-This preview adds shared story analysis, Board continuity controls, and local
-neural Audiobook generation. Download the Apple Silicon DMG or app ZIP below.
+Story analysis that finishes and keeps its work, fast narration with Hindi and
+Indian English voices, a redesigned Vault, and an accessibility and visual
+consistency pass across the app. Download the Apple Silicon DMG or app ZIP below.
 
-## Fixes in preview 2
+## Story analysis (Board and Audiobook)
 
-Fixes a regression in the shared analyzer where visible characters or dialogue
-speakers referred to by their canonical name or alias were rejected despite
-being declared in the character bible. Exact, unambiguous names and aliases now
-resolve to canonical IDs; unknown and ambiguous references still fail validation.
-Repair calls include the failed reply and valid IDs. Qwen3 4B analyzes smaller
-passages while preserving full source coverage.
+- Fixes the analysis failures reported in preview 2: "character narrator is not
+  in this scene" and "dialogue must include every complete quoted utterance".
+  Narrator variants are accepted and reused across scenes, and dialogue text and
+  positions now come from the source, so a model can no longer drop or alter a
+  quote; replies only attribute speakers.
+- Much faster: replies are compact (quotes are numbered, outfits and rooms are
+  stated once per passage) and passages are larger. On an M4 with the 4B
+  analyst, a test chapter went from 527 s to about 100-150 s.
+- Speech tags settle who speaks: "Agnes said", "I said" and lines continuing
+  past a tag are attributed from the prose, even over the model. First-person
+  stories get a Narrator. Untagged lines are never guessed.
+- Stop keeps what is finished; Continue analysis picks up the rest with any
+  analyst. One passage that cannot be validated no longer discards the chapter.
+- Small-model slips (a curly or stray quote in JSON, an invented character,
+  skipped sentences) are repaired instead of failing the passage.
+- Progress shows "scene i of N" with time remaining.
 
-This targets the reported “visible character must be in the bible” failure in
-both Board and Audiobook. All 36 story/audio tests pass, including six new
-regression cases. The exact reported chapter has not been run against Qwen3 4B
-in the development workspace; please confirm the result on Mac.
+## Audiobook
 
-## Changes
+- New Kokoro 82M engine: about 14x real time on an M4 (Qwen3-TTS is about 1.8x),
+  with Hindi voices that read Devanagari as Hindi and English with an Indian
+  accent, plus US/UK English, Spanish, French, Italian and Portuguese. It
+  installs its text packages with the model and works offline.
+- A quick voice-only analysis for narration: speakers and mood only, in a
+  fraction of the time of the full Board analysis.
+- Preview any voice before choosing it; voices are grouped by language with
+  Indian voices first and have readable names. macOS Indian voices (Rishi, Aman,
+  Tara, Lekha and others) are listed too.
+- A player with 0.5x-4x speed (pitch preserved) and scene markers, in a bar that
+  keeps playing while you work in any other screen.
+- Narration is split at sentences, not mid-sentence, and carries scene mood.
+- Each speech engine remembers its own cast; typing in direction fields no
+  longer drops letters.
 
-- Board and Audiobook share an encrypted book, chapter and character library.
-- Story analysis preserves source coverage and dialogue, with more frames for
-  important turns and an editable plan before drawing.
-- Character identity is separate from current outfits and temporary conditions.
-  Clothing changes replace the earlier state; compatible finished frames support
-  continuity. Fixed place sheets are skipped for structured stories.
-- Panel controls expose current outfit, expression, body language and location
-  state. Previously analyzed chapters need reanalysis to populate the new fields.
-- Audiobook offers narrator and character voice assignments, encrypted WAV
-  recordings, playback and export through Vault.
-- Models adds Qwen3 8B/14B story analysts and Qwen3-TTS 1.7B CustomVoice neural
-  narration. Neural narration has nine voices, language selection and delivery
-  directions; system speech remains a fallback.
+## Board
+
+- Five steps across the top; earlier steps can be revisited without losing work.
+- Panels stay editable while others are drawing; drawing stops after an engine
+  crash instead of retrying into the same failure.
+- Character pills and every field are keyboard accessible and labelled.
+- Faces drift less: panels use the character sheet together with the previous
+  frame, and the chain re-anchors periodically.
+
+## Vault
+
+- Redesigned library: grouped grid with size control, filters, search, sort,
+  multi-select, keyboard navigation, and media-specific viewers (images with
+  zoom and pan, video, audio, PDFs, a comic reader).
+- The viewer docks inside the Vault by default so other screens stay usable,
+  with a toggle to full window; returning to the Vault keeps your place.
+- Running jobs are listed in the sidebar on every screen with Stop.
+
+## Reliability and security
+
+- The vault index can no longer be lost by a crash mid-save.
+- Out-of-memory crashes are reported as such with what to change; the memory
+  guard is no longer bypassed with low-RAM mode off.
+- Long recordings stream by range instead of decrypting the whole file per seek.
+
+## Accessibility and design
+
+- WCAG 2.2 AA pass: text and control contrast, one keyboard focus ring,
+  labelled controls, announced status and errors, 24px targets, reduced motion
+  and high-contrast support, Cmd +/- zoom.
+- One design system: a single set of surfaces, type scale, corners, labels and
+  headings across every screen. The sidebar is grouped and becomes an icon rail
+  in narrow windows.
 
 ## Preview limitations
 
-- Real model inference, image continuity, neural voice listening quality and
-  WebKit playback still need validation on Apple Silicon macOS. The release
-  workflow checks and builds the native app, but does not run downloaded models.
-- Neural reading pace is approximate. Voice cloning is not implemented.
-- Model download sizes and peak memory for the new models are estimates.
+- Real-model checks were run on an M4 with 16 GB for story analysis, voice
+  analysis and Kokoro narration on test chapters; long novels, image continuity
+  and listening quality still need validation on more Macs.
+- The 4B analyst still misattributes some untagged dialogue; the 8B story model
+  is more accurate where memory allows.
+- Model download sizes and peak memory for new models are estimates.
 - The app is ad-hoc signed; signing and notarisation are not complete.
-- Wan still-image animation previously produced noisy output and remains unverified.
+- Wan still-image animation remains unverified.
 
 ## Validation before tagging
 
-201 frontend tests and the production frontend build passed. All 36 shared-story
-and audio tests passed, with Rust formatting and diff checks clean. Native build
-checks run in the macOS release workflow; they could not run in the Linux coding
-workspace. The full Python suite on Linux retained 10 environment failures due to
-missing macOS fonts and the system dictionary.
+312 frontend tests, the production build, 420 engine tests, Rust formatting,
+clippy with warnings as errors, 75 Rust tests and the vault/storage example
+probes all pass on Apple Silicon macOS.
 
 ## Installing
 
