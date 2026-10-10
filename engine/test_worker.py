@@ -2946,6 +2946,44 @@ class ResourcePolicyReachesEveryRoute(unittest.TestCase):
         self.assertLess(body.index("_apply_policy_once("),
                         body.index("set_cache_limit("))
 
+    def test_generation_applies_the_policy_before_its_cache_cap(self):
+        """Generate and edit set the low-RAM cap, then the first load reset it.
+
+        `_load_model` applies the policy on first use, which put the cache
+        back to a quarter of the budget right after low-RAM mode had capped
+        it at 1 GiB.
+        """
+        events = []
+        saved = (worker.apply_resource_policy, worker.set_cache_limit,
+                 worker.log, worker._POLICY_APPLIED, worker._load_model)
+
+        class Stop(Exception):
+            pass
+
+        def load(*_a, **_k):
+            events.append("load")
+            raise Stop()
+
+        worker.apply_resource_policy = lambda: events.append("policy") or {}
+        worker.set_cache_limit = lambda gb: events.append(("cap", gb)) or {}
+        worker.log = lambda *a, **k: None
+        worker._POLICY_APPLIED = False
+        worker._load_model = load
+        try:
+            with self.assertRaises(Stop):
+                worker._run_generation(
+                    "t", {"model": "m", "low_ram": True, "seed": 1},
+                    "text-to-image", image_count=0)
+        finally:
+            (worker.apply_resource_policy, worker.set_cache_limit, worker.log,
+             worker._POLICY_APPLIED, worker._load_model) = saved
+        self.assertEqual(events[:2], ["policy", ("cap", 1.0)])
+
+    def test_video_applies_the_policy_before_it_checks_headroom(self):
+        body = self._source("op_video")
+        self.assertLess(body.index("_apply_policy_once("),
+                        body.index("_check_headroom("))
+
 
 class TiledUpscaleIsBounded(unittest.TestCase):
     """The tiled path had a bound on each tile and none on the run.

@@ -9,7 +9,7 @@ use crate::error::{AppError, Result};
 use crate::paths::AppPaths;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -68,6 +68,31 @@ impl Engine {
     pub fn is_dead(&self) -> bool {
         self.dead.load(Ordering::Relaxed)
     }
+
+    /// Kill the process outright. For a worker already given up on: its
+    /// stdout closed, so it cannot be asked to shut down, but a closed pipe
+    /// does not mean the process has gone.
+    pub async fn kill(&self) {
+        let _ = self.child.lock().await.start_kill();
+    }
+
+    /// A handle around an already-running stand-in process, for tests that
+    /// need an engine without a Python runtime or an `AppHandle`.
+    #[cfg(test)]
+    pub(crate) fn for_test(mut child: Child) -> Arc<Self> {
+        let stdin = child.stdin.take().expect("test child needs piped stdin");
+        Arc::new(Self {
+            stdin: Mutex::new(stdin),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            child: Mutex::new(child),
+            dead: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_exited(&self) -> bool {
+        matches!(self.child.lock().await.try_wait(), Ok(Some(_)))
+    }
 }
 
 impl Engine {
@@ -97,6 +122,10 @@ impl Engine {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            // A handle dropped without `shutdown` -- a worker replaced after
+            // its stdout closed -- must not leave the process behind still
+            // holding the GPU and gigabytes of weights.
+            .kill_on_drop(true)
             .env("HF_HOME", paths.hf_home())
             .env("HF_HUB_ENABLE_HF_TRANSFER", "1")
             .env("PYTHONUNBUFFERED", "1")
@@ -136,12 +165,18 @@ impl Engine {
 
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let dead = Arc::new(AtomicBool::new(false));
+        // The last few stderr lines, kept so a death can say why it happened.
+        // Metal's out-of-memory abort is only ever written there.
+        let stderr_tail: Arc<std::sync::Mutex<VecDeque<String>>> =
+            Arc::new(std::sync::Mutex::new(VecDeque::with_capacity(STDERR_TAIL)));
+        let (stderr_done, stderr_closed) = oneshot::channel::<()>();
 
         // stdout: the protocol channel.
         {
             let pending = pending.clone();
             let app = app.clone();
             let dead = dead.clone();
+            let stderr_tail = stderr_tail.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
@@ -157,14 +192,19 @@ impl Engine {
                 // one, then fail everything still waiting rather than leaving
                 // the UI spinning forever.
                 dead.store(true, Ordering::Relaxed);
+                // stdout and stderr close together but are read separately;
+                // give stderr a moment to deliver the abort message, so the
+                // failure names the cause rather than just the death.
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), stderr_closed).await;
+                let tail: Vec<String> = stderr_tail
+                    .lock()
+                    .map(|t| t.iter().cloned().collect())
+                    .unwrap_or_default();
+                let failure = exit_failure(&tail);
                 let mut map = pending.lock().await;
                 for (_, tx) in map.drain() {
-                    let _ = tx.send(Err(EngineFailure {
-                        message: "the engine process exited unexpectedly".into(),
-                        kind: "engine_exit".into(),
-                        download_command: None,
-                        cancelled: false,
-                    }));
+                    let _ = tx.send(Err(failure.clone()));
                 }
                 let _ = app.emit("engine://exit", ());
             });
@@ -194,8 +234,15 @@ impl Engine {
                     if let Some(f) = sink.as_mut() {
                         let _ = f.write_all(format!("{line}\n").as_bytes()).await;
                     }
+                    if let Ok(mut tail) = stderr_tail.lock() {
+                        if tail.len() == STDERR_TAIL {
+                            tail.pop_front();
+                        }
+                        tail.push_back(line.clone());
+                    }
                     let _ = app.emit("engine://stderr", line);
                 }
+                let _ = stderr_done.send(());
             });
         }
 
@@ -313,6 +360,38 @@ impl Engine {
     }
 }
 
+/// How many trailing stderr lines are kept to explain a worker's death.
+const STDERR_TAIL: usize = 20;
+
+/// What a dead worker's pending jobs are told, judged from its last words.
+///
+/// When Metal cannot back a command buffer, macOS aborts the whole process
+/// with `kIOGPUCommandBufferCallbackErrorOutOfMemory` ("Insufficient Memory")
+/// on stderr. Reporting that as a plain unexpected exit sent people to retry
+/// the same run, which dies the same way; it needs its own message saying
+/// what to change.
+fn exit_failure(stderr_tail: &[String]) -> EngineFailure {
+    let out_of_memory = stderr_tail.iter().any(|line| {
+        let lower = line.to_lowercase();
+        lower.contains("insufficient memory")
+            || lower.contains("kiogpucommandbuffercallbackerroroutofmemory")
+    });
+    let (message, kind) = if out_of_memory {
+        (
+            "the engine ran out of memory and macOS stopped it (Insufficient Memory)",
+            "engine_oom",
+        )
+    } else {
+        ("the engine process exited unexpectedly", "engine_exit")
+    };
+    EngineFailure {
+        message: message.into(),
+        kind: kind.into(),
+        download_command: None,
+        cancelled: false,
+    }
+}
+
 /// How long the worker gets to exit on its own before it is killed.
 ///
 /// It has to exceed the worker's own five-second drain plus the time to remove
@@ -406,6 +485,26 @@ mod tests {
             seen_by_host.load(Ordering::Relaxed),
             "the host must observe the worker's death through its own clone"
         );
+    }
+
+    /// A Metal out-of-memory abort used to read as an ordinary crash, and the
+    /// advice to simply run again repeated the same failure.
+    #[test]
+    fn metal_out_of_memory_is_told_apart_from_a_crash() {
+        let lines = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let oom = exit_failure(&lines(&[
+            "step 3/20",
+            "libc++abi: terminating due to uncaught exception of type std::runtime_error: \
+             [METAL] Command buffer execution failed: Insufficient Memory \
+             (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)",
+        ]));
+        assert_eq!(oom.kind, "engine_oom");
+        assert!(oom.message.contains("out of memory"), "{}", oom.message);
+
+        let crash = exit_failure(&lines(&["Segmentation fault"]));
+        assert_eq!(crash.kind, "engine_exit");
+        assert_eq!(crash.message, "the engine process exited unexpectedly");
+        assert_eq!(exit_failure(&[]).kind, "engine_exit");
     }
 
     /// The worker removes its plaintext staging directory on its way out, and

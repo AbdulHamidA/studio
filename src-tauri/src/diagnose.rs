@@ -22,6 +22,14 @@ pub fn humanize(raw: &str) -> String {
 
     let lower = raw.to_lowercase();
 
+    // The worker itself was killed by a Metal out-of-memory abort. Running
+    // again unchanged dies the same way, so say what to change instead.
+    if lower.contains("engine ran out of memory") {
+        return "The engine ran out of memory and macOS stopped it. Turn on \
+                low-RAM mode, pick a smaller size, use fewer reference images, \
+                or close other apps, then try again."
+            .into();
+    }
     // Order matters: the memory ceiling is deliberately narrow, so check it
     // before the broader out-of-memory patterns.
     if lower.contains("metal::malloc") || lower.contains("maximum allowed buffer size") {
@@ -332,6 +340,15 @@ mod tests {
     fn a_dead_engine_says_it_recovers() {
         let out = humanize("the engine process exited unexpectedly");
         assert!(out.contains("restarts"), "{out}");
+    }
+
+    #[test]
+    fn an_engine_killed_for_memory_says_what_to_change() {
+        let out =
+            humanize("the engine ran out of memory and macOS stopped it (Insufficient Memory)");
+        assert!(out.contains("low-RAM mode"), "{out}");
+        assert!(out.contains("reference images"), "{out}");
+        assert!(!out.contains("restarts"), "{out}");
     }
 
     /// A bare 401 tells nobody anything.

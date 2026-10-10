@@ -59,7 +59,7 @@ impl AppState {
             if !e.is_dead() {
                 return Ok(e.clone());
             }
-            *guard = None;
+            replace_dead_engine(&mut guard).await;
         }
         let script = self.paths().worker_script(app)?;
         let engine = Engine::spawn(app, &self.paths(), &script).await?;
@@ -84,6 +84,17 @@ impl AppState {
             return Err(AppError::VaultLocked);
         }
         Ok(())
+    }
+}
+
+/// Clear a dead worker's slot, killing whatever is left of its process.
+///
+/// Dropping the handle used to be all this did, and a dropped `Child` is not
+/// a killed one: a worker whose stdout had closed but which was still alive
+/// kept its memory while the replacement loaded a model beside it.
+async fn replace_dead_engine(slot: &mut Option<Arc<Engine>>) {
+    if let Some(old) = slot.take() {
+        old.kill().await;
     }
 }
 
@@ -113,8 +124,13 @@ pub fn setup_state(state: State<'_, AppState>) -> SetupState {
     setup::state(&state.paths())
 }
 
-#[tauri::command]
-pub async fn run_setup(app: AppHandle, state: State<'_, AppState>, force: bool) -> Result<()> {
+/// Take the runtime for a repair: no job running, and no worker either.
+///
+/// The job gate only proves nothing is generating. An idle worker is still a
+/// Python process running out of `python/` and the venv that setup is about
+/// to delete or rename, with a model's weights mapped from it. It is shut
+/// down first, and the next request starts a fresh one on the new runtime.
+async fn begin_runtime_repair(state: &AppState) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>> {
     if state.setup_running.swap(true, Ordering::AcqRel) {
         return Err(AppError::msg("Runtime setup is already running."));
     }
@@ -122,6 +138,13 @@ pub async fn run_setup(app: AppHandle, state: State<'_, AppState>, force: bool) 
         state.setup_running.store(false, Ordering::Release);
         AppError::msg("Wait for the current local job before repairing the runtime.")
     })?;
+    state.stop_engine().await;
+    Ok(exclusive)
+}
+
+#[tauri::command]
+pub async fn run_setup(app: AppHandle, state: State<'_, AppState>, force: bool) -> Result<()> {
+    let exclusive = begin_runtime_repair(&state).await?;
     let paths = state.paths();
     // Cleared on drop rather than by a statement after the await. A panic in
     // the setup task skipped that statement, leaving the flag set for the rest
@@ -1257,6 +1280,49 @@ fn engine_versions() -> String {
     )
 }
 
+/// Whether a job may start, judged by the model's peak against usable RAM.
+#[derive(Debug, PartialEq, Eq)]
+enum MemoryVerdict {
+    Fits,
+    /// The weights alone do not fit; nothing the engine does can help.
+    Hopeless,
+    /// The peak does not fit, and the caller has not earned a bypass.
+    OverBudget,
+}
+
+/// The memory refusal shared by pictures and clips.
+///
+/// `allow_over_budget` is honoured only together with `low_ram`: the bypass
+/// exists because low-RAM mode may close the gap, so a request that asks for
+/// it with low-RAM mode off would run the model at full peak and be killed by
+/// the OS part-way through.
+fn memory_verdict(
+    peak_gib: f32,
+    usable_gib: f32,
+    hopeless: bool,
+    low_ram: bool,
+    allow_over_budget: bool,
+) -> MemoryVerdict {
+    if peak_gib <= usable_gib {
+        MemoryVerdict::Fits
+    } else if hopeless {
+        MemoryVerdict::Hopeless
+    } else if low_ram && allow_over_budget {
+        MemoryVerdict::Fits
+    } else {
+        MemoryVerdict::OverBudget
+    }
+}
+
+/// Why a clip was refused for memory, and what to do about it.
+fn video_over_budget(name: &str, peak_gib: f32, usable_gib: f32) -> String {
+    format!(
+        "{name} peaks around {peak_gib:.1} GiB but this Mac can offer about {usable_gib:.1} GiB, \
+         so the clip was not started. Close other apps to free memory, or choose a smaller \
+         video model."
+    )
+}
+
 async fn run_job(
     app: &AppHandle,
     state: &AppState,
@@ -1284,8 +1350,15 @@ async fn run_job(
         )));
     }
 
-    if entry.peak_gib > host.usable_ram_gib {
-        if entry.hopeless {
+    match memory_verdict(
+        entry.peak_gib,
+        host.usable_ram_gib,
+        entry.hopeless,
+        args.low_ram,
+        args.allow_over_budget,
+    ) {
+        MemoryVerdict::Fits => {}
+        MemoryVerdict::Hopeless => {
             return Err(AppError::msg(format!(
                 "{} cannot run here: its weights alone are ~{:.1} GiB against ~{:.1} GiB \
                  usable. Low-RAM mode trims transient memory, not resident weights.",
@@ -1294,7 +1367,7 @@ async fn run_job(
                 host.usable_ram_gib
             )));
         }
-        if !args.allow_over_budget {
+        MemoryVerdict::OverBudget => {
             return Err(AppError::msg(format!(
                 "{} peaks around {:.1} GiB but this Mac can offer about {:.1} GiB. \
                  Its ~{:.1} GiB weight floor does fit, so low-RAM mode may close the gap \
@@ -1761,11 +1834,30 @@ pub async fn generate_video(
             entry.name
         )));
     }
-    if entry.hopeless {
-        return Err(AppError::msg(format!(
-            "{} needs more memory than this Mac has.",
-            entry.name
-        )));
+    // The same refusal as pictures, with no bypass: clips have no low-RAM
+    // switch, so nothing the request could ask for would close the gap, and
+    // starting anyway is how the engine gets killed for memory part-way in.
+    match memory_verdict(
+        entry.peak_gib,
+        host.usable_ram_gib,
+        entry.hopeless,
+        false,
+        false,
+    ) {
+        MemoryVerdict::Fits => {}
+        MemoryVerdict::Hopeless => {
+            return Err(AppError::msg(format!(
+                "{} needs more memory than this Mac has.",
+                entry.name
+            )));
+        }
+        MemoryVerdict::OverBudget => {
+            return Err(AppError::msg(video_over_budget(
+                &entry.name,
+                entry.peak_gib,
+                host.usable_ram_gib,
+            )));
+        }
     }
 
     let (slot_id, file_id, key, path) = state.vault.reserve_slot()?;
@@ -1998,10 +2090,53 @@ pub fn remove_lora(state: State<'_, AppState>, handle: String) -> Result<Vec<Lor
 #[cfg(test)]
 mod tests {
     use super::{
-        app_owned_model_entries, dest_holds_other_files, foreign_model_entries, normalize_repo,
-        sweep_orphans_gated, AppPaths, AppState, Vault, MOVE_STAGING_PREFIX,
+        app_owned_model_entries, begin_runtime_repair, dest_holds_other_files,
+        foreign_model_entries, memory_verdict, normalize_repo, replace_dead_engine,
+        sweep_orphans_gated, video_over_budget, AppPaths, AppState, MemoryVerdict, Vault,
+        MOVE_STAGING_PREFIX,
     };
     use std::sync::Arc;
+
+    /// Clips ran with no memory check beyond the weights alone, so a model
+    /// whose peak did not fit was started and killed by the OS part-way in.
+    #[test]
+    fn video_is_refused_when_its_peak_does_not_fit() {
+        // A clip has no low-RAM switch, so it is judged with no bypass.
+        assert_eq!(
+            memory_verdict(20.0, 12.0, false, false, false),
+            MemoryVerdict::OverBudget
+        );
+        let message = video_over_budget("Wan", 20.0, 12.0);
+        assert!(message.contains("20.0 GiB"), "{message}");
+        assert!(message.contains("not started"), "{message}");
+        assert!(!message.contains("low-RAM"), "{message}");
+    }
+
+    /// The over-budget bypass used to be honoured with low-RAM mode off, which
+    /// ran a model at full peak on a Mac that could not hold it.
+    #[test]
+    fn over_budget_bypass_needs_low_ram_mode() {
+        assert_eq!(
+            memory_verdict(10.0, 12.0, false, false, false),
+            MemoryVerdict::Fits
+        );
+        assert_eq!(
+            memory_verdict(20.0, 12.0, false, false, true),
+            MemoryVerdict::OverBudget
+        );
+        assert_eq!(
+            memory_verdict(20.0, 12.0, false, true, false),
+            MemoryVerdict::OverBudget
+        );
+        assert_eq!(
+            memory_verdict(20.0, 12.0, false, true, true),
+            MemoryVerdict::Fits
+        );
+        assert_eq!(
+            memory_verdict(40.0, 12.0, true, true, true),
+            MemoryVerdict::Hopeless
+        );
+    }
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("modelstudio-{name}-{}", uuid::Uuid::new_v4()));
@@ -2076,6 +2211,59 @@ mod tests {
         drop(job);
         assert!(sweep_orphans_gated(&state).is_ok());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Setup deletes and renames the runtime the worker runs from. Taking only
+    /// the job gate left an idle worker alive on top of it.
+    #[tokio::test]
+    async fn runtime_repair_stops_the_worker_first() {
+        let root = scratch("repair-stops-worker");
+        let paths = AppPaths::at(root.clone());
+        let vault = Arc::new(Vault::new(paths.vault()));
+        let state = AppState::new(paths, vault);
+
+        // Stands in for an idle worker: exits when told to shut down.
+        let child = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("read line")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let engine = crate::engine::Engine::for_test(child);
+        *state.engine.lock().await = Some(engine.clone());
+
+        let _exclusive = begin_runtime_repair(&state).await.unwrap();
+        assert!(
+            state.engine.lock().await.is_none(),
+            "the worker was left in place"
+        );
+        assert!(engine.has_exited().await, "the worker is still running");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A worker replaced for being dead was only dropped, and a dropped child
+    /// process keeps running.
+    #[tokio::test]
+    async fn a_replaced_worker_is_killed() {
+        let child = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let engine = crate::engine::Engine::for_test(child);
+        let mut slot = Some(engine.clone());
+
+        replace_dead_engine(&mut slot).await;
+        assert!(slot.is_none());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !engine.has_exited().await {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the old worker is still running"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 
     #[test]

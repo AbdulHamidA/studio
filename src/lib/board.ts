@@ -677,3 +677,41 @@ export function compositions(items: VaultItem[]): {
   }
   return runs;
 }
+
+/** How a batch of panels ended, and the failure behind it when there was one. */
+export type BatchEnd =
+  | { end: "done" }
+  | { end: "stopped" }
+  | { end: "cancelled" }
+  | { end: "engine"; error: unknown }
+  | { end: "repeated"; error: unknown };
+
+/** Two failures in a row is a pattern, not bad luck. */
+export const BATCH_FAILURE_LIMIT = 2;
+
+/**
+ * Draw panels one after another, and know when to give up.
+ *
+ * The loop used to stop only for the user's own Stop. When the engine died
+ * -- usually macOS killing it for memory -- every remaining panel started a
+ * fresh worker, loaded the model again and died the same way, so a board of
+ * twelve was twelve crashes and twelve red toasts. A dead engine ends the
+ * batch at once; any other failure ends it on the second in a row.
+ */
+export async function drawBatch(
+  indices: number[],
+  drawOne: (index: number) => Promise<{ ok: true } | { ok: false; error: unknown }>,
+  stopped: () => boolean,
+  engineDied: (error: unknown) => boolean,
+): Promise<BatchEnd> {
+  let failures = 0;
+  for (const i of indices) {
+    if (stopped()) return { end: "stopped" };
+    const outcome = await drawOne(i);
+    if (outcome.ok) { failures = 0; continue; }
+    if (stopped()) return { end: "cancelled" };
+    if (engineDied(outcome.error)) return { end: "engine", error: outcome.error };
+    if (++failures >= BATCH_FAILURE_LIMIT) return { end: "repeated", error: outcome.error };
+  }
+  return { end: "done" };
+}

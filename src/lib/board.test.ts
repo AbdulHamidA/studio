@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CHAIN_LIMIT, compositions, continuesFrom, CUSTOM_STYLE, isKnownStyle, lockCustomStyle, lockStyle,
+import { CHAIN_LIMIT, compositions, drawBatch, continuesFrom, CUSTOM_STYLE, isKnownStyle, lockCustomStyle, lockStyle,
          panelPrompt, previousPanel,
          panelReferences, panelSeed, placeKey, placePrompt, placeSeed,
          reviveLock, sheetPrompt, shotBackground, styleHasMoved, styleWords,
@@ -793,5 +793,44 @@ describe("a composed chapter is exactly one composition", () => {
 
   it("has nothing to show for a board that was never composed", () => {
     expect(compositions([])).toEqual([]);
+  });
+});
+
+describe("drawBatch", () => {
+  const died = (e: unknown) => String(e).includes("exited");
+  const run = (outcomes: (true | string)[], stopped = () => false) => {
+    const tried: number[] = [];
+    const done = drawBatch(outcomes.map((_, i) => i), async (i) => {
+      tried.push(i);
+      const o = outcomes[i];
+      return o === true ? { ok: true } : { ok: false, error: o };
+    }, stopped, died);
+    return done.then((end) => ({ end, tried }));
+  };
+
+  // A dead engine used to be restarted for every remaining panel, each one
+  // loading the model again and dying the same way.
+  it("stops at once when the engine dies", async () => {
+    const { end, tried } = await run([true, "the engine process exited unexpectedly", true, true]);
+    expect(end).toEqual({ end: "engine", error: "the engine process exited unexpectedly" });
+    expect(tried).toEqual([0, 1]);
+  });
+
+  it("stops after two failures in a row, but not after two apart", async () => {
+    const twice = await run(["bad prompt", "bad prompt", true]);
+    expect(twice.end.end).toBe("repeated");
+    expect(twice.tried).toEqual([0, 1]);
+    const apart = await run(["bad prompt", true, "bad prompt", true]);
+    expect(apart.end.end).toBe("done");
+    expect(apart.tried).toEqual([0, 1, 2, 3]);
+  });
+
+  it("still honours Stop", async () => {
+    let stop = false;
+    const tried: number[] = [];
+    const end = await drawBatch([0, 1, 2], async (i) => { tried.push(i); stop = true; return { ok: true }; },
+      () => stop, died);
+    expect(end.end).toBe("stopped");
+    expect(tried).toEqual([0]);
   });
 });

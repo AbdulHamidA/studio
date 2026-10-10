@@ -28,6 +28,24 @@ export function errDetail(e: unknown): string | null {
 }
 
 /**
+ * Whether a failure means the engine process itself is gone.
+ *
+ * A crashed or memory-killed worker fails the job it was running, and the
+ * next job only starts a new worker to die the same way. Loops over many
+ * jobs need to tell this apart from one job going wrong.
+ */
+export function isEngineDeath(e: unknown): boolean {
+  if (e && typeof e === "object" && "kind" in e
+      && String((e as { kind: unknown }).kind) === "engine_down") return true;
+  const text = `${errText(e)} ${errDetail(e) ?? ""}`.toLowerCase();
+  return text.includes("engine process exited")
+    || text.includes("engine stopped unexpectedly")
+    || text.includes("engine ran out of memory")
+    || text.includes("could not reach the engine")
+    || text.includes("insufficient memory");
+}
+
+/**
  * Whether a failure is the user's own Cancel.
  *
  * One place, because the host normalises the wording to "Cancelled." with a

@@ -291,7 +291,7 @@ export default function Studio({
         low_ram: lowRam,
         preview: showPreview,
         cache_limit_gb: capCache ? cacheLimit : null,
-        allow_over_budget: model.low_ram_may_help,
+        allow_over_budget: lowRam && model.low_ram_may_help,
         mask: maskId,
         outpaint_padding: padding,
         outpaint_fill: editKind === "expand" ? fill : null,
