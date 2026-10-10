@@ -2,6 +2,9 @@ import Audiobook from "./components/Audiobook";
 import { EMPTY_LIBRARY, keepBook, type CharacterReference, type StoryBook, type StoryLibrary } from "./lib/story";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errText, onEngineExit, onEngineProgress } from "./lib/api";
+import { NowPlaying, type Track } from "./lib/nowPlaying";
+import AudioPlayer from "./components/library/AudioPlayer";
+import { Bar } from "./components/shared";
 import type { HostInfo, ModelStatus, Recipe, SetupState, VaultItem, VaultStatus } from "./lib/types";
 import Setup from "./components/Setup";
 import VaultGate from "./components/VaultGate";
@@ -50,9 +53,16 @@ export default function App() {
   const [models, setModels] = useState<ModelStatus[]>([]);
   const [items, setItems] = useState<VaultItem[]>([]);
   const [tab, setTab] = useState<Tab>("generate");
+  useEffect(() => { tabRef.current = tab; }, [tab]);
   const [toast, setToast] = useState<{ msg: string; bad?: boolean } | null>(null);
 
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
+  // Every job the engine is running, with the screen it was started from, so
+  // it can be watched and stopped from anywhere rather than only its own tab.
+  const [jobs, setJobs] = useState<Record<string, { label: string; progress: number | null; tab: Tab; at: number }>>({});
+  const tabRef = useRef<Tab>("generate");
+  const [track, setTrack] = useState<Track | null>(null);
+  const nowPlaying = useMemo(() => ({ track, play: setTrack, stop: () => setTrack(null) }), [track]);
   // Owned here so Generate and the Vault can both hand images to the Edit tab.
   const [editImages, setEditImages] = useState<string[]>([]);
   const [videoFrame, setVideoFrame] = useState<string[]>([]);
@@ -204,12 +214,23 @@ export default function App() {
       } else {
         setBusyLabel(p.step && p.total_steps ? `${phase} ${p.step}/${p.total_steps}` : phase);
       }
+      setJobs((all) => ({ ...all, [p.job_id]: {
+        label: p.message || phase, progress: p.progress,
+        tab: all[p.job_id]?.tab ?? tabRef.current, at: Date.now() } }));
       window.clearTimeout(idle);
       // Progress events stop when a job ends; treat silence as done.
       idle = window.setTimeout(() => setBusyLabel(null), 4000);
     }).then((u) => { un = u; });
-    return () => { un?.(); window.clearTimeout(idle); };
+    // A job silent for 20 seconds has finished (or failed, which its own
+    // screen reports); model loads go quiet for less than that.
+    const sweep = window.setInterval(() => setJobs((all) => {
+      const live = Object.entries(all).filter(([, j]) => Date.now() - j.at < 20000);
+      return live.length === Object.keys(all).length ? all : Object.fromEntries(live);
+    }), 3000);
+    return () => { un?.(); window.clearTimeout(idle); window.clearInterval(sweep); };
   }, []);
+  // Recordings are served from the vault, so locking it ends playback.
+  useEffect(() => { if (!vault?.unlocked) setTrack(null); }, [vault?.unlocked]);
 
   useEffect(() => {
     if (!vault?.unlocked) {
@@ -427,6 +448,7 @@ export default function App() {
     : 0;
 
   return (
+    <NowPlaying.Provider value={nowPlaying}>
     <div className="shell">
       <div className="drag-region" data-tauri-drag-region />
       <aside className="sidebar">
@@ -454,6 +476,25 @@ export default function App() {
             </div>
           ))}
         </nav>
+
+        {Object.keys(jobs).length > 0 && (
+          <section className="jobs" aria-label="Running jobs">
+            <div className="nav-heading">Running</div>
+            {Object.entries(jobs).map(([id, j]) => (
+              <div className="job" key={id}>
+                <button type="button" className="job-name" onClick={() => setTab(j.tab)}
+                  title={`Go to ${TABS.find(([t]) => t === j.tab)?.[2]}`}>
+                  <span className="t-meta">{TABS.find(([t]) => t === j.tab)?.[2]}</span> {j.label}
+                </button>
+                <div className="job-row">
+                  <Bar value={j.progress} label={j.label} />
+                  <button type="button" className="btn small" aria-label={`Stop ${j.label}`}
+                    onClick={() => void api.cancelJob(id).catch((e) => notify(errText(e), true))}>Stop</button>
+                </div>
+              </div>
+            ))}
+          </section>
+        )}
 
         <div className="sidebar-foot">
           {host && (
@@ -627,9 +668,18 @@ export default function App() {
             />
           )}
         </div>
+        {track && (
+          <section className="now-playing" aria-label="Now playing">
+            <AudioPlayer key={track.src} src={track.src} title={track.title} markers={track.markers ?? []} autoPlay />
+            <button type="button" className="btn small" aria-label="Close player" onClick={() => setTrack(null)}>
+              <span aria-hidden>×</span>
+            </button>
+          </section>
+        )}
       </main>
 
       {toast && <Toast msg={toast.msg} bad={toast.bad} onDone={() => setToast(null)} />}
     </div>
+    </NowPlaying.Provider>
   );
 }

@@ -6,6 +6,7 @@ import { loadPref, savePref } from "../../lib/prefs";
 import SendTo, { type Destination } from "../SendTo";
 import Adjust from "../Adjust";
 import AudioPlayer from "./AudioPlayer";
+import { useNowPlaying } from "../../lib/nowPlaying";
 import InfoPanel, { coverOf, MiniThumb } from "./InfoPanel";
 import ZoomStage, { type ZoomHandle } from "./ZoomStage";
 
@@ -65,6 +66,7 @@ export default function Viewer(props: ViewerProps) {
     onChanged, onAdjusted,
   } = props;
   const item = items[index];
+  const nowPlaying = useNowPlaying();
   const root = useRef<HTMLDivElement>(null);
   const stage = useRef<HTMLDivElement>(null);
   const zoom = useRef<ZoomHandle>(null);
@@ -225,6 +227,10 @@ export default function Viewer(props: ViewerProps) {
         <div className="audio-cover" aria-hidden>♫</div>
         <AudioPlayer key={item.id} src={vaultUrl(item.id)} title={item.prompt || item.name} markers={item.markers ?? []}
                      shortcuts="global" />
+        <button type="button" className="btn small" onClick={() => {
+          nowPlaying.play({ src: vaultUrl(item.id), title: item.prompt || item.name, markers: item.markers ?? [] });
+          onClose();
+        }}>Keep playing while I browse</button>
       </div>
     );
   } else if (isPdf(item)) {

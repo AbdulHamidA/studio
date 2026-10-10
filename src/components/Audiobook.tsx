@@ -3,7 +3,7 @@ import { api, errText, isCancelled, newJobId, onEngineProgress, vaultUrl } from 
 import { ANALYST_IDS, KOKORO_MODEL_ID, SPEECH_MODEL_ID, keepBook, unanalysedIn, voiceGroups, type AudioSettings, type StoryLibrary } from "../lib/story";
 import type { EngineProgress, ModelStatus } from "../lib/types";
 import { JobProgress } from "./shared";
-import AudioPlayer from "./library/AudioPlayer";
+import { useNowPlaying } from "../lib/nowPlaying";
 
 export default function Audiobook({ library, models, notify, onLibraryChange, onProduced }: {
   library: StoryLibrary | null;
@@ -12,6 +12,7 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
   onLibraryChange: (update: (current: StoryLibrary) => StoryLibrary) => Promise<void>;
   onProduced: () => void;
 }) {
+  const nowPlaying = useNowPlaying();
   const [bookId, setBookId] = useState("");
   const [chapterId, setChapterId] = useState("");
   const [source, setSource] = useState("");
@@ -246,11 +247,20 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
     </div>
     <div className="pane">
       <h3>{chapter?.title ?? "Your narrated chapter"}</h3>
-      {outputs.map((id, i) => <div className="audio-result" key={id}>
-        <AudioPlayer src={vaultUrl(id)} title={`${chapter?.title ?? "Chapter"} · recording ${i + 1}`}
-          markers={markerFor[id] ?? []} />
-        <p className="muted">Export the WAV file from Vault.</p>
-      </div>)}
+      {/* Recordings play in the app-wide bar, so a chapter keeps playing
+          while you work elsewhere. */}
+      {outputs.map((id, i) => {
+        const title = `${chapter?.title ?? "Chapter"} · recording ${i + 1}`;
+        const current = nowPlaying.track?.src === vaultUrl(id);
+        return <div className="audio-result recording" key={id}>
+          <span>{title}{markerFor[id]?.length ? <span className="t-meta"> · {markerFor[id].length} scenes</span> : null}</span>
+          <button type="button" className={"btn small" + (current ? "" : " primary")} aria-pressed={current}
+            onClick={() => current ? nowPlaying.stop()
+              : nowPlaying.play({ src: vaultUrl(id), title, markers: markerFor[id] ?? [] })}>
+            {current ? "■ Stop" : "▶ Play"}</button>
+        </div>;
+      })}
+      {outputs.length > 0 && <p className="t-help">Recordings are in the Vault too, where they can be exported as WAV.</p>}
       {chapter && <details><summary>Original text · {chapter.scenes.length} analyzed scenes</summary>
         <p style={{ whiteSpace: "pre-wrap" }}>{chapter.source}</p></details>}
       {chapter?.scenes.map((scene) => <section key={scene.id} className="notice">

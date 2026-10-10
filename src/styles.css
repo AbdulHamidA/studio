@@ -956,3 +956,21 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 
 /* Every operable thing is at least 24x24 (WCAG 2.5.8). */
 .stepper button, .btn.small, .chip, .seg button { min-height: 24px; min-width: 24px; }
+
+/* ---------- app-wide: running jobs and the now-playing bar ---------- */
+.jobs { padding: var(--sp-2) 8px 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.job { display: flex; flex-direction: column; gap: var(--sp-1); padding: 0 10px; }
+.job-name {
+  background: none; border: 0; padding: 0; text-align: left; cursor: pointer;
+  color: var(--text); font-size: var(--fs-small); line-height: var(--lh-tight);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 24px;
+}
+.job-name:hover { text-decoration: underline; }
+.job-row { display: flex; align-items: center; gap: var(--sp-2); }
+.job-row .bar { flex: 1; }
+.now-playing {
+  display: flex; align-items: center; gap: var(--sp-3);
+  border-top: 1px solid var(--border); background: var(--bg-raised);
+  padding: var(--sp-2) var(--sp-4); flex: 0 0 auto;
+}
+.now-playing > :first-child { flex: 1; min-width: 0; }

@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import Audiobook from "./Audiobook";
 import { api } from "../lib/api";
 import { SPEECH_MODEL_ID, type StoryLibrary } from "../lib/story";
+import { NowPlaying } from "../lib/nowPlaying";
 
 vi.mock("../lib/api", () => ({
   api: { audioVoices: vi.fn(), generateAudiobook: vi.fn(), cancelJob: vi.fn(), analyzeStory: vi.fn(), resumeStory: vi.fn(), audioPreview: vi.fn(), vaultList: vi.fn(async () => []) },
@@ -17,11 +18,14 @@ const initial: StoryLibrary = { audio: { book: { model_id: "macos", narrator: ""
   chapters: [{ id: "chapter", title: "The train", source: "Exact original prose.", source_hash: "hash", scenes: [] }],
 }] };
 const produced = vi.fn();
+const play = vi.fn();
 const notify = vi.fn();
 function Harness({ models = [], start = initial }: { models?: import("../lib/types").ModelStatus[]; start?: StoryLibrary }) {
   const [library, setLibrary] = useState(start);
-  return <Audiobook library={library} models={models} notify={notify} onProduced={produced}
-    onLibraryChange={async (update) => { setLibrary((current) => update(current)); }} />;
+  return <NowPlaying.Provider value={{ track: null, play, stop: () => {} }}>
+    <Audiobook library={library} models={models} notify={notify} onProduced={produced}
+      onLibraryChange={async (update) => { setLibrary((current) => update(current)); }} />
+  </NowPlaying.Provider>;
 }
 afterEach(cleanup);
 beforeEach(() => {
@@ -37,7 +41,8 @@ describe("Audiobook", () => {
     fireEvent.click(screen.getByRole("button", { name: "Narrate chapter" }));
     await waitFor(() => expect(api.generateAudiobook).toHaveBeenCalledWith(
       "job", initial.books[0], "chapter", "Samantha", { mira: "Karen" }, 160, { model_id: "macos", language: "auto", delivery: "", directions: {} }));
-    await waitFor(() => expect(document.querySelector('audio')?.getAttribute('src')).toBe('vault://localhost/sealed-audio'));
+    fireEvent.click(await screen.findByRole("button", { name: "▶ Play" }));
+    expect(play).toHaveBeenCalledWith(expect.objectContaining({ src: "vault://localhost/sealed-audio" }));
     expect(screen.getByText("Exact original prose.")).toBeTruthy();
     expect(produced).toHaveBeenCalledOnce();
   });
