@@ -5,6 +5,8 @@ import { humanDuration } from "../lib/presets";
 import { exportItem, ImageDrop, JobProgress } from "./shared";
 import { loadPref, savePref } from "../lib/prefs";
 import PromptProposal from "./PromptProposal";
+import Field from "./Field";
+import { LiveStatus, ResultStrip, RunError, useRunShortcut, useStatus, type Made } from "./creation";
 
 /**
  * Canvas sizes, up to what these models were actually trained at.
@@ -34,6 +36,24 @@ const SIZES: [string, number, number][] = [
   ["Native (832x480)", 832, 480],
 ];
 
+/**
+ * How long a clip takes, from one measured run.
+ *
+ * There were two estimators on this screen: the size hint scaled a measured
+ * run, and the button quoted a made-up shape that ignored the measurement, so
+ * the same settings were promised two different waits a few lines apart.
+ * This is the only one now. The measurement was taken at 20 steps, and the
+ * denoise cost is linear in steps.
+ */
+export function estimateClipSeconds(w: number, h: number, frames: number, steps: number): number {
+  const MEASURED_PIXELS = 640 * 368;
+  const MEASURED_FRAMES = 9;
+  const MEASURED_STEPS = 20;
+  const MEASURED_SECONDS = 4193;
+  return Math.max(1, Math.round(
+    MEASURED_SECONDS * ((w * h * frames) / (MEASURED_PIXELS * MEASURED_FRAMES))
+      * (steps / MEASURED_STEPS)));
+}
 
 export default function Video({
   models, notify, onProduced, firstFrame: controlledFrame, onFirstFrameChange,
@@ -82,12 +102,17 @@ export default function Video({
   const [jobId, setJobId] = useState<string | null>(null);
   const [prog, setProg] = useState<EngineProgress | null>(null);
   const [elapsed, setElapsed] = useState(0);
-  const [out, setOut] = useState<string | null>(null);
+  /** Clips made this session, newest first. Each run used to replace the last. */
+  const [made, setMade] = useState<(Made & { took: number })[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** Why the last run failed, kept on the canvas until the next one. */
+  const [failure, setFailure] = useState<string | null>(null);
+  const [promptError, setPromptError] = useState<string | null>(null);
+  const [status, setStatus] = useStatus(prog);
   // A clip is the longest wait in the app. If the route exposes a step
   // callback this shows it forming, so a wrong composition can be abandoned
   // at step two instead of at the end.
   const [preview, setPreview] = useState<string | null>(null);
-  const [took, setTook] = useState<number | null>(null);
 
   const model = usable.find((m) => m.id === modelId) ?? usable[0];
 
@@ -99,11 +124,7 @@ export default function Video({
   // warning here said the opposite, that large sizes would run out of memory,
   // which is what pushed everyone onto a canvas too small to draw on.
   const [, sw, sh] = SIZES[sizeIdx];
-  const MEASURED_PIXELS = 640 * 368;
-  const MEASURED_FRAMES = 9;
-  const MEASURED_SECONDS = 4193;
-  const estSeconds = Math.round(
-    MEASURED_SECONDS * ((sw * sh * frames) / (MEASURED_PIXELS * MEASURED_FRAMES)));
+  const estSeconds = estimateClipSeconds(sw, sh, frames, steps);
   const slow = estSeconds > 20 * 60;
 
   const assistantReady = useMemo(
@@ -116,7 +137,7 @@ export default function Video({
 
   /** Add the motion a video model is steered by, keeping the user's words. */
   const improve = async () => {
-    if (!prompt.trim()) { notify("Write a rough idea first.", true); return; }
+    if (!prompt.trim()) { setPromptError("Write a rough idea first."); return; }
     const id = newJobId();
     setAssisting(true);
     setDraft("");
@@ -140,6 +161,7 @@ export default function Video({
       // "made your prompt specific", which was untrue and is most of why this
       // button reads as doing nothing.
       setProposal(await api.assistPrompt(id, prompt, "video", firstFrame));
+      setStatus("Suggestion ready, below the prompt.");
     } catch (e) {
       notify(errText(e), true);
     } finally {
@@ -162,16 +184,62 @@ export default function Video({
   const [w, h] = [SIZES[sizeIdx][1], SIZES[sizeIdx][2]];
   const seconds = (frames / fps).toFixed(1);
 
-  // Video is far slower per pixel than a still, and cost grows faster than
-  // linearly with frames. This is a rough shape, not a measurement.
-  const eta = model
-    ? Math.round((steps * (w * h / 1_000_000) * frames * 900) / 1000 + 40)
-    : 0;
+  const run = async () => {
+    if (!model || running) return;
+    if (!prompt.trim()) { setPromptError("Describe the clip first."); return; }
+    setPromptError(null);
+    const id = newJobId();
+    const s = randomSeed ? Math.floor(Math.random() * 2_000_000_000) : seed;
+    // The last clip stays, dimmed, until the new one lands: clearing it at
+    // the start left a failed run with nothing on screen at all. The live
+    // preview still takes precedence, so a second run does not look idle.
+    setFailure(null); setStatus("Starting");
+    setRunning(true); setJobId(id); setProg(null);
+    const un = await onEngineProgress((p) => { if (p.job_id === id) setProg(p); });
+    // If this subscription throws, the progress listener above would
+    // never be released. Failing to get a preview is not worth leaking one.
+    let unp: (() => void) | undefined;
+    try { unp = await onEnginePreview((f) => { if (f.jobId === id) setPreview(f.src); }); }
+    catch { unp = undefined; }
+    const t0 = performance.now();
+    try {
+      const res = await api.generateVideo({
+        jobId: id, modelId: model.id, prompt, negativePrompt: null,
+        width: w, height: h, frames, fps, steps,
+        guidance: model.guidance_default, seed: s,
+        // A picture carried in from another tab stays in state when the model
+        // is switched to one that cannot start from a still, and the drop zone
+        // that would show it is hidden for exactly that model -- so it was
+        // sent invisibly and the run failed with "this model cannot start
+        // from a picture", about a picture the screen was not showing.
+        firstFrame: model.video_from_image === false
+          ? null : (firstFrame[0] ?? null),
+      });
+      const took = performance.now() - t0;
+      if (res[0]) {
+        setMade((m) => [{ id: res[0], prompt, seed: s, took }, ...m]);
+        setSelectedId(res[0]);
+        setStatus("Done, 1 clip.");
+      } else {
+        setFailure("The engine finished but returned no clip.");
+      }
+      setSeed(s);
+      onProduced();
+    } catch (e) {
+      if (isCancelled(e)) { setStatus("Cancelled."); notify("Cancelled."); }
+      else { setStatus(""); setFailure(errText(e)); }
+    } finally {
+      un(); unp?.(); setRunning(false); setJobId(null); setProg(null);
+      setPreview(null);
+    }
+  };
+
+  const shortcut = useRunShortcut(() => { void run(); }, !running && usable.length > 0);
 
   if (usable.length === 0) {
     return (
       <div className="empty-state">
-        <span className="big">▷</span>
+        <span className="big" aria-hidden="true">▷</span>
         No video model installed.
         <div style={{ marginTop: 12, fontSize: 12, maxWidth: 520, marginLeft: "auto",
                       marginRight: "auto", lineHeight: 1.7, textAlign: "left" }}>
@@ -195,49 +263,16 @@ export default function Video({
     );
   }
 
-  const run = async () => {
-    if (!prompt.trim()) { notify("Describe the clip first.", true); return; }
-    const id = newJobId();
-    const s = randomSeed ? Math.floor(Math.random() * 2_000_000_000) : seed;
-    // Clear the last result as the new run starts. Leaving it up made a
-    // second run look like nothing was happening.
-    setOut(null); setTook(null);
-    setRunning(true); setJobId(id); setProg(null); setTook(null);
-    const un = await onEngineProgress((p) => { if (p.job_id === id) setProg(p); });
-    // If this subscription throws, the progress listener above would
-    // never be released. Failing to get a preview is not worth leaking one.
-    let unp: (() => void) | undefined;
-    try { unp = await onEnginePreview((f) => { if (f.jobId === id) setPreview(f.src); }); }
-    catch { unp = undefined; }
-    const t0 = performance.now();
-    try {
-      const res = await api.generateVideo({
-        jobId: id, modelId: model.id, prompt, negativePrompt: null,
-        width: w, height: h, frames, fps, steps,
-        guidance: model.guidance_default, seed: s,
-        // A picture carried in from another tab stays in state when the model
-        // is switched to one that cannot start from a still, and the drop zone
-        // that would show it is hidden for exactly that model -- so it was
-        // sent invisibly and the run failed with "this model cannot start
-        // from a picture", about a picture the screen was not showing.
-        firstFrame: model.video_from_image === false
-          ? null : (firstFrame[0] ?? null),
-      });
-      setOut(res[0] ?? null);
-      setTook(performance.now() - t0);
-      setSeed(s);
-      onProduced();
-    } catch (e) {
-      notify(isCancelled(e) ? "Cancelled." : errText(e), !isCancelled(e));
-    } finally {
-      un(); unp?.(); setRunning(false); setJobId(null); setProg(null);
-      setPreview(null);
-    }
-  };
+  const current = made.find((m) => m.id === selectedId) ?? made[0] ?? null;
+  const currentLabel = current
+    ? `Clip ${made.indexOf(current) + 1} of ${made.length}: ${current.prompt}` : "";
+  const remaining = Math.max(0, estSeconds - elapsed);
 
   return (
-    <div className="content split" style={{ padding: 0 }}>
-      <div>
+    <div className="content split creation" style={{ padding: 0 }}
+         ref={shortcut.ref} onKeyDown={shortcut.onKeyDown}>
+      <LiveStatus text={status} />
+      <div className="creation-params">
         <div className="panel">
           <h2>Make a clip</h2>
 
@@ -252,16 +287,16 @@ export default function Video({
             </div>
           ) : (
             <div className="field">
-              <label>
+              <div className="choice-label">
                 Starting picture <em>optional</em>
-              </label>
+              </div>
               <ImageDrop
                 images={firstFrame}
                 onChange={setFirstFrame}
                 max={model?.max_edit_images ?? 1}
                 onError={(m) => notify(m, true)}
               />
-              <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5 }}>
+              <div className="t-help" style={{ marginTop: 5 }}>
                 {controlledFrame && controlledFrame.length > 0
                   ? "Carried over from another tab. This picture becomes the first frame."
                   : "With a picture the clip animates it. Without one it is made from the description alone."}
@@ -270,12 +305,16 @@ export default function Video({
           )}
 
           <div className="field">
-            <label>What should happen?</label>
-            <textarea
-              value={prompt}
-              onChange={(e) => { setPrompt(e.target.value); setUndoPrompt(null); setProposal(null); }}
-              placeholder="steam rises slowly from the teapot, the light shifts"
-            />
+            <Field className="prompt-field" label="What should happen?" error={promptError ?? undefined}>
+              <textarea
+                value={prompt}
+                onChange={(e) => {
+                  setPrompt(e.target.value); setUndoPrompt(null); setProposal(null);
+                  setPromptError(null);
+                }}
+                placeholder="steam rises slowly from the teapot, the light shifts"
+              />
+            </Field>
             {undoPrompt !== null && (
               <button className="btn small" style={{ marginTop: 6 }}
                       onClick={() => { setPrompt(undoPrompt); setUndoPrompt(null); }}>
@@ -291,10 +330,12 @@ export default function Video({
                 ? "Keeps your words and adds the motion a video model needs"
                 : "Needs the prompt assistant from the Models tab"}
             >
-              {assisting ? "Thinking…" : "\u2728 Make my prompt precise"}
+              {assisting ? "Thinking…" : "✨ Make my prompt precise"}
             </button>
             {assisting && draft && (
-              <div className="proposal plain" aria-live="polite">
+              // Silent on purpose: read aloud, every token would interrupt
+              // the last. Completion is announced once instead.
+              <div className="proposal plain" aria-live="off">
                 <b>Writing…</b>
                 <div className="text">{draft}</div>
               </div>
@@ -307,85 +348,82 @@ export default function Video({
                   setUndoPrompt(prompt);
                   setPrompt(text);
                   setProposal(null);
-                  notify("Prompt updated. Undo is next to the box.");
+                  notify("Prompt updated. Undo is below the box.");
                 }}
                 onDismiss={() => setProposal(null)}
               />
             )}
             {!assistantReady && (
-              <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5 }}>
+              <div className="t-help" style={{ marginTop: 5 }}>
                 Needs the prompt writer — a 2.1 GB download in the Models tab.
                 It runs on this Mac; nothing is sent anywhere.
               </div>
             )}
           </div>
 
-          <div className="field">
-            <label>Size</label>
+          <Field
+            label="Size"
+            hint={model && (
+              <span className="t-note" style={{ color: slow ? "var(--warn)" : undefined }}>
+                {`Takes ${humanDuration(estSeconds)}. `
+                  + `Memory barely moves with size — about ${model.peak_gib.toFixed(1)} GiB `
+                  + `either way; time is what a larger canvas costs.`}
+                {slow ? " This one is a long wait." : ""}
+                {" "}Prefer the largest size that runs: below the size it was
+                trained at, a video model loses quality.
+              </span>
+            )}
+          >
             <select value={sizeIdx} onChange={(e) => setSizeIdx(+e.target.value)}>
               {SIZES.map(([label, sw, sh], i) => (
                 <option key={label} value={i}>{label} — {sw}×{sh}</option>
               ))}
             </select>
-            {model && (
-              <div style={{ fontSize: 10.5, marginTop: 5, lineHeight: 1.55,
-                            color: slow ? "var(--warn)" : "var(--text-faint)" }}>
-                {`Roughly ${estSeconds < 90 ? `${estSeconds} seconds`
-                    : `${Math.round(estSeconds / 60)} minutes`}, `
-                  + `from a measured 640×368 run at 9 frames. Memory barely `
-                  + `moves with size — about ${model.peak_gib.toFixed(1)} GiB `
-                  + `either way. Time is what a larger canvas costs.`}
-                {slow ? " This one is a long wait." : ""}
-                {" "}Running a video model well below the size it was trained
-                at is its own quality problem, so prefer the largest that runs.
-              </div>
-            )}
-          </div>
+          </Field>
 
-          <div className="field">
-            <label>
-              Frames <em>{frames} · {seconds}s at {fps} fps</em>
-            </label>
+          <Field
+            label={<>Frames <em aria-hidden="true">{frames} · {seconds}s at {fps} fps</em></>}
+            hint="The main cost. Halving the frames saves more than half the time."
+          >
             <input
               type="range" min={9} max={81} step={4} value={frames}
+              aria-valuetext={`${frames} frames, ${seconds} seconds`}
               onChange={(e) => setFrames(+e.target.value)}
             />
-            <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5, lineHeight: 1.55 }}>
-              Frames are the only real cost. Memory and time grow faster than
-              linearly with them, so halving the count saves more than half.
-            </div>
-          </div>
+          </Field>
 
           <div className="row">
-            <div className="field">
-              <label>Playback speed <em>{fps} fps</em></label>
+            <Field label={<>Playback speed <em aria-hidden="true">{fps} fps</em></>}
+              hint="Changes the clip's length only, not the wait.">
               <input type="range" min={8} max={30} step={1} value={fps}
+                aria-valuetext={`${fps} frames per second`}
                 onChange={(e) => setFps(+e.target.value)} />
-              <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5 }}>
-                Changes duration only, not how long it takes to make.
-              </div>
-            </div>
-            <div className="field">
-              <label>Steps <em>{steps}</em></label>
+            </Field>
+            <Field label={<>Steps <em aria-hidden="true">{steps}</em></>}>
               <input type="range" min={4} max={40} value={steps}
+                aria-valuetext={`${steps} steps`}
                 onChange={(e) => setSteps(+e.target.value)} />
-            </div>
+            </Field>
           </div>
 
-          <div className="field">
-            <label style={{ cursor: "pointer" }}>
-              <span>
+          {/* The seed was always sent and always reported, but never
+              settable, so a clip worth refining could not be made again. */}
+          <div className="row" style={{ alignItems: "flex-end" }}>
+            <Field label="Seed" className="field">
+              <input type="number" value={seed} disabled={randomSeed}
+                onChange={(e) => setSeed(+e.target.value)} />
+            </Field>
+            <div className="field">
+              <label className="check">
                 <input type="checkbox" checked={randomSeed}
-                  style={{ width: "auto", marginRight: 6 }}
                   onChange={(e) => setRandomSeed(e.target.checked)} />
                 Different every time
-              </span>
-            </label>
+              </label>
+            </div>
           </div>
 
           {usable.length > 1 ? (
-            <div className="field">
-              <label>Model</label>
+            <Field label="Model">
               <select value={model?.id ?? ""} onChange={(e) => setModelId(e.target.value)}>
                 {usable.map((m) => (
                   <option key={m.id} value={m.id}>
@@ -393,79 +431,114 @@ export default function Video({
                   </option>
                 ))}
               </select>
-            </div>
+            </Field>
           ) : (
-            <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginBottom: 8 }}>
+            <div className="t-note" style={{ marginBottom: 8 }}>
               Using <b>{model?.name}</b>
             </div>
           )}
+        </div>
 
+        <div className="run-footer">
           {running ? (
             <>
               <JobProgress p={prog} label="Rendering" />
-              <div style={{ display: "flex", justifyContent: "space-between",
-                            fontSize: 11, color: "var(--text-faint)", marginTop: 6 }}>
+              <div className="t-note run-footer-times">
                 <span>{elapsed}s elapsed</span>
-                <span>video takes minutes, not seconds</span>
+                <span>
+                  {remaining > 0
+                    ? `${humanDuration(remaining)} left, roughly`
+                    : "longer than expected"}
+                </span>
               </div>
-              <button className="btn danger full" style={{ marginTop: 10 }}
+              <button className="btn danger full" style={{ marginTop: 8 }}
                 onClick={() => jobId && api.cancelJob(jobId).catch(() => {})}>
                 Cancel
               </button>
             </>
           ) : (
             <>
-              <button className="btn primary full" onClick={run}>Make the clip</button>
-              <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 6,
-                            textAlign: "center" }}>
-                Roughly {humanDuration(eta)} — a rough shape, not a measurement
+              <button className="btn primary full" onClick={() => void run()}
+                aria-keyshortcuts="Meta+Enter">
+                Make the clip<span className="kbd" aria-hidden="true">⌘↵</span>
+              </button>
+              <div className="t-note" style={{ marginTop: 6, textAlign: "center" }}>
+                Takes {humanDuration(estSeconds)}, scaled from a measured run
               </div>
             </>
           )}
         </div>
       </div>
 
-      <div>
+      <div className="creation-canvas">
         <div className="canvas">
-          {out ? (
-            <video
-              src={vaultUrl(out)}
-              controls
-              loop
-              autoPlay
-              muted
-              style={{ maxWidth: "100%", maxHeight: "64vh", borderRadius: 6 }}
-            />
-          ) : preview ? (
+          {failure && !running ? (
+            <div className="canvas-stack">
+              <RunError message={failure} onRetry={() => void run()} />
+            </div>
+          ) : running && preview ? (
             <div style={{ textAlign: "center" }}>
-              <img src={preview} alt="" style={{
+              <img src={preview} alt="Preview of the clip forming" style={{
                 maxWidth: "100%", maxHeight: "64vh", borderRadius: 6, opacity: 0.92,
               }} />
-              <div style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 8 }}>
+              <div className="t-note" style={{ marginTop: 8 }}>
                 Taking shape{prog?.step && prog?.total_steps
-                  ? ` \u2014 step ${prog.step} of ${prog.total_steps}` : "\u2026"}
+                  ? ` — step ${prog.step} of ${prog.total_steps}` : "…"}
               </div>
+            </div>
+          ) : current ? (
+            <div className="canvas-stack">
+              <video
+                key={current.id}
+                className={running ? "stale" : undefined}
+                src={vaultUrl(current.id)}
+                aria-label={currentLabel}
+                controls
+                loop
+                autoPlay={!running}
+                muted
+                style={{ maxWidth: "100%", maxHeight: "64vh", borderRadius: 6 }}
+              />
+              {running && (
+                <div className="t-note">
+                  Rendering — the last clip stays until the new one lands.
+                </div>
+              )}
             </div>
           ) : (
             <div className="empty">
-              <span className="big">▷</span>
+              <span className="big" aria-hidden="true">▷</span>
               {running
                 ? "Rendering. The model loads first, then denoises every frame."
                 : "Describe a clip, or drop in a picture to animate."}
             </div>
           )}
         </div>
-        {out && (
-          <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center" }}>
-            <button className="btn small" onClick={() => exportItem({ id: out, name: "clip.mp4" }, notify)}>
-              Save a copy…
-            </button>
-            {took != null && (
-              <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-faint)" }}>
-                Took {fmtDuration(Math.round(took))} · seed {seed}
+        {current && (
+          <>
+            <ResultStrip items={made} selected={current.id} onSelect={setSelectedId} video />
+            <div className="result-actions">
+              <button className="btn small"
+                onClick={() => exportItem({ id: current.id, name: "clip.mp4" }, notify)}>
+                Save a copy…
+              </button>
+              <button className="btn small"
+                onClick={() => {
+                  setSeed(current.seed); setRandomSeed(false);
+                  notify(`Seed ${current.seed} will be used for the next clip.`);
+                }}>
+                Reuse seed
+              </button>
+              <button className="btn small"
+                disabled={current.prompt === prompt}
+                onClick={() => { setUndoPrompt(prompt); setPrompt(current.prompt); }}>
+                Use prompt
+              </button>
+              <span className="t-note" style={{ marginLeft: "auto" }}>
+                Took {fmtDuration(Math.round(current.took))} · seed {current.seed}
               </span>
-            )}
-          </div>
+            </div>
+          </>
         )}
       </div>
     </div>

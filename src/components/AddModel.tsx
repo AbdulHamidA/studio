@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api, errText, fmtBytes } from "../lib/api";
 import type { HostInfo, ResolvedModel } from "../lib/types";
+import Field from "./Field";
 
 const TASK_LABEL: Record<string, string> = {
   text_to_image: "Generate",
@@ -92,8 +93,13 @@ export default function AddModel({
   return (
     <div className="panel" style={{ marginBottom: 16 }}>
       <h2>Add a model</h2>
-      <div className="field">
-        <label>Hugging Face model</label>
+      <Field
+        label="Hugging Face model"
+        hint={<>
+          Paste a model link from huggingface.co, or type <code>owner/name</code>.
+          It is checked against this Mac before anything downloads.
+        </>}
+      >
         <input
           type="text"
           value={repo}
@@ -103,10 +109,10 @@ export default function AddModel({
           onChange={(e) => { setRepo(e.target.value); setResolved(null); }}
           onKeyDown={(e) => { if (e.key === "Enter" && repo.trim().length > 2) void check(); }}
         />
-        <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5, lineHeight: 1.55 }}>
-          Paste a model link from huggingface.co, or type <code>owner/name</code>.
-          It is checked against this Mac before anything downloads.
-          <div style={{ marginTop: 6 }}>
+      </Field>
+      <div className="field">
+        <div className="t-help">
+          <div>
             {host && (
               <>
                 This Mac fits roughly <b>{host.max_params_4bit.toFixed(0)}B parameters
@@ -140,14 +146,18 @@ export default function AddModel({
               <strong>This model is gated</strong>
               <span style={{ whiteSpace: "pre-wrap" }}>{resolved.error}</span>
               <div style={{ marginTop: 9 }}>
-                <input
-                  type="password"
-                  value={token}
-                  spellCheck={false}
-                  placeholder="hf_..."
-                  style={{ width: "100%", marginBottom: 7 }}
-                  onChange={(e) => setToken(e.target.value)}
-                />
+                <Field
+                  label="Hugging Face access token"
+                  hint="Create one at huggingface.co/settings/tokens with read access. It is stored on this Mac only, readable by your account alone, and is sent to Hugging Face and nowhere else."
+                >
+                  <input
+                    type="password"
+                    value={token}
+                    spellCheck={false}
+                    placeholder="hf_..."
+                    onChange={(e) => setToken(e.target.value)}
+                  />
+                </Field>
                 <button
                   className="btn primary small"
                   disabled={busy || !token.trim().startsWith("hf_")}
@@ -155,11 +165,6 @@ export default function AddModel({
                 >
                   {busy ? "Saving…" : "Save token and re-check"}
                 </button>
-                <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 6 }}>
-                  Create one at huggingface.co/settings/tokens with read access.
-                  It is stored on this Mac only, readable by your account alone,
-                  and is sent to Hugging Face and nowhere else.
-                </div>
               </div>
             </>
           ) : !resolved.routable ? (
@@ -194,10 +199,9 @@ export default function AddModel({
       )}
 
       {resolved?.routable && (
-        <div className="field">
-          <label>Display name</label>
+        <Field label="Display name">
           <input type="text" value={name} onChange={(e) => setName(e.target.value)} />
-        </div>
+        </Field>
       )}
 
       <div style={{ display: "flex", gap: 7 }}>
