@@ -1223,3 +1223,10 @@ details.mask-rect .row { margin-top: 6px; }
   .board-work > .board-pane:nth-child(2) { max-height: 55vh; overflow-y: auto; }
   .board-work.ms-open > .board-ms { position: fixed; width: 92vw; overflow-y: auto; }
 }
+
+/* ---------- docked viewer ---------- */
+.content-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.content-wrap > .content { flex: 1; min-height: 0; }
+/* Over the Vault's area only; the sidebar, top bar and player stay live. */
+.viewer.docked { position: absolute; inset: 0; z-index: 30; background: var(--bg); }
+.viewer.docked .viewer-bar { padding-top: 10px; }

@@ -16,6 +16,8 @@ const STRIP_REACH = 40;
 const PAN_STEP = 60;
 
 export interface ViewerProps {
+  /** The Vault is on screen; when it is not, no shortcut is listened for. */
+  active?: boolean;
   /** What ←/→ walks through, in the order the grid showed it. */
   items: VaultItem[];
   index: number;
@@ -69,6 +71,19 @@ export default function Viewer(props: ViewerProps) {
   } = props;
   const item = items[index];
   const nowPlaying = useNowPlaying();
+  const active = props.active ?? true;
+  /**
+   * Docked fills the Vault's own area, so every other screen stays a click
+   * away and the file is still open on return; full window is a modal
+   * lightbox. The choice is remembered.
+   */
+  const [docked, setDocked] = useState(() => loadPref("library.viewerDocked", true));
+  const toggleDocked = () => setDocked((d) => { savePref("library.viewerDocked", !d); return !d; });
+  // Leaving the Vault keeps an audiobook playing, but a video nobody can see
+  // should not go on talking.
+  useEffect(() => {
+    if (!active) root.current?.querySelectorAll("video").forEach((v) => v.pause());
+  }, [active]);
   const root = useRef<HTMLDivElement>(null);
   const stage = useRef<HTMLDivElement>(null);
   const zoom = useRef<ZoomHandle>(null);
@@ -128,8 +143,13 @@ export default function Viewer(props: ViewerProps) {
   const zoomedIn = !!item && isImage(item) && scale.scale > scale.fit + 1e-3;
 
   useEffect(() => {
+    if (!active) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || typing(e) || !item) return;
+      // Docked, the rest of the app is live: keys belong to the viewer only
+      // while focus is in it (or nowhere in particular).
+      const at = document.activeElement;
+      if (docked && at && at !== document.body && !root.current?.contains(at)) return;
       const plain = !e.metaKey && !e.ctrlKey && !e.altKey;
       const step = e.shiftKey ? PAN_STEP * 4 : PAN_STEP;
       switch (e.key) {
@@ -178,7 +198,7 @@ export default function Viewer(props: ViewerProps) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [item, index, items.length, go, onClose, side, toggleSide, onToggleFavorite, onDelete, copyPrompt, zoomedIn]);
+  }, [item, index, items.length, go, onClose, side, toggleSide, onToggleFavorite, onDelete, copyPrompt, zoomedIn, active, docked]);
 
   // The next and previous pictures are fetched before they are asked for,
   // so walking through the library does not wait on a decrypt at every step.
@@ -208,7 +228,8 @@ export default function Viewer(props: ViewerProps) {
   const pct = Math.round(scale.scale * 100);
 
   const onTab = (e: React.KeyboardEvent) => {
-    if (e.key !== "Tab" || !root.current) return;
+    // Only the full-window viewer is modal; docked, Tab may leave it.
+    if (docked || e.key !== "Tab" || !root.current) return;
     const f = [...root.current.querySelectorAll<HTMLElement>(
       "button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])",
     )].filter((el) => el.offsetParent !== null || el === document.activeElement);
@@ -254,7 +275,7 @@ export default function Viewer(props: ViewerProps) {
       <div className="viewer-audio">
         <div className="audio-cover" aria-hidden>♫</div>
         <AudioPlayer key={item.id} src={vaultUrl(item.id)} title={item.prompt || item.name} markers={item.markers ?? []}
-                     shortcuts="global" />
+                     shortcuts={docked ? "focus" : "global"} />
         <button type="button" className="btn small" onClick={() => {
           nowPlaying.play({ src: vaultUrl(item.id), title: item.prompt || item.name, markers: item.markers ?? [] });
           onClose();
@@ -302,13 +323,19 @@ export default function Viewer(props: ViewerProps) {
   const near = items.slice(from, index + STRIP_REACH + 1);
 
   return (
-    <div className="viewer" role="dialog" aria-modal="true" aria-label={`Viewer: ${title}`}
+    <div className={"viewer" + (docked ? " docked" : "")} role={docked ? "region" : "dialog"}
+         aria-modal={docked ? undefined : true} aria-label={`Viewer: ${title}`}
          ref={root} tabIndex={-1} onKeyDown={onTab}>
       <header className="viewer-bar" data-tauri-drag-region>
         {onBack ? (
           <button className="icon-btn" onClick={onBack} aria-label="Back" title="Back">←</button>
         ) : null}
         <button className="icon-btn" onClick={onClose} aria-label="Close viewer" title="Close (Esc)">✕</button>
+        <button className="icon-btn" onClick={toggleDocked} aria-pressed={!docked}
+                aria-label={docked ? "Full window" : "Dock in the Vault"}
+                title={docked ? "Full window — hides the rest of the app" : "Dock in the Vault — keeps the rest of the app usable"}>
+          {docked ? "⤢" : "⤡"}
+        </button>
         <div className="viewer-title">
           <div className="t" title={title}>{title}</div>
           <div className="s">

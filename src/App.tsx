@@ -589,6 +589,9 @@ export default function App() {
           </button>
         </div>
 
+        {/* Positioned, so the Vault's docked viewer can cover the content
+            area alone -- sidebar, top bar and player stay usable. */}
+        <div className="content-wrap">
         <div className="content">
           {/*
             Generate and Edit stay mounted and are hidden with CSS rather than
@@ -659,8 +662,11 @@ export default function App() {
           {tab === "models" && (
             <Models models={models} host={host} onChanged={refreshModels} notify={notify} />
           )}
-          {tab === "gallery" && (
+          {/* Kept mounted like Generate and Edit: leaving the Vault and coming
+              back finds the same file open at the same place. */}
+          <div style={{ display: tab === "gallery" ? "block" : "none" }}>
             <Gallery
+              active={tab === "gallery"}
               items={items}
               onChanged={refreshItems}
               notify={notify}
@@ -671,7 +677,7 @@ export default function App() {
               loading={!itemsLoaded}
               loadError={itemsError}
             />
-          )}
+          </div>
           {tab === "activity" && <Activity notify={notify} />}
           {tab === "security" && (
             <Security
@@ -682,6 +688,7 @@ export default function App() {
               onStorageMoved={refreshModels}
             />
           )}
+        </div>
         </div>
         {lockSoon && (
           <div className="notice warn lock-soon" role="alert">

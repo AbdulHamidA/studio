@@ -37,8 +37,10 @@ interface ViewerState {
 }
 
 export default function Gallery({
-  items, onChanged, notify, send, models, onReuse, onOpenBoard, loading, loadError,
+  items, onChanged, notify, send, models, onReuse, onOpenBoard, loading, loadError, active = true,
 }: {
+  /** The Vault is the tab on screen; it stays mounted while hidden. */
+  active?: boolean;
   items: VaultItem[];
   onChanged: () => void | Promise<void>;
   notify: (m: string, bad?: boolean) => void;
@@ -255,9 +257,10 @@ export default function Gallery({
         if (chosen.length) { e.preventDefault(); remove(chosen); }
       }
     };
+    if (!active) return;
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [viewer, board, order, chosen, clearPicks, remove]);
+  }, [viewer, board, order, chosen, clearPicks, remove, active]);
 
   const exportPicked = async () => {
     setBusy(true);
@@ -292,6 +295,7 @@ export default function Gallery({
 
   const viewerEl = viewer && viewIndex >= 0 && (
     <Viewer
+      active={active}
       items={viewList}
       index={viewIndex}
       onIndex={(i) => setViewer((v) => (v ? { ...v, current: viewList[i].id, at: i } : v))}

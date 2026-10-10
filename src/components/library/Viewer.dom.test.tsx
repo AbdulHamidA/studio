@@ -108,9 +108,32 @@ describe("Viewer keyboard", () => {
 
   it("takes focus when it opens and gives it back when it closes", () => {
     const { rerender } = render(<Harness items={three} />);
-    expect(document.activeElement?.getAttribute("role")).toBe("dialog");
+    expect(document.activeElement?.getAttribute("role")).toBe("region");
     rerender(<button>opener</button>);
     expect(document.activeElement?.tagName).not.toBe("DIV");
+  });
+
+  it("docks in the Vault by default and toggles to a remembered full-window dialog", () => {
+    render(<Harness items={three} />);
+    expect(screen.getByRole("region", { name: /^Viewer/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Full window" }));
+    const dialog = screen.getByRole("dialog", { name: /^Viewer/ });
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    cleanup();
+    render(<Harness items={three} />);
+    expect(screen.getByRole("dialog", { name: /^Viewer/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Dock in the Vault" }));
+    expect(screen.getByRole("region", { name: /^Viewer/ })).toBeTruthy();
+  });
+
+  it("ignores keys while docked and focus is elsewhere in the app, or the Vault is hidden", () => {
+    render(<Harness items={three} />);
+    const elsewhere = document.createElement("button");
+    document.body.appendChild(elsewhere);
+    elsewhere.focus();
+    fireEvent.keyDown(elsewhere, { key: "ArrowRight" });
+    expect(screen.getByText(/^1 of 3/)).toBeTruthy();
+    elsewhere.remove();
   });
 
   it("plays and pauses a video with Space", () => {

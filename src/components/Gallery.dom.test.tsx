@@ -100,15 +100,15 @@ describe("Gallery", () => {
   it("opens the viewer on a plain click and walks the grid's order", () => {
     show();
     fireEvent.click(card("picture b"));
-    const dialog = screen.getByRole("dialog");
+    const dialog = screen.getByRole("region", { name: /^Viewer/ });
     expect(dialog.getAttribute("aria-label")).toBe("Viewer: picture b");
     fireEvent.keyDown(window, { key: "ArrowRight" });
-    expect(screen.getByRole("dialog").getAttribute("aria-label")).toBe("Viewer: picture c");
+    expect(screen.getByRole("region", { name: /^Viewer/ }).getAttribute("aria-label")).toBe("Viewer: picture c");
     fireEvent.keyDown(window, { key: "ArrowRight" });
     // The audiobook gets a real player.
     expect(screen.getByRole("group", { name: "Player: Chapter one" })).toBeTruthy();
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("region", { name: /^Viewer/ })).toBeNull();
   });
 
   it("opens a board as a comic, not as its first panel", () => {
@@ -116,7 +116,7 @@ describe("Gallery", () => {
     fireEvent.click(card("Night train"));
     expect(screen.getByRole("heading", { name: "Night train" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /^Panel 2/ }));
-    expect(screen.getByRole("dialog").getAttribute("aria-label")).toBe("Viewer: picture p2");
+    expect(screen.getByRole("region", { name: /^Viewer/ }).getAttribute("aria-label")).toBe("Viewer: picture p2");
   });
 
   it("is one tab stop, walked with the arrow keys; Space selects and Enter opens", () => {
@@ -141,7 +141,7 @@ describe("Gallery", () => {
     // Space selects rather than opening.
     fireEvent.keyDown(first, { key: " " });
     expect(screen.getByText("1 selected")).toBeTruthy();
-    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("region", { name: /^Viewer/ })).toBeNull();
   });
 
   it("keeps the pick beside the tile's open button, not inside it", () => {
