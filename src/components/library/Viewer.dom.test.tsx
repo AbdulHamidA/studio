@@ -150,6 +150,18 @@ describe("Viewer keyboard", () => {
 });
 
 describe("AudioPlayer", () => {
+  it("leaves Space to a focused button and offers speeds up to 4x", () => {
+    render(<AudioPlayer src="vault://localhost/book" shortcuts="global" />);
+    const audio = document.querySelector("audio")!;
+    const back = screen.getByRole("button", { name: "Back 15 seconds" });
+    back.focus();
+    fireEvent.keyDown(back, { key: " " });
+    expect(audio.play).not.toHaveBeenCalled();
+    fireEvent.keyDown(document.body, { key: " " });
+    expect(audio.play).toHaveBeenCalled();
+    expect(screen.getByRole("option", { name: "4×" })).toBeTruthy();
+  });
+
   it("plays, skips fifteen seconds and changes speed, and remembers the speed", () => {
     render(<AudioPlayer src="vault://localhost/book" title="Chapter one"
                         markers={[{ time: 0, label: "Opening" }, { time: 60, label: "The train" }]} />);
@@ -185,7 +197,9 @@ describe("AudioPlayer", () => {
     expect(audio.currentTime).toBe(15);
     fireEvent.keyDown(play, { key: "." });
     expect(audio.playbackRate).toBe(1.25);
-    fireEvent.keyDown(play, { key: " " });
+    // Space on a button is the button's own click; elsewhere in the player
+    // it plays and pauses.
+    fireEvent.keyDown(audio.parentElement!, { key: " " });
     expect(audio.play).toHaveBeenCalled();
   });
 });

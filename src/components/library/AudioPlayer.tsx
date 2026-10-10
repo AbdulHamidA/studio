@@ -78,6 +78,10 @@ export default function AudioPlayer({
     if (t && (t.tagName === "INPUT" && (t as HTMLInputElement).type !== "range"
               || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return false;
     if (e.metaKey || e.ctrlKey || e.altKey) return false;
+    // Space and Enter belong to a focused button or link: it was being
+    // swallowed as play/pause, so "Back 15", a chapter, Close or Delete could
+    // not be pressed from the keyboard.
+    if ((e.key === " " || e.key === "Enter") && t?.closest("button, a, [role=button], summary")) return false;
     switch (e.key) {
       case " ": case "k": case "K": toggle(); break;
       case "j": case "J": skip(-SKIP); break;
@@ -174,7 +178,8 @@ export default function AudioPlayer({
         <ol className="ap-chapters">
           {[...markers].sort((a, b) => a.time - b.time).map((m) => (
             <li key={`${m.time}-${m.label}`}>
-              <button className={m === chapter ? "on" : ""} onClick={() => seek(m.time)}>
+              <button className={m === chapter ? "on" : ""} aria-current={m === chapter ? "true" : undefined}
+                onClick={() => seek(m.time)}>
                 <span>{m.label}</span><span className="ap-time">{clock(m.time)}</span>
               </button>
             </li>
