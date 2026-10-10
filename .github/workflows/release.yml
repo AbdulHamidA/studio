@@ -130,6 +130,9 @@ jobs:
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist-release/*
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: Model Studio ${{ github.event.inputs.tag || github.ref_name }}
           draft: true
+          prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
           generate_release_notes: true
           body_path: .github/RELEASE_NOTES.md
