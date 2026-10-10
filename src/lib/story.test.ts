@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { castFromBook, EMPTY_LIBRARY, keepBook, voiceGroups, voiceLanguage, type StoryBook, type StoryLibrary } from "./story";
+import { castFromBook, EMPTY_LIBRARY, keepBook, voiceGroups, voiceLabel, voiceLanguage, type StoryBook, type StoryLibrary } from "./story";
 import { CHAIN_LIMIT, lockStyle, panelPrompt, identityPrompt, storyContinuityReference, storyPanelReferences } from "./board";
 import { staleness } from "./boardDoc";
 import type { Panel } from "./types";
@@ -104,5 +104,14 @@ describe("voice choice", () => {
     const groups = voiceGroups([{ id: "Samantha", language: "en_US" }, { id: "Rishi", language: "en_IN" },
       { id: "Lekha", language: "hi_IN" }, { id: "hm_omega", language: "Hindi / Indian English" }]);
     expect(groups.map(([label]) => label)).toEqual(["English (India)", "Hindi (India)", "Hindi / Indian English", "American English"]);
+  });
+});
+
+describe("voice labels", () => {
+  it("names engine voices by person, accent and gender", () => {
+    expect(voiceLabel("hm_omega")).toBe("Omega · Hindi, male");
+    expect(voiceLabel("bf_isabella")).toBe("Isabella · UK, female");
+    expect(voiceLabel("uncle_fu")).toBe("Uncle Fu · male");
+    expect(voiceLabel("Rishi")).toBe("Rishi");
   });
 });

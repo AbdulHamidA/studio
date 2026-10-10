@@ -97,6 +97,9 @@ export interface AudioSettings {
   voices: Record<string, string>;
   rate: number;
   outputs: Record<string, string[]>;
+  /** Narrator and character voices last chosen on each speech engine, so
+   *  switching engines and back does not lose a cast. */
+  casts?: Record<string, { narrator: string; voices: Record<string, string> }>;
 }
 export interface StoryLibrary {
   version: 1;
@@ -155,4 +158,20 @@ export function castFromBook(book: StoryBook) {
       .filter((b) => b.visible.some((a) => a.character_id === c.id)).length,
     tier: i === 0 ? 1 : 2,
   })), places: [], words: book.chapters.at(-1)?.source.split(/\s+/).length ?? 0 };
+}
+
+const QWEN_VOICES: Record<string, string> = {
+  ryan: "male", aiden: "male", dylan: "male", eric: "male", uncle_fu: "male",
+  vivian: "female", serena: "female", ono_anna: "female", sohee: "female",
+};
+const KOKORO_ACCENT: Record<string, string> = {
+  a: "US", b: "UK", h: "Hindi", e: "Spanish", f: "French", i: "Italian", p: "Portuguese",
+};
+/** "hm_omega" -> "Omega · Hindi, male"; "vivian" -> "Vivian · female". */
+export function voiceLabel(id: string): string {
+  const title = (s: string) => s.split("_").map((w) => w[0]?.toUpperCase() + w.slice(1)).join(" ");
+  const kokoro = /^([abhefip])([fm])_(.+)$/.exec(id);
+  if (kokoro) return `${title(kokoro[3])} · ${KOKORO_ACCENT[kokoro[1]]}, ${kokoro[2] === "f" ? "female" : "male"}`;
+  if (QWEN_VOICES[id]) return `${title(id)} · ${QWEN_VOICES[id]}`;
+  return id;
 }

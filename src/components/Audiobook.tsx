@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errText, isCancelled, newJobId, onEngineProgress, vaultUrl } from "../lib/api";
-import { ANALYST_IDS, KOKORO_MODEL_ID, SPEECH_MODEL_ID, keepBook, unanalysedIn, voiceGroups, type AudioSettings, type StoryLibrary } from "../lib/story";
+import { ANALYST_IDS, KOKORO_MODEL_ID, SPEECH_MODEL_ID, keepBook, unanalysedIn, voiceGroups, voiceLabel, type AudioSettings, type StoryLibrary } from "../lib/story";
 import type { EngineProgress, ModelStatus } from "../lib/types";
 import { JobProgress } from "./shared";
 import { useNowPlaying } from "../lib/nowPlaying";
@@ -30,14 +30,18 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
   const book = library?.books.find((b) => b.id === (bookId || library.activeBookId)) ?? library?.books.at(-1);
   const chapter = book?.chapters.find((c) => c.id === chapterId) ?? book?.chapters.at(-1);
   const saved = book && library?.audio?.[book.id];
-  const settings: AudioSettings = saved ?? { narrator: "", voices: {}, rate: 160, outputs: {} };
+  // Edits show at once and are saved shortly after. Bound straight to the
+  // library, every keystroke waited on an encrypted write, so typed letters
+  // were dropped and the pace slider snapped back.
+  const [draft, setDraft] = useState<Partial<AudioSettings>>({});
+  const settings: AudioSettings = { ...(saved ?? { narrator: "", voices: {}, rate: 160, outputs: {} }), ...draft };
   const speechModel = settings.model_id || SPEECH_MODEL_ID;
   // Language, delivery and per-character direction are Qwen3-TTS's; Kokoro
   // and macOS voices take pace only.
   const neural = speechModel === SPEECH_MODEL_ID;
   const speechReady = speechModel === "macos" || models.some((m) => m.id === speechModel && m.installed && !m.hopeless);
   const voiceOptions = voiceGroups(voices).map(([label, list]) => <optgroup key={label} label={label}>
-    {list.map((v) => <option key={v.id} value={v.id}>{v.id}</option>)}</optgroup>);
+    {list.map((v) => <option key={v.id} value={v.id}>{voiceLabel(v.id)}</option>)}</optgroup>);
   useEffect(() => {
     let live = true;
     setVoices([]); setVoiceError("");
@@ -48,6 +52,10 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
   const narrator = voices.some((v) => v.id === settings.narrator) ? settings.narrator : voices[0]?.id || "";
   const assignedVoices = Object.fromEntries(Object.entries(settings.voices).filter(([, voice]) => voices.some((v) => v.id === voice)));
   const outputs = chapter ? settings.outputs[chapter.id] ?? [] : [];
+  const linesBy: Record<string, number> = {};
+  for (const line of chapter?.scenes.flatMap((s) => s.beats.flatMap((b) => b.dialogue)) ?? []) {
+    if (line.speaker_id) linesBy[line.speaker_id] = (linesBy[line.speaker_id] ?? 0) + 1;
+  }
   // Scene markers are kept on the recording's vault item.
   const [markerFor, setMarkerFor] = useState<Record<string, { time: number; label: string }[]>>({});
   const outputKey = outputs.join(",");
@@ -64,6 +72,8 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
   // Hear a voice before choosing it. The sample is the character's own first
   // line when there is one, so the choice is made on words from this story.
   const [previewing, setPreviewing] = useState<string | null>(null);
+  const [sounding, setSounding] = useState<string | null>(null);
+  const stopPreview = () => { player.current?.pause(); setSounding(null); };
   const player = useRef<HTMLAudioElement | null>(null);
   useEffect(() => () => { player.current?.pause(); }, []);
   const sampleFor = (characterId: string | null) => {
@@ -86,7 +96,8 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
       const url = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
       player.current?.pause();
       const audio = new Audio(url);
-      audio.onended = () => URL.revokeObjectURL(url);
+      audio.onended = () => { URL.revokeObjectURL(url); setSounding(null); };
+      setSounding(key);
       player.current = audio;
       await audio.play();
     } catch (e) {
@@ -95,20 +106,40 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
       if (mounted.current) setPreviewing(null);
     }
   };
+  // One button per voice: play a sample, and stop it while it plays.
   const PreviewButton = ({ id, voice, character, label }: { id: string; voice: string; character: string | null; label: string }) =>
-    <button type="button" className="btn small" aria-label={label} title={`Hear ${voice}`}
-      disabled={!!job || !!previewing || !voice || !speechReady}
-      onClick={() => void preview(id, voice, character)}>{previewing === id ? "…" : "▶"}</button>;
+    sounding === id
+      ? <button type="button" className="btn small" aria-label={`Stop ${label.replace(/^Preview /, "")} preview`}
+          onClick={stopPreview}>■</button>
+      : <button type="button" className="btn small" aria-label={label} title={`Hear ${voiceLabel(voice)}`}
+          aria-busy={previewing === id} disabled={!!job || !!previewing || !voice || !speechReady}
+          onClick={() => { stopPreview(); void preview(id, voice, character); }}>{previewing === id ? "…" : "▶"}</button>;
 
+  const pending = useRef<{ book: string; patch: Partial<AudioSettings>; timer?: number }>({ book: "", patch: {} });
+  useEffect(() => { setDraft({}); }, [book?.id]);
+  const flush = () => {
+    const { book: id, patch, timer } = pending.current;
+    window.clearTimeout(timer);
+    if (!id || !Object.keys(patch).length) return;
+    pending.current = { book: id, patch: {} };
+    void onLibraryChange((current) => ({ ...current, audio: { ...current.audio,
+      [id]: { ...(current.audio?.[id] ?? settings), ...patch } } }))
+      .catch((e) => notify(`Could not save voice settings: ${errText(e)}`, true));
+  };
+  useEffect(() => flush, []); // eslint-disable-line react-hooks/exhaustive-deps
   const saveSettings = (patch: Partial<AudioSettings> | ((latest: AudioSettings) => Partial<AudioSettings>)) => {
     if (!book) return;
-    const id = book.id;
-    void onLibraryChange((current) => {
-      const latest = current.audio?.[id] ?? settings;
-      return { ...current, audio: { ...current.audio,
-        [id]: { ...latest, ...(typeof patch === "function" ? patch(latest) : patch) },
-      } };
-    }).catch((e) => notify(`Could not save voice settings: ${errText(e)}`, true));
+    const resolved = typeof patch === "function" ? patch(settings) : patch;
+    if (pending.current.book !== book.id) flush();
+    pending.current = { book: book.id, patch: { ...pending.current.patch, ...resolved } };
+    setDraft((d) => ({ ...d, ...resolved }));
+    window.clearTimeout(pending.current.timer);
+    pending.current.timer = window.setTimeout(flush, 400);
+  };
+  // Each engine keeps its own cast; switching back restores it.
+  const switchEngine = (next: string) => {
+    const casts = { ...settings.casts, [speechModel]: { narrator: settings.narrator, voices: settings.voices } };
+    saveSettings({ model_id: next, casts, ...(casts[next] ?? { narrator: "", voices: {} }) });
   };
   const perform = async (action: (id: string) => Promise<void>) => {
     const id = newJobId(); setJob(id); setProgress(null);
@@ -194,7 +225,7 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
       </div>}
       {book && chapter && <>
         <label>Speech engine<select value={speechModel} disabled={!!job}
-          onChange={(e) => saveSettings({ model_id: e.target.value, narrator: "", voices: {} })}>
+          onChange={(e) => switchEngine(e.target.value)}>
           <option value={KOKORO_MODEL_ID}>Kokoro · fast, Hindi and Indian English voices</option>
           <option value={SPEECH_MODEL_ID}>Qwen3-TTS · expressive, slower</option>
           <option value="macos">macOS system voices · includes Indian voices</option>
@@ -217,7 +248,10 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
         <label>{neural ? `Reading pace · ${settings.rate} (approximate)` : `Reading speed · ${settings.rate} words/minute`}<input type="range" min={80} max={300}
           value={settings.rate} disabled={!!job} onChange={(e) => saveSettings({ rate: Number(e.target.value) })} /></label>
         <div className="sub-head">Character voices</div>
-        {book.characters.map((c) => <label key={c.id}>{c.name}
+        {/* Who speaks most in this chapter comes first, with their line count;
+            those silent here follow, so a long bible does not bury the cast. */}
+        {[...book.characters].sort((a, b) => (linesBy[b.id] ?? 0) - (linesBy[a.id] ?? 0)).map((c) => <label key={c.id}>
+          {c.name} <span className="t-meta">· {linesBy[c.id] ? `${linesBy[c.id]} line${linesBy[c.id] === 1 ? "" : "s"}` : "silent in this chapter"}</span>
           {c.voice && <small className="muted">{c.voice}</small>}
           <select aria-label={`${c.name} voice`} value={assignedVoices[c.id] ?? ""} disabled={!!job}
             onChange={(e) => {
@@ -241,7 +275,9 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
         <button className="btn primary" disabled={!!job || !speechReady || !narrator || !voices.some((v) => v.id === narrator)}
           onClick={() => void narrate()}>Narrate chapter</button>
       </>}
-      {!voices.length && <p className="notice warn">{voiceError || (neural ? "Neural voices are loading." : "Installed macOS speech voices are required for narration. Manage voices in macOS Accessibility → Spoken Content.")}</p>}
+      {!voices.length && <p className="notice warn">{voiceError || (speechModel === "macos"
+        ? "Installed macOS speech voices are required for narration. Manage voices in macOS Accessibility → Spoken Content."
+        : `${speechModel === KOKORO_MODEL_ID ? "Kokoro" : "Qwen3-TTS"} voices are loading.`)}</p>}
       {job && <button className="btn" onClick={() => void api.cancelJob(job).catch((e) => notify(errText(e), true))}>Stop</button>}
       {progress && <JobProgress p={progress} label="Audiobook" />}
     </div>
@@ -261,7 +297,7 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
         </div>;
       })}
       {outputs.length > 0 && <p className="t-help">Recordings are in the Vault too, where they can be exported as WAV.</p>}
-      {chapter && <details><summary>Original text · {chapter.scenes.length} analyzed scenes</summary>
+      {chapter && <details><summary>Transcript · {chapter.scenes.length} scenes</summary>
         <p style={{ whiteSpace: "pre-wrap" }}>{chapter.source}</p></details>}
       {chapter?.scenes.map((scene) => <section key={scene.id} className="notice">
         <h4>{scene.title}</h4><p>{scene.summary}</p>
