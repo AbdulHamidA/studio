@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { api, errText } from "../lib/api";
 import type { VaultStatus } from "../lib/types";
 import { MIN_PASSPHRASE, strength } from "../lib/passphrase";
@@ -17,6 +17,8 @@ export default function VaultGate({
   const creating = !status.exists;
 
   const [pass, setPass] = useState("");
+  const ids = useId();
+  const confirmRef = useRef<HTMLInputElement>(null);
   const [confirm, setConfirm] = useState("");
   const [useBiometry, setUseBiometry] = useState(true);
   const [ack, setAck] = useState(false);
@@ -80,11 +82,14 @@ export default function VaultGate({
           )}
 
           <div className="field">
-            <label>
+            <label htmlFor={`${ids}-pass`}>
               Passphrase
-              {creating && <em>{pass.length} / {MIN_PASSPHRASE} minimum</em>}
+              {creating && <em id={`${ids}-min`}>{pass.length} / {MIN_PASSPHRASE} minimum</em>}
             </label>
             <input
+              id={`${ids}-pass`}
+              aria-describedby={creating ? `${ids}-min ${ids}-strength` : err ? `${ids}-err` : undefined}
+              aria-invalid={!!err || undefined}
               type="password"
               value={pass}
               autoFocus
@@ -93,7 +98,8 @@ export default function VaultGate({
               autoCapitalize="off"
               spellCheck={false}
               onChange={(e) => setPass(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && !creating) void submit(); }}
+              // Enter moves on to the confirmation when creating, as forms do.
+              onKeyDown={(e) => { if (e.key === "Enter") { if (creating) confirmRef.current?.focus(); else void submit(); } }}
               placeholder={creating ? "Four or more unrelated words works well" : ""}
             />
             {creating && pass.length > 0 && (
@@ -104,7 +110,7 @@ export default function VaultGate({
                     style={{ width: `${(s.score / 4) * 100}%` }}
                   />
                 </div>
-                <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5 }}>
+                <div id={`${ids}-strength`} className="t-help" style={{ marginTop: 5 }} aria-live="polite">
                   {s.label}
                 </div>
               </>
@@ -114,8 +120,10 @@ export default function VaultGate({
           {creating && (
             <>
               <div className="field">
-                <label>Confirm passphrase</label>
+                <label htmlFor={`${ids}-confirm`}>Confirm passphrase</label>
                 <input
+                  id={`${ids}-confirm`}
+                  ref={confirmRef}
                   type="password"
                   value={confirm}
                   autoComplete="off"
@@ -162,7 +170,7 @@ export default function VaultGate({
           )}
 
           {err && (
-            <div className="notice bad" style={{ marginBottom: 12 }}>
+            <div className="notice bad" role="alert" id={`${ids}-err`} style={{ marginBottom: 12 }}>
               <span style={{ whiteSpace: "pre-wrap" }}>{err}</span>
             </div>
           )}

@@ -100,7 +100,10 @@ export default function App() {
     saveLibrary((current) => ({ ...current, books: current.books.map((book) => book.id === bookId
       ? { ...book, references: { ...book.references, [characterId]: reference } } : book) })), [saveLibrary]);
 
-  const notify = useCallback((msg: string, bad?: boolean) => setToast({ msg, bad }), []);
+  // An error waits to be read; good news arriving after it must not replace
+  // it and then fade, taking the error with it.
+  const notify = useCallback((msg: string, bad?: boolean) =>
+    setToast((current) => (current?.bad && !bad ? current : { msg, bad })), []);
 
   /**
    * Anything that got away.
@@ -142,7 +145,7 @@ export default function App() {
     if (dest === "edit") { setEditImages(ids); setTab("edit"); }
     if (dest === "video") { setVideoFrame(ids.slice(0, 1)); setTab("video"); }
     if (dest === "upscale") { setUpscaleImage(ids.slice(0, 1)); setTab("upscale"); }
-    const where = dest === "edit" ? "Edit" : dest === "video" ? "Video" : "Enlarge";
+    const where = dest === "edit" ? "Edit" : dest === "video" ? "Video" : "Upscale";
     notify(`Carried over to ${where}.`);
   }, [notify]);
 

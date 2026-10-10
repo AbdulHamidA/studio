@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, errText } from "../lib/api";
 import type { VaultStatus } from "../lib/types";
@@ -15,6 +15,7 @@ export default function Security({
   onImported: () => void;
   onStorageMoved: () => void;
 }) {
+  const ids = useId();
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -162,18 +163,18 @@ export default function Security({
       <div className="panel">
         <h2>Change passphrase</h2>
         <div className="field">
-          <label>Current passphrase</label>
-          <input type="password" autoComplete="off" value={current}
+          <label htmlFor={`${ids}-current`}>Current passphrase</label>
+          <input id={`${ids}-current`} type="password" autoComplete="off" value={current}
             onChange={(e) => setCurrent(e.target.value)} />
         </div>
         <div className="field">
-          <label>New passphrase <em>{MIN_PASSPHRASE} characters minimum</em></label>
-          <input type="password" autoComplete="off" value={next}
+          <label htmlFor={`${ids}-next`}>New passphrase <em id={`${ids}-min`}>{MIN_PASSPHRASE} characters minimum</em></label>
+          <input id={`${ids}-next`} aria-describedby={`${ids}-min`} type="password" autoComplete="off" value={next}
             onChange={(e) => setNext(e.target.value)} />
         </div>
         <div className="field">
-          <label>Confirm new passphrase</label>
-          <input type="password" autoComplete="off" value={confirm}
+          <label htmlFor={`${ids}-confirm`}>Confirm new passphrase</label>
+          <input id={`${ids}-confirm`} type="password" autoComplete="off" value={confirm}
             onChange={(e) => setConfirm(e.target.value)} />
         </div>
         <button

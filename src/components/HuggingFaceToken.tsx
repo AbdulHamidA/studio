@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { api, errText } from "../lib/api";
 
 /**
@@ -14,6 +14,7 @@ export default function HuggingFaceToken({
 }: {
   notify: (m: string, bad?: boolean) => void;
 }) {
+  const ids = useId();
   const [status, setStatus] = useState<{ present: boolean; hint: string | null } | null>(null);
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
@@ -54,8 +55,9 @@ export default function HuggingFaceToken({
       ) : null}
 
       <div className="field">
-        <label>{status?.present ? "Replace token" : "Access token"}</label>
+        <label htmlFor={`${ids}-token`}>{status?.present ? "Replace token" : "Access token"}</label>
         <input
+          id={`${ids}-token`}
           type="password"
           value={token}
           spellCheck={false}
