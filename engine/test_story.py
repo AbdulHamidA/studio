@@ -812,3 +812,29 @@ class CompactBoardAnalysis(unittest.TestCase):
         beat = book['chapters'][1]['scenes'][0]['beats'][0]
         self.assertEqual(beat['visible'][0]['appearance'], 'grey apron')
         self.assertEqual(beat['location_state'], 'tar and oranges, storm outside')
+
+
+class SmallWriterSlips(unittest.TestCase):
+    SOURCE = 'Agnes waved. Tam ran. “Wait!” Agnes called. The boat left. Silence.'
+
+    def test_an_invented_person_is_dropped_instead_of_losing_the_passage(self):
+        reply = {"title": "Pier", "characters": [{"id": "c1", "name": "Agnes", "aliases": [], "visual": "", "voice": ""},
+                                                 {"id": "c9", "name": "The harbourmaster", "aliases": [], "visual": "", "voice": ""}],
+                 "beats": [{"units": [0, 1, 2, 3, 4], "importance": 2, "action": "a", "place": "pier", "mood": "m",
+                            "cast": [{"id": "c1", "feel": "calm"}, {"id": "c9", "feel": "stern"}]}],
+                 "speakers": [{"quote": 1, "id": "c9"}]}
+        book = story.analyze(self.SOURCE, lambda *_: json.dumps(reply), passage_words=99, passage_units=9)
+        scene = book['chapters'][0]['scenes'][0]
+        self.assertFalse(scene.get('unanalysed'))
+        self.assertEqual([c['name'] for c in book['characters']], ['Agnes'])
+        self.assertIsNone(scene['beats'][0]['dialogue'][0]['speaker_id'])
+
+    def test_skipped_and_repeated_units_are_regrouped_in_order(self):
+        reply = {"title": "Pier", "characters": [],
+                 "beats": [{"units": [0, 1], "importance": 2, "action": "a", "place": "pier", "mood": "m", "cast": []},
+                           {"units": [1, 4], "importance": 3, "action": "b", "place": "pier", "mood": "m", "cast": []}],
+                 "speakers": []}
+        book = story.analyze(self.SOURCE, lambda *_: json.dumps(reply), passage_words=99, passage_units=9)
+        chapter = book['chapters'][0]
+        self.assertFalse(chapter['scenes'][0].get('unanalysed'))
+        self.assertEqual(''.join(b['source'] for s in chapter['scenes'] for b in s['beats']), self.SOURCE)

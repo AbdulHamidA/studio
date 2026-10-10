@@ -39,7 +39,7 @@ def voice_instruction(group, characters):
             + "\nPassage:\n" + ''.join(numbered))
 
 
-def voice_scene_reply(raw, group, number):
+def voice_scene_reply(raw, group, number, bible=()):
     """A voice reply restated as a scene reply, so `parse_scene` applies every
     identity and source rule to it unchanged. One beat per passage: the
     audiobook needs who speaks and the mood, not shots or appearances."""
@@ -49,6 +49,7 @@ def voice_scene_reply(raw, group, number):
     reply = json.loads(raw)
     if not isinstance(reply, dict):
         raise ValueError("reply must be an object")
+    _tidy_reply(reply, group, bible)
     said = {}
     for line in _array(reply.get("speakers", []), "speakers"):
         if isinstance(line, dict) and type(line.get("quote")) is int:
@@ -194,7 +195,63 @@ def _place_key(place):
     return re.sub(r'[^\w]+', '-', place.casefold()).strip('-')
 
 
-def compact_scene_reply(raw, group, continuity=None):
+def _tidy_reply(reply, group, bible):
+    """Repairs a small writer's slips that need no judgement, in place.
+
+    A declared person whose name is nowhere in the passage, or beats that skip
+    or repeat a unit, used to reject the whole passage -- and after a retry
+    leave it unanalysed, losing everyone in it. The person is dropped (lines
+    they were given stay unattributed) and the units are regrouped in order;
+    no source text is touched either way."""
+    text = ''.join(u["text"] for u in group)
+    known = {c["id"] for c in bible}
+    keep, dropped = [], set()
+    for person in reply.get("characters") or []:
+        if not isinstance(person, dict):
+            continue
+        names = [person.get("name"), *(person.get("aliases") or [])]
+        literal = any(isinstance(n, str) and n.strip() and re.search(
+            r'(?<!\w)' + re.escape(n.strip()) + r'(?!\w)', text, re.I) for n in names)
+        narrator = isinstance(person.get("name"), str) and re.fullmatch(
+            r'(?:the\s+)?narrator', person["name"].strip(), re.I)
+        if literal or narrator or person.get("id") in known:
+            keep.append(person)
+        else:
+            dropped.add(person.get("id"))
+    reply["characters"] = keep
+    beats = [b for b in reply.get("beats") or [] if isinstance(b, dict)]
+    for beat in beats:
+        beat["cast"] = [a for a in beat.get("cast") or [] if isinstance(a, dict) and a.get("id") not in dropped]
+    for line in reply.get("speakers") or []:
+        if isinstance(line, dict) and line.get("id", line.get("speaker_id")) in dropped:
+            line["id"] = line["speaker_id"] = None
+    # Walk the units in order. A unit starts a new run when it is claimed by
+    # a beat not used yet; otherwise (unclaimed, repeated, or claimed out of
+    # order) it joins the current run. Every beat is a contiguous run, in order.
+    claim = {}
+    for b, beat in enumerate(beats):
+        for n in beat.get("units") or []:
+            if type(n) is int and 0 <= n < len(group):
+                claim.setdefault(n, b)
+    if beats:
+        runs, used = [], set()
+        for n in range(len(group)):
+            b = claim.get(n)
+            if not runs or (b is not None and b not in used):
+                b = b if b is not None and b not in used else next(
+                    (i for i in range(len(beats)) if i not in used), None)
+                if b is None:
+                    runs[-1][1].append(n)
+                    continue
+                used.add(b)
+                runs.append((b, [n]))
+            else:
+                runs[-1][1].append(n)
+        reply["beats"] = [{**beats[b], "units": ids} for b, ids in runs]
+    return reply
+
+
+def compact_scene_reply(raw, group, continuity=None, bible=()):
     """A compact reply restated as a scene reply. A reply already in the scene
     format (a larger writer may keep it) is passed through unchanged."""
     raw = raw.strip()
@@ -206,6 +263,7 @@ def compact_scene_reply(raw, group, continuity=None):
     beats = _array(reply.get("beats"), "beats")
     if "summary" in reply or any(isinstance(b, dict) and ("visible" in b or "setting" in b) for b in beats):
         return raw
+    beats = _tidy_reply(reply, group, bible)["beats"]
     continuity = continuity or {}
     looks = {l.get("id"): l.get("appearance") for l in _array(reply.get("looks", []), "looks")
              if isinstance(l, dict) and isinstance(l.get("appearance"), str)}
@@ -517,7 +575,7 @@ def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: N
         for attempt in range(2):
             raw = write(VOICE_SYSTEM if voice else COMPACT_SYSTEM, prompt)
             try:
-                reply = voice_scene_reply(raw, group, i + 1) if voice else compact_scene_reply(raw, group, continuity)
+                reply = voice_scene_reply(raw, group, i + 1, book["characters"]) if voice else compact_scene_reply(raw, group, continuity, book["characters"])
                 scene, characters = parse_scene(reply, group, book["characters"], f"{chapter_id}-s{i + 1}")
                 break
             except (ValueError, TypeError, KeyError, AttributeError) as exc:
