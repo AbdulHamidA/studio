@@ -5,6 +5,7 @@ import { hostAnswers } from "../test/setup";
 import Storyboard from "./Storyboard";
 import type { ModelStatus, Panel } from "../lib/types";
 import type { StoryBook, StoryLibrary } from "../lib/story";
+import { lockStyle, STYLES } from "../lib/board";
 
 vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({ onDragDropEvent: async () => () => {} }),
@@ -52,6 +53,22 @@ describe("Board shared story workflow", () => {
     expect(await screen.findByText("Story direction · The reveal")).toBeTruthy();
     expect(screen.getByLabelText("Mira expression")).toBeTruthy();
     expect(screen.getByRole("button", { name: /Draw 1 of 1/ })).toBeTruthy();
+  });
+  it("draws a new character sheet when the saved one was deleted from the Vault", async () => {
+    const reference = { image: "deleted-sheet", style_words: lockStyle(STYLES[0].id).words,
+      visual: "red coat", kind: "identity-face-v1" as const };
+    const saved = { ...book, references: { mira: reference } };
+    const generate = vi.fn(() => ["new-sheet"]);
+    const edit = vi.fn(() => ["panel-image"]);
+    hostAnswers({ direct_story: () => ({ panels: [panel] }), vault_list: () => [],
+      generate, edit_image: edit });
+    show({ version: 1, books: [saved], activeBookId: saved.id });
+    fireEvent.change(await screen.findByLabelText("Use an analyzed chapter"), { target: { value: "book:chapter" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Draw 1 of 1/ }));
+    await waitFor(() => expect(edit).toHaveBeenCalled());
+    expect(generate).toHaveBeenCalledTimes(1);
+    const images = (edit.mock.calls[0] as unknown as [{ args: { images: string[] } }])[0].args.images;
+    expect(images).toEqual(["new-sheet"]);
   });
   it("loads an Audiobook chapter without running story analysis again", async () => {
     const direct = vi.fn(() => ({ panels: [panel] }));

@@ -1073,6 +1073,11 @@ export default function Storyboard({
       if (panels[i].cast !== undefined) {
         const actors = panels[i].cast!;
         const ids: string[] = [];
+        // A sheet deleted in the Vault was reused anyway and failed every panel
+        // with that character until "recast"; a missing one is drawn again.
+        let present: Set<string> | null = null;
+        const exists = async (id: string) =>
+          (present ??= new Set((await api.vaultList()).map((item) => item.id))).has(id);
         for (const actor of actors) {
           if (stop.current) return false;
           const person = cast?.people.find((p) => p.id === actor.character_id);
@@ -1086,6 +1091,7 @@ export default function Storyboard({
             ref = saved.image;
           }
           if (person === lead && ownSheet[0]) ref = ownSheet[0];
+          if (ref && !(await exists(ref))) ref = undefined;
           if (!ref) {
             const generated = await api.generate({
               job_id: id, model_id: model.id,
