@@ -1547,6 +1547,7 @@ async fn run_job(
             // Only a composed page belongs to a composition. A panel, a sheet
             // or a one-off generation is not a member of anything.
             composition: None,
+            markers: Vec::new(),
             // Everything needed to run this again and get this picture. All of
             // it was already resolved above and thrown away, which is why
             // "use these settings" restored the prompt and the seed and
@@ -3182,6 +3183,7 @@ pub async fn generate_audiobook(
         prompt: title,
         created_at: chrono::Local::now().to_rfc3339(),
         duration_ms: started.elapsed().as_millis() as u64,
+        markers: serde_json::from_value(result["markers"].clone()).unwrap_or_default(),
         ..Default::default()
     };
     if let Err(error) = state.vault.commit_slot(item) {

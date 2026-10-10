@@ -856,17 +856,19 @@ def narration_segments(book, chapter_id):
     chapter = _with_tags(book, chapter)
     # Narration is split at beats so it carries the beat's mood like dialogue
     # does; it is most of a chapter and was always read without one.
+    # Each segment names its scene, so narration can mark where scenes begin.
     source, segments = chapter["source"], []
     for scene in chapter["scenes"]:
+        tag = {"scene": scene["title"]}
         for beat in scene["beats"]:
             cursor = beat["start"]
             for line in beat["dialogue"]:
                 if line["start"] > cursor:
-                    segments.append({"speaker_id": None, "text": source[cursor:line["start"]], "mood": beat["mood"]})
-                segments.append({"speaker_id": line["speaker_id"], "text": line["text"], "mood": beat["mood"]})
+                    segments.append({"speaker_id": None, "text": source[cursor:line["start"]], "mood": beat["mood"], **tag})
+                segments.append({"speaker_id": line["speaker_id"], "text": line["text"], "mood": beat["mood"], **tag})
                 cursor = line["end"]
             if beat["end"] > cursor:
-                segments.append({"speaker_id": None, "text": source[cursor:beat["end"]], "mood": beat["mood"]})
+                segments.append({"speaker_id": None, "text": source[cursor:beat["end"]], "mood": beat["mood"], **tag})
     return segments
 
 

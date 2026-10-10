@@ -53,8 +53,14 @@ def render_segment(text, voice, rate, directory, check_cancel):
     return Path(wav).read_bytes()
 
 
+def _mark(markers, segment, seconds):
+    """A chapter marker where a new scene's narration begins."""
+    if markers is not None and segment.get("scene") and (not markers or markers[-1]["label"] != segment["scene"]):
+        markers.append({"time": round(seconds, 2), "label": segment["scene"]})
+
+
 def synthesize(segments, narrator, assignments, rate, staging, check_cancel,
-               progress=lambda *_: None, render=render_segment, available=None):
+               progress=lambda *_: None, render=render_segment, available=None, markers=None):
     available = {v["id"] for v in voices()} if available is None else set(available)
     if narrator not in available or any(v not in available for v in assignments.values()):
         raise ValueError("choose an installed macOS voice for narrator and characters")
@@ -70,6 +76,7 @@ def synthesize(segments, narrator, assignments, rate, staging, check_cancel,
             for i, segment in enumerate(segments):
                 check_cancel()
                 progress(i, len(segments))
+                _mark(markers, segment, frames / 24000)
                 for part in re.findall(r'[\s\S]{1,1800}(?:\s|$)|[\s\S]{1,1800}', segment["text"]):
                     if not part.strip() or not any(c.isalnum() for c in part):
                         continue
@@ -148,7 +155,7 @@ def kokoro_language(voice, text):
 
 
 def synthesize_kokoro(segments, narrator, assignments, rate, check_cancel,
-                      progress=lambda *_: None, load=load_kokoro_model):
+                      progress=lambda *_: None, load=load_kokoro_model, markers=None):
     if narrator not in KOKORO_VOICES or any(v not in KOKORO_VOICES for v in assignments.values()):
         raise ValueError("choose Kokoro voices for narrator and characters")
     if type(rate) is not int or not 80 <= rate <= 300:
@@ -165,6 +172,7 @@ def synthesize_kokoro(segments, narrator, assignments, rate, check_cancel,
             final.setframerate(24000)
             total, done = sum(len(s["text"]) for s in segments) or 1, 0
             for segment in segments:
+                _mark(markers, segment, frames / 24000)
                 voice = assignments.get(segment["speaker_id"], narrator)
                 for part in speech_chunks(segment["text"]):
                     check_cancel()
@@ -240,7 +248,7 @@ def load_neural_model():
 
 def synthesize_neural(segments, narrator, assignments, rate, check_cancel,
                       progress=lambda *_: None, language="auto", delivery="",
-                      directions=None, character_directions=None, load=load_neural_model):
+                      directions=None, character_directions=None, load=load_neural_model, markers=None):
     if narrator not in NEURAL_SPEAKERS or any(v not in NEURAL_SPEAKERS for v in assignments.values()):
         raise ValueError("choose a neural narrator and neural character voices")
     if language not in NEURAL_LANGUAGES:
@@ -266,6 +274,7 @@ def synthesize_neural(segments, narrator, assignments, rate, check_cancel,
             total, done = sum(len(s["text"]) for s in segments) or 1, 0
             for segment in segments:
                 check_cancel()
+                _mark(markers, segment, frames / 24000)
                 speaker_id = segment["speaker_id"]
                 voice = assignments.get(speaker_id, narrator)
                 # Bible text is only bounded at 4,000 characters, and the

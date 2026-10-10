@@ -7,7 +7,7 @@ import { api } from "../lib/api";
 import { SPEECH_MODEL_ID, type StoryLibrary } from "../lib/story";
 
 vi.mock("../lib/api", () => ({
-  api: { audioVoices: vi.fn(), generateAudiobook: vi.fn(), cancelJob: vi.fn(), analyzeStory: vi.fn(), resumeStory: vi.fn(), audioPreview: vi.fn() },
+  api: { audioVoices: vi.fn(), generateAudiobook: vi.fn(), cancelJob: vi.fn(), analyzeStory: vi.fn(), resumeStory: vi.fn(), audioPreview: vi.fn(), vaultList: vi.fn(async () => []) },
   errText: (e: unknown) => String(e), isCancelled: () => false,
   newJobId: () => "job", onEngineProgress: async () => () => {},
   vaultUrl: (id: string) => `vault://localhost/${id}`,

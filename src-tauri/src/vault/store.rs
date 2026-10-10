@@ -155,6 +155,12 @@ fn derive_kek(passphrase: &str, kdf: &KdfParams) -> Result<[u8; 32], VaultError>
 // Index
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct AudioMarker {
+    pub time: f64,
+    pub label: String,
+}
+
 // `Default` so a caller states only the provenance it actually knows. An
 // import has no seed and no adapters; a generation has all of it.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -213,6 +219,11 @@ pub struct VaultItem {
     /// which is honestly unknown provenance rather than membership.
     #[serde(default)]
     pub composition: Option<String>,
+
+    /// Where each scene begins in a narrated chapter, for the player to jump
+    /// between. Empty for everything that is not an audiobook.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<AudioMarker>,
 
     // ---- How this was actually made -------------------------------------
     //

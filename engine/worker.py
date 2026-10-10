@@ -7080,6 +7080,7 @@ def op_audiobook(req_id, req):
         emit({"id": req_id, "type": "progress", "phase": "denoise",
               "progress": done / total, "message": f"Narrating ({round(100 * done / total)}%)"})
     model_id = req.get("model_id") or "macos"
+    markers: list[dict[str, Any]] = []
     if model_id == audiobook.NEURAL_MODEL_ID:
         _apply_policy_once(req_id)
         emit({"id": req_id, "type": "progress", "phase": "load", "progress": 0.0,
@@ -7088,22 +7089,24 @@ def op_audiobook(req_id, req):
             req.get("voices") or {}, req.get("rate", 160), check, progress,
             language=req.get("language") or "auto", delivery=req.get("delivery") or "",
             directions=req.get("directions") or {},
-            character_directions={c["id"]: c.get("voice", "") for c in req["book"]["characters"]})
+            character_directions={c["id"]: c.get("voice", "") for c in req["book"]["characters"]},
+            markers=markers)
     elif model_id == audiobook.KOKORO_MODEL_ID:
         emit({"id": req_id, "type": "progress", "phase": "load", "progress": 0.0,
               "message": "Loading Kokoro voices"})
         data, seconds = audiobook.synthesize_kokoro(segments, req["narrator"],
-            req.get("voices") or {}, req.get("rate", 160), check, progress)
+            req.get("voices") or {}, req.get("rate", 160), check, progress, markers=markers)
     elif model_id == "macos":
         data, seconds = audiobook.synthesize(segments, req["narrator"],
-            req.get("voices") or {}, req.get("rate", 160), _stage_dir(), check, progress)
+            req.get("voices") or {}, req.get("rate", 160), _stage_dir(), check, progress, markers=markers)
     else:
         raise ValueError("unsupported audiobook speech model")
     check()
     slot = slots[0]
     size = vc.write_sealed(slot["path"], bytes.fromhex(slot["key"]),
                            bytes.fromhex(slot["file_id"]), data)
-    return {"outputs": [slot["id"]], "sizes": [size], "seconds": seconds, "sealed": True}
+    return {"outputs": [slot["id"]], "sizes": [size], "seconds": seconds, "sealed": True,
+            "markers": markers}
 
 
 def op_character_reference(req_id, req):

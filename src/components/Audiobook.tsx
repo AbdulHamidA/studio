@@ -3,6 +3,7 @@ import { api, errText, isCancelled, newJobId, onEngineProgress, vaultUrl } from 
 import { ANALYST_IDS, KOKORO_MODEL_ID, SPEECH_MODEL_ID, keepBook, unanalysedIn, voiceGroups, type AudioSettings, type StoryLibrary } from "../lib/story";
 import type { EngineProgress, ModelStatus } from "../lib/types";
 import { JobProgress } from "./shared";
+import AudioPlayer from "./library/AudioPlayer";
 
 export default function Audiobook({ library, models, notify, onLibraryChange, onProduced }: {
   library: StoryLibrary | null;
@@ -46,6 +47,17 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
   const narrator = voices.some((v) => v.id === settings.narrator) ? settings.narrator : voices[0]?.id || "";
   const assignedVoices = Object.fromEntries(Object.entries(settings.voices).filter(([, voice]) => voices.some((v) => v.id === voice)));
   const outputs = chapter ? settings.outputs[chapter.id] ?? [] : [];
+  // Scene markers are kept on the recording's vault item.
+  const [markerFor, setMarkerFor] = useState<Record<string, { time: number; label: string }[]>>({});
+  const outputKey = outputs.join(",");
+  useEffect(() => {
+    if (!outputKey) return;
+    let live = true;
+    void api.vaultList().then((items) => {
+      if (live) setMarkerFor(Object.fromEntries(items.filter((i) => i.markers?.length).map((i) => [i.id, i.markers!])));
+    }).catch(() => { /* the player still works without markers */ });
+    return () => { live = false; };
+  }, [outputKey]);
   const writerReady = models.some((m) => ANALYST_IDS.includes(m.id) && m.installed && !m.hopeless);
 
   // Hear a voice before choosing it. The sample is the character's own first
@@ -235,7 +247,8 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
     <div className="pane">
       <h3>{chapter?.title ?? "Your narrated chapter"}</h3>
       {outputs.map((id, i) => <div className="audio-result" key={id}>
-        <label>Recording {i + 1}</label><audio controls preload="metadata" src={vaultUrl(id)} />
+        <AudioPlayer src={vaultUrl(id)} title={`${chapter?.title ?? "Chapter"} · recording ${i + 1}`}
+          markers={markerFor[id] ?? []} />
         <p className="muted">Export the WAV file from Vault.</p>
       </div>)}
       {chapter && <details><summary>Original text · {chapter.scenes.length} analyzed scenes</summary>

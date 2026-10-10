@@ -223,7 +223,7 @@ export default function Viewer(props: ViewerProps) {
     body = (
       <div className="viewer-audio">
         <div className="audio-cover" aria-hidden>♫</div>
-        <AudioPlayer key={item.id} src={vaultUrl(item.id)} title={item.prompt || item.name}
+        <AudioPlayer key={item.id} src={vaultUrl(item.id)} title={item.prompt || item.name} markers={item.markers ?? []}
                      shortcuts="global" />
       </div>
     );

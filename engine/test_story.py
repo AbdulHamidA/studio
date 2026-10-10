@@ -999,6 +999,17 @@ class KokoroNarration(unittest.TestCase):
         with wave.open(io.BytesIO(data)) as wav:
             self.assertEqual((wav.getframerate(), wav.getnchannels(), wav.getnframes()), (24000, 1, 6))
 
+    def test_scene_markers_fall_where_each_scene_begins(self):
+        segments = [{"speaker_id": None, "text": "One.", "scene": "Arrival"},
+                    {"speaker_id": None, "text": "Two.", "scene": "Arrival"},
+                    {"speaker_id": None, "text": "Three.", "scene": "The kitchen"}]
+        markers = []
+        audiobook.synthesize_kokoro(segments, "af_heart", {}, 160, lambda: None,
+                                    load=lambda: self.model([]), markers=markers)
+        # One marker per scene, not per segment; the stand-in voice is a few samples long.
+        self.assertEqual([m["label"] for m in markers], ["Arrival", "The kitchen"])
+        self.assertEqual(markers[0]["time"], 0.0)
+
     def test_unknown_voices_are_refused_before_loading(self):
         with self.assertRaisesRegex(ValueError, 'Kokoro voices'):
             audiobook.synthesize_kokoro([{"speaker_id": None, "text": "x"}], "ryan", {}, 160,
