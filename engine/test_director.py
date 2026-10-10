@@ -165,3 +165,16 @@ class PlaceMoves(unittest.TestCase):
         self.assertEqual(director._named_place(["We went into the hall."], "street"), "hall")
         self.assertIsNone(director._named_place(["The harbour lay grey."], "pier"))
         self.assertIsNone(director._named_place(["Her kitchen was warm."], "the kitchen"))
+
+    def test_the_move_lasts_while_the_analysis_repeats_the_old_place(self):
+        source = 'Agnes stood on the pier.\n\n* * *\n\nHer kitchen smelled of tar.\n\n* * *\n\nAgnes poured the tea.'
+        def write(_, prompt):
+            group = json.loads(prompt.split('Numbered source units:\n')[1].split('\nYour previous reply')[0])
+            return json.dumps({"title": "t", "characters": [{"id": "a", "name": "Agnes", "aliases": [], "visual": "", "voice": ""}],
+                               "looks": [], "places": [], "speakers": [],
+                               "beats": [{"units": [u["id"] for u in group], "importance": 2, "action": "a",
+                                          "place": "pier", "mood": "calm", "cast": [{"id": "Agnes", "feel": ""}]}]})
+        b = story.analyze(source, write, passage_words=999, passage_units=99)
+        panels = director.plan(b, b['chapters'][0]['id'], "manga")
+        last_scene = max(p["scene"] for p in panels if p["framing"] != "establishing" or p["role"] != "R")
+        self.assertEqual({p["setting"] for p in panels if p["scene"] == last_scene and p["role"] != "R"}, {"kitchen"})

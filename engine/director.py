@@ -111,6 +111,13 @@ def _sentences(text):
     return out
 
 
+def _acting(actor):
+    """The analysed expression and pose, so a dialogue panel is acted rather
+    than left for the writer to invent ("kneels, trembling")."""
+    acting = ", ".join(x for x in (actor.get("expression"), actor.get("body_language")) if x)
+    return f", {acting}" if acting else ""
+
+
 def _who(actor):
     return {"character_id": actor["character_id"], "name": actor["name"], "visual": actor.get("visual", ""),
             "expression": actor.get("expression", ""), "body_language": actor.get("body_language", ""),
@@ -193,14 +200,19 @@ def plan(book, chapter_id, fmt="manga"):
     last_place = None
     picture = fmt == "picture"
 
+    moved, moved_from = None, None
     for scene_no, scene in enumerate(chapter["scenes"], 1):
         beats = scene["beats"]
         peak = max(beats, key=lambda b: (b["importance"], b["tension"])) if beats else None
-        moved = None
         for beat in beats:
             is_peak = beat is peak
+            # A move lasts until the analysis itself names another place:
+            # while it keeps repeating the old one, it has simply not noticed.
+            if moved and beat["setting"].casefold() != moved_from:
+                moved = None
             named = _named_place(_sentences(beat["source"]), beat["setting"])
-            moved = named or moved
+            if named:
+                moved, moved_from = named, beat["setting"].casefold()
             if moved and moved not in beat["setting"].casefold():
                 beat = {**beat, "setting": moved, "location_id": moved, "location_state": ""}
             actors = [{**a, "name": people[a["character_id"]]["name"],
@@ -254,17 +266,17 @@ def plan(book, chapter_id, fmt="manga"):
                     elif speaker and listeners and not group[0]["offscreen"]:
                         p = mk(shot="MCU", framing="ots", focus=speaker["name"],
                                cast=[_who(speaker), _who(listeners[0])], role="L", transition="subject",
-                               moment=tag or f"{speaker['name']} speaks, seen over {listeners[0]['name']}'s shoulder")
+                               moment=tag or f"{speaker['name']} speaks{_acting(speaker)}, seen over {listeners[0]['name']}'s shoulder")
                     elif speaker:
                         p = mk(shot="MCU", focus=speaker["name"], cast=[_who(speaker)], role="L",
-                               transition="subject", moment=tag or f"{speaker['name']} speaks")
+                               transition="subject", moment=tag or f"{speaker['name']} speaks{_acting(speaker)}")
                     else:
                         # Heard, not seen: the listener carries the line.
                         target = listeners[0] if listeners else (actors[0] if actors else None)
                         p = mk(shot="MCU" if target else "INSERT", framing="single" if target else "insert",
                                focus=target["name"] if target else "", cast=[_who(target)] if target else [],
                                role="L", transition="subject",
-                               moment=tag or (f"{target['name']} listens" if target else "A voice from off panel"))
+                               moment=tag or (f"{target['name']} listens{_acting(target)}" if target else "A voice from off panel"))
                     p["dialogue"] = group
                     if picture and tag:
                         p["caption"] = tag
