@@ -685,3 +685,12 @@ class NarrationMood(unittest.TestCase):
         segments = story.narration_segments(book, chapter['id'])
         self.assertEqual(''.join(s['text'] for s in segments), chapter['source'])
         self.assertTrue(all(s.get('mood') for s in segments if s['speaker_id'] is None))
+
+
+class PassageGrouping(unittest.TestCase):
+    def test_paragraphs_share_a_call_but_scene_breaks_end_one(self):
+        source = '“Hello,” she said.\n\n“Hi.”\n\n“Tea?”\n\n* * *\n\nThe kitchen was cold.'
+        groups = story.passages(source, max_words=250, max_units=4)
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(''.join(u['text'] for g in groups for u in g), source)
+        self.assertIn('* * *', groups[1][0]['text'])

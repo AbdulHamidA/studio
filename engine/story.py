@@ -11,7 +11,8 @@ import json
 import re
 import uuid
 
-SCENE_SYSTEM = """You are a story editor and director. Return only the requested JSON.
+SCENE_SYSTEM = """You are a story editor and director. Return only the requested JSON,
+compact on one line with no indentation.
 Read this scene for causality, dramatic turns and emotion, not equal coverage.
 Use the supplied numbered source units, each exactly once, in order. Group
 adjacent units into beats. Importance is 1 (context), 2 (quiet action), 3
@@ -23,9 +24,12 @@ Never use an undeclared ID or the schema placeholder as a character reference.
 Canonical characters have stable IDs. Reuse them for aliases; never create a
 second person for a narrator already named. New characters must have a name
 or noun phrase literally in this scene; never invent appearance or aliases.
-Keep a speaking character offscreen when only heard. Attribute every quoted
-utterance; use null speaker_id when uncertain rather than guessing. Dialogue
-text must be an exact substring of the source. Do not paraphrase it.
+List in characters only people new to the bible, or a known person with a new
+literal alias; refer to everyone else by their bible id without repeating them.
+Keep a speaking character offscreen when only heard. Dialogue holds only words
+inside quotation marks, never narration. Attribute every quoted utterance; use
+null speaker_id when uncertain rather than guessing. Dialogue text must be an
+exact substring of the source. Do not paraphrase it.
 Beats describe visible action, location, tension, mood, and each visible
 character's expression and body language. Do not invent events. Distinguish
 what happens from how the frame conveys its emotional meaning.
@@ -89,11 +93,11 @@ def passages(source, max_words=450, max_units=8):
                 groups.append([{"start": start, "end": end, "text": source[start:end]}])
                 start = end
             continue
+        # Paragraph breaks do not end a call. Dialogue puts nearly every line
+        # in its own paragraph, so a 300-word exchange cost eleven writer
+        # calls, each re-sending the whole instruction to analyse one line.
         group.append(unit)
         words += n
-        if "\n\n" in unit["text"]:
-            groups.append(group)
-            group, words = [], 0
     if group:
         groups.append(group)
     for group in groups:
