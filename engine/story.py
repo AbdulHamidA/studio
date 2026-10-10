@@ -118,7 +118,8 @@ def instruction(group, characters, continuity=None):
     }
     return ("For unnamed first-person narration only, canonical name Narrator is allowed. "
             "Never use Narrator when a known character already narrates. "
-            "Do not group multiple people by shared third-person pronouns.\nCharacter bible:\n" + json.dumps(characters, ensure_ascii=False)
+            "Do not group multiple people by shared third-person pronouns.\nCharacter bible:\n"
+            + json.dumps([{**c, "visual": c["visual"][:VISUAL_LIMIT]} for c in characters], ensure_ascii=False)
             + "\nPrior continuity state (apply only unchanged facts):\n" + json.dumps(continuity or {}, ensure_ascii=False)
             + "\nReturn this schema with one beat per meaningful moment:\n"
             + json.dumps(schema, ensure_ascii=False)
@@ -148,6 +149,27 @@ def quotes(text):
         if inner.strip():
             result.append((m.start(group) + len(inner) - len(inner.lstrip()), inner.strip()))
     return result
+
+
+VISUAL_LIMIT = 600
+
+
+def _merge_visual(known, new):
+    """Add only facts not already known; identity text stays bounded.
+
+    Every scene re-describes the cast. Appending each description grew the
+    text without limit until the book failed validation and every panel
+    prompt carried the whole history."""
+    merged = known.strip()
+    for fact in re.split(r'(?<=[.;])\s+|\s*;\s*', new.strip()):
+        fact = fact.strip().rstrip('.;').strip()
+        if not fact or _plain(fact) in _plain(merged):
+            continue
+        candidate = f"{merged}; {fact}" if merged else fact
+        if len(candidate) > VISUAL_LIMIT:
+            break
+        merged = candidate
+    return merged[:VISUAL_LIMIT]
 
 
 def _plain(text):
@@ -216,13 +238,12 @@ def parse_scene(raw, group, bible, scene_id):
         if existing:
             existing["aliases"] = list(dict.fromkeys([*existing["aliases"], *aliases, name]))
             # First chapter's identity stays stable; later facts are additive.
-            if visual and visual not in existing["visual"]:
-                existing["visual"] = ' '.join(filter(None, [existing["visual"], visual]))
+            existing["visual"] = _merge_visual(existing["visual"], visual)
             if not existing["voice"]:
                 existing["voice"] = voice
         else:
             existing = {"id": str(uuid.uuid4()), "name": name, "aliases": aliases,
-                        "visual": visual, "voice": voice}
+                        "visual": _merge_visual("", visual), "voice": voice}
             characters.append(existing)
         lookup[local_id] = existing["id"]
     # The model may use a canonical name or alias instead of the requested ID.
@@ -327,8 +348,27 @@ def _remember_state(state, beat):
         state["locations"][key] = beat["location_state"]
 
 
+def _unanalysed_scene(group, scene_id, number):
+    """Exact source and quotes for a passage the writer could not analyse.
+
+    One stubborn passage used to discard every scene already analysed. The
+    passage keeps its words, its quoted speech (unattributed) and the board
+    still gets a frame for it; nothing about who or where is guessed."""
+    beats = []
+    for i, unit in enumerate(group):
+        beats.append({"id": f"{scene_id}-b{i + 1}", "start": unit["start"], "end": unit["end"],
+                      "source": unit["text"], "importance": 2, "tension": 2,
+                      "action": unit["text"].strip()[:300], "setting": "", "location_id": "",
+                      "location_state": "", "mood": "", "visible": [],
+                      "dialogue": [{"speaker_id": None, "text": text, "offscreen": True,
+                                    "start": unit["start"] + a, "end": unit["start"] + a + len(text)}
+                                   for a, text in quotes(unit["text"])]})
+    return {"id": scene_id, "title": f"Passage {number} (not analysed)", "summary": "",
+            "start": group[0]["start"], "end": group[-1]["end"], "beats": beats, "unanalysed": True}
+
+
 def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: None,
-            passage_words=450, passage_units=8):
+            passage_words=450, passage_units=8, warn=lambda _: None):
     if not isinstance(source, str) or not source.strip():
         raise ValueError("paste a chapter first")
     if len(source) > 200000:
@@ -354,7 +394,13 @@ def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: N
                 break
             except (ValueError, TypeError, KeyError, AttributeError) as exc:
                 if attempt:
-                    raise ValueError(f"Scene {i + 1} could not be validated: {exc}") from exc
+                    # A writer that cannot produce any valid scene is broken or
+                    # unsuitable; refuse rather than return a chapter of stubs.
+                    if not any(not s.get("unanalysed") for s in scenes) and i >= min(2, len(groups) - 1):
+                        raise ValueError(f"Scene {i + 1} could not be validated: {exc}") from exc
+                    warn(f"Scene {i + 1} could not be validated ({exc}); kept its text unanalysed")
+                    scene, characters = _unanalysed_scene(group, f"{chapter_id}-s{i + 1}", i + 1), book["characters"]
+                    break
                 prompt += (f"\nYour previous reply failed validation: {exc}."
                            "\nPrevious reply to repair:\n" + raw[:20000]
                            + "\nReturn corrected complete JSON, preserving the full source coverage. "
@@ -385,7 +431,10 @@ def validate_book(book):
         known.add(cid)
         _text(c.get("name"), "name", False)
         _array(c.get("aliases"), "aliases")
-        _text(c.get("visual"), "visual")
+        # Books saved before visuals were bounded may hold longer text; it is
+        # trimmed where it is used, so it must not make a saved book unreadable.
+        if not isinstance(c.get("visual"), str):
+            raise ValueError("visual must be a string")
         _text(c.get("voice"), "voice")
     for chapter in _array(book.get("chapters"), "chapters"):
         source = chapter.get("source")
@@ -462,12 +511,12 @@ def direct(book, chapter_id):
             narration.append(beat["source"][cursor:])
             narrative = re.sub(r'[“"]\s*[”"]|「\s*」', '', ''.join(narration))
             captions = _chunks(narrative)
-            dialogue = [{"speaker": people[d["speaker_id"]]["name"] if d["speaker_id"] else "Unknown speaker",
+            dialogue = [{"speaker": people[d["speaker_id"]]["name"] if d["speaker_id"] else "",
                          "speaker_id": d["speaker_id"], "text": text, "offscreen": d["offscreen"]}
                         for d in beat["dialogue"] for text in _chunks(d["text"], 28)]
             frames = max(len(captions), len(dialogue), 3 if beat["importance"] == 5 else 2 if beat["importance"] == 4 else 1)
             actors = [{**a, "name": people[a["character_id"]]["name"],
-                       "visual": people[a["character_id"]]["visual"]} for a in beat["visible"]]
+                       "visual": people[a["character_id"]]["visual"][:VISUAL_LIMIT]} for a in beat["visible"]]
             for frame in range(frames):
                 reaction = frame > 0 and frame == frames - 1 and bool(actors) and beat["importance"] >= 4
                 panels.append({"beat_id": beat["id"], "chapter_id": chapter_id,

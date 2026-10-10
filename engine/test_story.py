@@ -326,6 +326,21 @@ class WorkerIntegration(unittest.TestCase):
             self.assertEqual(result[field], panel[field])
         self.assertIn('cold light', result['description'])
 
+    def test_writer_tokens_keep_the_scene_progress_and_a_repair_gets_more_room(self):
+        import worker
+        source = 'Mira ran. Jonas waited.'
+        calls = []
+        def write(req_id, system, user, **kw):
+            calls.append(kw)
+            group = json.loads(user.split('Numbered source units:\n')[1].split('\nYour previous reply')[0])
+            return '{' if len(calls) == 1 else json.dumps(reply(group))
+        with patch.object(worker, '_write', side_effect=write), \
+                patch.object(story, 'passages', lambda s, **_: [[{**u, 'id': 0}] for u in story.units(s)]):
+            worker.op_story_analyze('test-progress', {'source': source})
+        self.assertEqual([(c['label'], c['fraction'], c['max_tokens']) for c in calls],
+                         [('Understanding scene 1 of 2', 0.0, 3200), ('Understanding scene 1 of 2', 0.0, 4800),
+                          ('Understanding scene 2 of 2', 0.5, 3200)])
+
     def test_switching_analysts_unloads_the_previous_writer_before_loading(self):
         import sys
         import types
@@ -585,3 +600,49 @@ class DialogueFromSource(unittest.TestCase):
         book = story.analyze(source, lambda *_: json.dumps(data))
         segments = story.narration_segments(book, book['chapters'][0]['id'])
         self.assertEqual(''.join(s['text'] for s in segments), source)
+
+
+class LongChapterRobustness(unittest.TestCase):
+    def test_character_visual_stays_bounded_across_many_scenes(self):
+        source = ' '.join(f'Mira walked {i}.' for i in range(90))
+        def write(_, prompt):
+            group = json.loads(prompt.split('Numbered source units:\n')[1].split('\nYour previous reply')[0])
+            n = group[0]['text'].split()[-1]
+            return json.dumps(reply(group, [{"id": "m", "name": "Mira", "aliases": [], "voice": "",
+                                             "visual": f"Tall, grey hair. A scar marks her chin. Detail {n}"}]))
+        book = story.analyze(source, write, passage_words=10, passage_units=1)
+        mira = book['characters'][0]
+        self.assertLessEqual(len(mira['visual']), story.VISUAL_LIMIT)
+        self.assertEqual(mira['visual'].count('grey hair'), 1)
+
+    def test_saved_book_with_an_oversized_visual_still_opens(self):
+        book = example()
+        book['characters'][0]['visual'] = 'x' * 9000
+        panels = story.direct(book, book['chapters'][0]['id'])
+        self.assertTrue(all(len(a['visual']) <= story.VISUAL_LIMIT for p in panels for a in p['cast']))
+
+    def test_unattributed_dialogue_has_no_invented_speaker_label(self):
+        source = 'A voice called “Wait!”'
+        data = reply(story.passages(source)[0])
+        data['beats'][0]['dialogue'] = [{"speaker_id": None, "text": "Wait!", "offscreen": True}]
+        book = story.analyze(source, lambda *_: json.dumps(data))
+        lines = [d for p in story.direct(book, book['chapters'][0]['id']) for d in p['dialogue']]
+        self.assertEqual([(d['speaker'], d['text']) for d in lines], [('', 'Wait!')])
+
+    def test_one_failing_scene_keeps_the_rest_of_the_chapter(self):
+        source = 'Mira ran. Jonas said “Stop.” The train left. Silence followed.'
+        warnings = []
+        def write(_, prompt):
+            group = json.loads(prompt.split('Numbered source units:\n')[1].split('\nYour previous reply')[0])
+            return '{"broken": ' if 'Jonas' in group[0]['text'] else json.dumps(reply(group))
+        book = story.analyze(source, write, passage_words=3, passage_units=1, warn=warnings.append)
+        scenes = book['chapters'][0]['scenes']
+        self.assertEqual([bool(s.get('unanalysed')) for s in scenes], [False, True, False, False])
+        self.assertEqual(scenes[1]['beats'][0]['dialogue'][0]['text'], 'Stop.')
+        self.assertEqual(len(warnings), 1)
+        segments = story.narration_segments(book, book['chapters'][0]['id'])
+        self.assertEqual(''.join(s['text'] for s in segments), source)
+
+    def test_a_writer_that_never_validates_is_still_refused(self):
+        with self.assertRaisesRegex(ValueError, 'Scene 3 could not be validated'):
+            story.analyze('One. Two. Three. Four.', lambda *_: '{', passage_words=1, passage_units=1)

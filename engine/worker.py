@@ -1168,7 +1168,7 @@ def _load_writer(req_id: str, repo: str | None = None) -> tuple[Any, Any]:
 
 def _write(req_id: str, system: str, user: str, max_tokens: int = 160,
            temperature: float = 0.3, repo: str | None = None,
-           label: str = "Writing") -> str:
+           label: str = "Writing", fraction: float | None = None) -> str:
     """One turn with the writer.
 
     Streamed rather than taken in one call, for two reasons.
@@ -1210,7 +1210,7 @@ def _write(req_id: str, system: str, user: str, max_tokens: int = 160,
         if now - last >= 0.2:
             last = now
             emit({"id": req_id, "type": "progress", "phase": "denoise",
-                  "progress": None, "step": written,
+                  "progress": fraction, "step": written,
                   "total_steps": max_tokens, "message": label,
                   # The words so far. A spinner and a token count say the
                   # machine is busy; they do not say it is writing something
@@ -6904,17 +6904,28 @@ def op_set_memory(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
 
 def op_story_analyze(req_id, req):
     import story as story_model
+    # Token events from the writer carry the scene label and fraction too;
+    # otherwise they replace "scene i of N" within a fifth of a second.
+    where = {"label": "Understanding the story", "fraction": None}
     def progress(i, total):
         if is_cancelled(req_id):
             raise Cancelled()
+        where.update(label=f"Understanding scene {i + 1} of {total}", fraction=i / total)
         emit({"id": req_id, "type": "progress", "phase": "denoise",
-              "progress": i / total, "message": f"Understanding scene {i + 1} of {total}"})
-    book = story_model.analyze(req.get("source"),
-        lambda system, user: _write(req_id, system, user, max_tokens=3200,
-            temperature=0.2, repo=req.get("writer"), label="Understanding the story"),
+              "progress": where["fraction"], "message": where["label"]})
+    def write(system, user):
+        # A repair carries the failed reply as well; a reply cut off at the
+        # first budget would be cut off again at the same one.
+        repair = "Your previous reply failed validation" in user
+        return _write(req_id, system, user, max_tokens=4800 if repair else 3200,
+                      temperature=0.2, repo=req.get("writer"), label=where["label"],
+                      fraction=where["fraction"])
+    def warn(message):
+        log(req_id, message, "warn")
+    book = story_model.analyze(req.get("source"), write,
         previous=req.get("previous"), title=req.get("title", "Chapter"), progress=progress,
         passage_words=250 if req.get("writer", WRITER_REPO) == WRITER_REPO else 450,
-        passage_units=4 if req.get("writer", WRITER_REPO) == WRITER_REPO else 8)
+        passage_units=4 if req.get("writer", WRITER_REPO) == WRITER_REPO else 8, warn=warn)
     chapter = book["chapters"][-1]
     panels = story_model.direct(book, chapter["id"])
     return {"book": book, "chapter_id": chapter["id"], "panels": panels}
