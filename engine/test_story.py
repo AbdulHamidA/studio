@@ -894,3 +894,12 @@ class StopAndResume(unittest.TestCase):
         self.assertGreater(result['unanalysed'], 0)
         scenes = result['book']['chapters'][0]['scenes']
         self.assertFalse(scenes[0].get('unanalysed'))
+
+
+class WriterJsonSlips(unittest.TestCase):
+    def test_a_field_closed_by_a_curly_quote_is_repaired_and_valid_quotes_are_untouched(self):
+        slip = '{"title": "Pier", "beats": [{"action": "Agnes says ‘too late.’”, "place": "pier"}], "speakers": [],}'
+        self.assertEqual(story._loads(slip)['beats'][0]['place'], 'pier')
+        self.assertEqual(story._loads('{"a": "He said “hi”, then left"}')['a'], 'He said “hi”, then left')
+        with self.assertRaises(ValueError):
+            story._loads('{"beats": [')

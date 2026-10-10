@@ -43,10 +43,7 @@ def voice_scene_reply(raw, group, number, bible=()):
     """A voice reply restated as a scene reply, so `parse_scene` applies every
     identity and source rule to it unchanged. One beat per passage: the
     audiobook needs who speaks and the mood, not shots or appearances."""
-    raw = raw.strip()
-    if raw.startswith('```json') and raw.endswith('```'):
-        raw = raw[7:-3].strip()
-    reply = json.loads(raw)
+    reply = _loads(raw)
     if not isinstance(reply, dict):
         raise ValueError("reply must be an object")
     _tidy_reply(reply, group, bible)
@@ -156,6 +153,7 @@ and condition; a change REPLACES the old outfit. Omit people whose look has not
 changed from the continuity state. places gives each place's layout, objects,
 light and weather once; place is a short stable name, reused when the story
 returns there. Do not invent events, appearance or details the source lacks.
+Never copy quotation marks into any field; describe speech, do not quote it.
 """
 
 
@@ -193,6 +191,35 @@ def compact_instruction(group, characters, continuity=None):
 
 def _place_key(place):
     return re.sub(r'[^\w]+', '-', place.casefold()).strip('-')
+
+
+def _loads(raw):
+    """Parse a writer's JSON, repairing only mechanical slips.
+
+    Small writers copy the story's curly quotes into a field and then close
+    the field with one -- `"...too.’”, "place"` -- which made the whole
+    passage unreadable. Only when parsing fails: a curly closing quote just
+    before the failure, followed by a delimiter, gets the straight quote it
+    was meant to be followed by; trailing commas are dropped. Nothing is
+    guessed beyond that."""
+    raw = raw.strip()
+    if raw.startswith('```'):
+        raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw)
+    for _ in range(8):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            fixed = re.sub(r',(\s*[}\]])', r'\1', raw)
+            if fixed == raw:
+                window = raw[max(0, exc.pos - 200):exc.pos + 1]
+                slip = None
+                for m in re.finditer(r'[”’」』](?=\s*[,}\]])', window):
+                    slip = max(0, exc.pos - 200) + m.end()
+                if slip is None:
+                    raise
+                fixed = raw[:slip] + '"' + raw[slip:]
+            raw = fixed
+    return json.loads(raw)
 
 
 def _tidy_reply(reply, group, bible):
@@ -254,15 +281,12 @@ def _tidy_reply(reply, group, bible):
 def compact_scene_reply(raw, group, continuity=None, bible=()):
     """A compact reply restated as a scene reply. A reply already in the scene
     format (a larger writer may keep it) is passed through unchanged."""
-    raw = raw.strip()
-    if raw.startswith('```json') and raw.endswith('```'):
-        raw = raw[7:-3].strip()
-    reply = json.loads(raw)
+    reply = _loads(raw)
     if not isinstance(reply, dict):
         raise ValueError("scene must be an object")
     beats = _array(reply.get("beats"), "beats")
     if "summary" in reply or any(isinstance(b, dict) and ("visible" in b or "setting" in b) for b in beats):
-        return raw
+        return json.dumps(reply)
     beats = _tidy_reply(reply, group, bible)["beats"]
     continuity = continuity or {}
     looks = {l.get("id"): l.get("appearance") for l in _array(reply.get("looks", []), "looks")
