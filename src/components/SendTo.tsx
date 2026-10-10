@@ -33,7 +33,7 @@ export default function SendTo({
   const options: [Destination, string, boolean][] = [
     ["edit", "Edit this", canRun("edit")],
     ["video", "Animate", canRun("video")],
-    ["upscale", "Enlarge", canRun("upscale")],
+    ["upscale", "Upscale", canRun("upscale")],
   ];
 
   const available = options.filter(

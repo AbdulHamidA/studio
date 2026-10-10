@@ -88,7 +88,7 @@ describe("entries and sorting", () => {
     expect(ids("newest")).toEqual(["b", "c", "a"]);
     expect(ids("oldest")).toEqual(["a", "c", "b"]);
     expect(ids("name")).toEqual(["b", "a", "c"]);
-    expect(ids("kind")).toEqual(["c", "b", "a"]); // Edited, Enlarged, Generated
+    expect(ids("kind")).toEqual(["c", "a", "b"]); // Edited, Generated, Upscaled
   });
 });
 

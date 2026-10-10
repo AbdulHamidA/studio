@@ -53,7 +53,7 @@ export function shelvesOf(i: VaultItem): Shelf[] {
 }
 
 export const KIND_LABEL: Record<string, string> = {
-  generate: "Generated", edit: "Edited", upscale: "Enlarged",
+  generate: "Generated", edit: "Edited", upscale: "Upscaled",
   audiobook: "Audiobook", video: "Animated", import: "Imported", doc: "Document",
   document: "Document", recovered: "Recovered", mask: "Mask", adjust: "Adjusted",
   image: "Composed", reference: "Reference",
