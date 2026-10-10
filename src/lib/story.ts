@@ -68,6 +68,26 @@ export interface StoryBook {
   chapters: StoryChapter[];
 }
 export const SPEECH_MODEL_ID = "qwen3-tts-1.7b-custom-6bit";
+export const KOKORO_MODEL_ID = "kokoro-82m";
+
+/** "en_IN" -> "English (India)"; Kokoro's labels are already readable. */
+export function voiceLanguage(code: string): string {
+  if (!/^[a-z]{2,3}[_-][A-Z]{2}$/.test(code)) return code;
+  try {
+    return new Intl.DisplayNames(["en"], { type: "language" }).of(code.replace("_", "-")) ?? code;
+  } catch { return code; }
+}
+
+/** Voices grouped by language, Indian voices first, then alphabetically. */
+export function voiceGroups(voices: { id: string; language: string }[]) {
+  const groups = new Map<string, { id: string; language: string }[]>();
+  for (const v of voices) {
+    const label = voiceLanguage(v.language);
+    groups.set(label, [...(groups.get(label) ?? []), v]);
+  }
+  const indian = (label: string) => /India|Hindi/.test(label) ? 0 : 1;
+  return [...groups.entries()].sort(([a], [b]) => indian(a) - indian(b) || a.localeCompare(b));
+}
 export interface AudioSettings {
   model_id?: string;
   language?: string;

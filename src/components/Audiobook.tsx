@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errText, isCancelled, newJobId, onEngineProgress, vaultUrl } from "../lib/api";
-import { ANALYST_IDS, SPEECH_MODEL_ID, keepBook, unanalysedIn, type AudioSettings, type StoryLibrary } from "../lib/story";
+import { ANALYST_IDS, KOKORO_MODEL_ID, SPEECH_MODEL_ID, keepBook, unanalysedIn, voiceGroups, type AudioSettings, type StoryLibrary } from "../lib/story";
 import type { EngineProgress, ModelStatus } from "../lib/types";
 import { JobProgress } from "./shared";
 
@@ -30,8 +30,12 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
   const saved = book && library?.audio?.[book.id];
   const settings: AudioSettings = saved ?? { narrator: "", voices: {}, rate: 160, outputs: {} };
   const speechModel = settings.model_id || SPEECH_MODEL_ID;
-  const neural = speechModel !== "macos";
-  const speechReady = !neural || models.some((m) => m.id === speechModel && m.installed && !m.hopeless);
+  // Language, delivery and per-character direction are Qwen3-TTS's; Kokoro
+  // and macOS voices take pace only.
+  const neural = speechModel === SPEECH_MODEL_ID;
+  const speechReady = speechModel === "macos" || models.some((m) => m.id === speechModel && m.installed && !m.hopeless);
+  const voiceOptions = voiceGroups(voices).map(([label, list]) => <optgroup key={label} label={label}>
+    {list.map((v) => <option key={v.id} value={v.id}>{v.id}</option>)}</optgroup>);
   useEffect(() => {
     let live = true;
     setVoices([]); setVoiceError("");
@@ -178,10 +182,12 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
       {book && chapter && <>
         <label>Speech engine<select value={speechModel} disabled={!!job}
           onChange={(e) => saveSettings({ model_id: e.target.value, narrator: "", voices: {} })}>
-          <option value={SPEECH_MODEL_ID}>Qwen3-TTS · neural voices</option>
-          <option value="macos">macOS system voices · fallback</option>
+          <option value={KOKORO_MODEL_ID}>Kokoro · fast, Hindi and Indian English voices</option>
+          <option value={SPEECH_MODEL_ID}>Qwen3-TTS · expressive, slower</option>
+          <option value="macos">macOS system voices · includes Indian voices</option>
         </select></label>
-        {neural && !speechReady && <p className="notice warn">Download Audiobook voices (Qwen3-TTS 1.7B) in Models to use neural narration.</p>}
+        {!speechReady && <p className="notice warn">Download {speechModel === KOKORO_MODEL_ID
+          ? "Fast audiobook voices (Kokoro 82M)" : "Audiobook voices (Qwen3-TTS 1.7B)"} in Models to use it.</p>}
         {neural && <>
           <label>Language<select value={settings.language || "auto"} disabled={!!job}
             onChange={(e) => saveSettings({ language: e.target.value })}>
@@ -193,7 +199,7 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
         </>}
         <label>Narrator<span style={{ display: "flex", gap: 6 }}><select value={narrator} disabled={!!job || !voices.length}
           onChange={(e) => saveSettings({ narrator: e.target.value })}>
-          {voices.map((v) => <option key={v.id} value={v.id}>{v.id} · {v.language}</option>)}
+          {voiceOptions}
         </select><PreviewButton id="narrator" voice={narrator} character={null} label="Preview narrator voice" /></span></label>
         <label>{neural ? `Reading pace · ${settings.rate} (approximate)` : `Reading speed · ${settings.rate} words/minute`}<input type="range" min={80} max={300}
           value={settings.rate} disabled={!!job} onChange={(e) => saveSettings({ rate: Number(e.target.value) })} /></label>
@@ -210,7 +216,7 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
               });
             }}>
             <option value="">Use narrator</option>
-            {voices.map((v) => <option key={v.id} value={v.id}>{v.id} · {v.language}</option>)}
+            {voiceOptions}
           </select>
           <PreviewButton id={c.id} voice={assignedVoices[c.id] ?? narrator} character={c.id} label={`Preview ${c.name} voice`} />
           {neural && <input aria-label={`${c.name} voice direction`} maxLength={1500}

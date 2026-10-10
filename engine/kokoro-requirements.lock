@@ -1,0 +1,48 @@
+# Text-to-phoneme packages for Kokoro narration, installed with --no-deps when
+# Kokoro is downloaded (the runtime itself is never resolved; see
+# requirements.lock). English uses misaki with spaCy's small English model;
+# Hindi, Spanish, French, Italian and Portuguese use espeak-ng, which
+# espeakng-loader ships as a library, so nothing is installed system-wide.
+addict==2.4.0
+attrs==26.1.0
+babel==2.18.0
+blis==1.3.3
+catalogue==2.0.10
+cloudpathlib==0.26.0
+cloudpickle==3.1.2
+confection==1.3.3
+csvw==4.1.0
+cymem==2.0.13
+dlinfo==2.0.0
+docopt==0.6.2
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+espeakng-loader==0.2.4
+isodate==0.7.2
+joblib==1.6.0
+jsonschema-specifications==2025.9.1
+jsonschema==4.26.0
+language-tags==1.3.1
+misaki==0.9.4
+murmurhash==1.0.15
+num2words==0.5.14
+phonemizer-fork==3.3.2
+preshed==3.0.13
+pyparsing==3.3.3
+python-dateutil==2.9.0.post0
+rdflib==7.6.0
+referencing==0.37.0
+rfc3986==1.5.0
+rpds-py==2026.9.1
+segments==2.4.0
+six==1.17.0
+smart_open==8.0.2
+spacy-legacy==3.0.12
+spacy-loggers==1.0.5
+spacy==3.8.16
+srsly==2.5.4
+termcolor==3.3.0
+thinc==8.3.13
+uritemplate==4.2.0
+wasabi==1.1.3
+weasel==1.0.0
+wrapt==2.5.0

@@ -100,6 +100,103 @@ def neural_voices():
     return [{"id": speaker, "language": "multilingual"} for speaker in NEURAL_SPEAKERS]
 
 
+# Kokoro: an 82M-parameter voice model, measured on an M4 at ~14x real time
+# against ~1.8x for Qwen3-TTS, with Hindi voices. It takes no delivery
+# instructions; pace is its speed setting.
+KOKORO_MODEL_ID = "kokoro-82m"
+KOKORO_REPO = "mlx-community/Kokoro-82M-bf16"
+# Voice-name prefix -> the language its pipeline reads. Japanese and Chinese
+# need further packages and are not offered.
+KOKORO_LANGUAGES = {"a": "English (US)", "b": "English (UK)", "h": "Hindi / Indian English",
+                    "e": "Spanish", "f": "French", "i": "Italian", "p": "Portuguese"}
+KOKORO_VOICES = (
+    "hf_alpha", "hf_beta", "hm_omega", "hm_psi",
+    "af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky", "af_aoede", "af_kore", "af_nova", "af_river",
+    "am_adam", "am_michael", "am_echo", "am_eric", "am_liam", "am_onyx", "am_puck", "am_fenrir",
+    "bf_alice", "bf_emma", "bf_isabella", "bf_lily", "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
+    "ef_dora", "em_alex", "ff_siwis", "if_sara", "im_nicola", "pf_dora", "pm_alex")
+
+
+def kokoro_voices():
+    return [{"id": v, "language": KOKORO_LANGUAGES[v[0]]} for v in KOKORO_VOICES]
+
+
+def load_kokoro_model():
+    from huggingface_hub import snapshot_download
+    from mlx_audio.tts.utils import load_model
+    try:
+        local = Path(snapshot_download(KOKORO_REPO, local_files_only=True))
+    except Exception as exc:
+        raise ValueError("Download Kokoro voices in Models first") from exc
+    try:
+        import misaki  # noqa: F401
+        import en_core_web_sm  # noqa: F401
+    except ImportError as exc:
+        raise ValueError("Kokoro's text packages are missing; download Kokoro again in Models") from exc
+    return load_model(local)
+
+
+def kokoro_language(voice, text):
+    """Hindi voices read Devanagari as Hindi and English with their accent."""
+    if voice[0] == "h" and not re.search(r'[\u0900-\u097F]', text):
+        return "a"
+    return voice[0]
+
+
+def synthesize_kokoro(segments, narrator, assignments, rate, check_cancel,
+                      progress=lambda *_: None, load=load_kokoro_model):
+    if narrator not in KOKORO_VOICES or any(v not in KOKORO_VOICES for v in assignments.values()):
+        raise ValueError("choose Kokoro voices for narrator and characters")
+    if type(rate) is not int or not 80 <= rate <= 300:
+        raise ValueError("reading pace must be 80..300")
+    check_cancel()
+    model = load()
+    speed = min(2.0, max(0.5, rate / 160))
+    output, frames = io.BytesIO(), 0
+    try:
+        import numpy as np
+        with wave.open(output, 'wb') as final:
+            final.setnchannels(1)
+            final.setsampwidth(2)
+            final.setframerate(24000)
+            total, done = sum(len(s["text"]) for s in segments) or 1, 0
+            for segment in segments:
+                voice = assignments.get(segment["speaker_id"], narrator)
+                for part in speech_chunks(segment["text"]):
+                    check_cancel()
+                    progress(done, total)
+                    done += len(part)
+                    if not any(c.isalnum() for c in part):
+                        continue
+                    count = 0
+                    for result in model.generate(text=part, voice=voice, speed=speed,
+                                                 lang_code=kokoro_language(voice, part)):
+                        check_cancel()
+                        if result.sample_rate != 24000:
+                            raise ValueError("Kokoro output must be 24 kHz")
+                        samples = np.asarray(result.audio, dtype=np.float32).reshape(-1)
+                        if not np.isfinite(samples).all():
+                            raise ValueError("Kokoro produced invalid audio samples")
+                        final.writeframesraw((np.clip(samples, -1, 1) * 32767).astype('<i2').tobytes())
+                        frames += len(samples)
+                        count += len(samples)
+                    if not count:
+                        raise ValueError("Kokoro produced no audio for a passage")
+        if not frames:
+            raise ValueError("chapter produced no spoken audio")
+        check_cancel()
+        return output.getvalue(), frames / 24000
+    finally:
+        del model
+        import gc
+        gc.collect()
+        try:
+            import mlx.core as mx
+            mx.clear_cache()
+        except ImportError:
+            pass
+
+
 def speech_chunks(text, limit=350):
     """Bound inference without dropping, duplicating or rewriting source text.
 

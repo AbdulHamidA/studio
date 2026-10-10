@@ -32,7 +32,7 @@ beforeEach(() => {
 describe("Audiobook", () => {
   it("narrates the selected original chapter with saved character voices and plays the sealed result", async () => {
     render(<Harness />);
-    await waitFor(() => expect(screen.getAllByRole("option", { name: "Samantha · en_US" }).length).toBe(2));
+    await waitFor(() => expect(screen.getAllByRole("option", { name: "Samantha" }).length).toBe(2));
     fireEvent.change(screen.getByLabelText("Mira voice"), { target: { value: "Karen" } });
     fireEvent.click(screen.getByRole("button", { name: "Narrate chapter" }));
     await waitFor(() => expect(api.generateAudiobook).toHaveBeenCalledWith(
@@ -65,7 +65,7 @@ describe("Audiobook", () => {
     URL.createObjectURL = vi.fn(() => "blob:sample");
     vi.mocked(api.audioPreview).mockResolvedValue({ wav_base64: btoa("RIFF") });
     render(<Harness />);
-    await waitFor(() => expect(screen.getAllByRole("option", { name: "Karen · en_AU" }).length).toBe(2));
+    await waitFor(() => expect(screen.getAllByRole("option", { name: "Karen" }).length).toBe(2));
     fireEvent.change(screen.getByLabelText("Mira voice"), { target: { value: "Karen" } });
     fireEvent.click(screen.getByRole("button", { name: "Preview Mira voice" }));
     await waitFor(() => expect(play).toHaveBeenCalled());
@@ -85,7 +85,7 @@ describe("Audiobook", () => {
 describe("neural audiobook", () => {
   it("requires a downloaded model and resets incompatible system voice assignments", async () => {
     render(<Harness />);
-    await waitFor(() => expect(screen.getAllByRole("option", { name: "Samantha · en_US" }).length).toBe(2));
+    await waitFor(() => expect(screen.getAllByRole("option", { name: "Samantha" }).length).toBe(2));
     vi.mocked(api.audioVoices).mockResolvedValue({ voices: [{ id: "ryan", language: "multilingual" }] });
     fireEvent.change(screen.getByLabelText("Speech engine"), { target: { value: SPEECH_MODEL_ID } });
     await waitFor(() => expect(api.audioVoices).toHaveBeenCalledWith(SPEECH_MODEL_ID));
@@ -96,10 +96,10 @@ describe("neural audiobook", () => {
   it("passes selected neural voices, language and performance direction into generation", async () => {
     const model = { id: SPEECH_MODEL_ID, installed: true, hopeless: false } as import("../lib/types").ModelStatus;
     render(<Harness models={[model]} />);
-    await waitFor(() => expect(screen.getAllByRole("option", { name: "Samantha · en_US" }).length).toBe(2));
+    await waitFor(() => expect(screen.getAllByRole("option", { name: "Samantha" }).length).toBe(2));
     vi.mocked(api.audioVoices).mockResolvedValue({ voices: [{ id: "ryan", language: "multilingual" }, { id: "vivian", language: "multilingual" }] });
     fireEvent.change(screen.getByLabelText("Speech engine"), { target: { value: SPEECH_MODEL_ID } });
-    await waitFor(() => expect(screen.getAllByRole("option", { name: "ryan · multilingual" }).length).toBe(2));
+    await waitFor(() => expect(screen.getAllByRole("option", { name: "ryan" }).length).toBe(2));
     fireEvent.change(screen.getByLabelText("Narration direction"), { target: { value: "Warm and intimate" } });
     fireEvent.change(screen.getByLabelText("Mira voice direction"), { target: { value: "Whisper nervously" } });
     fireEvent.change(screen.getByLabelText("Language"), { target: { value: "english" } });

@@ -23,5 +23,7 @@ export default defineConfig({
     // with how the test was named.
     environment: "node",
     setupFiles: ["src/test/setup.ts"],
+    // Agent worktrees live under .claude/ and carry their own copy of every test.
+    exclude: ["**/node_modules/**", ".claude/**"],
   },
 });

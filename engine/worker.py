@@ -5623,6 +5623,9 @@ def op_download(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
             landed = max(fresh, key=lambda d: d.stat().st_mtime)
         except (OSError, ValueError):
             landed = repo_dir
+    import audiobook
+    if repo_id == audiobook.KOKORO_REPO:
+        _install_kokoro_packages(req_id)
     try:
         (landed / ".melp-complete").write_text(str(size))
     except OSError as exc:
@@ -6995,13 +6998,31 @@ def op_story_resume(req_id, req):
 
 def op_audio_voices(_req_id, _req):
     import audiobook
-    return {"voices": audiobook.neural_voices() if _req.get("model_id") == audiobook.NEURAL_MODEL_ID else audiobook.voices()}
+    model = _req.get("model_id")
+    if model == audiobook.KOKORO_MODEL_ID:
+        return {"voices": audiobook.kokoro_voices()}
+    return {"voices": audiobook.neural_voices() if model == audiobook.NEURAL_MODEL_ID else audiobook.voices()}
+
+
+def _install_kokoro_packages(req_id):
+    """Kokoro's text packages, pinned, installed beside the runtime's own.
+
+    They come with the model rather than with setup so an existing install
+    gains them by downloading Kokoro, without rebuilding the runtime."""
+    lock = Path(__file__).with_name("kokoro-requirements.lock")
+    emit({"id": req_id, "type": "progress", "phase": "download", "progress": None,
+          "message": "Installing Kokoro's text packages"})
+    proc = subprocess.run([sys.executable, "-m", "pip", "install", "--no-deps", "--disable-pip-version-check",
+                           "--quiet", "-r", str(lock)], capture_output=True, text=True)
+    if proc.returncode:
+        raise RuntimeError("Kokoro's text packages could not be installed: "
+                           + (proc.stderr.strip().splitlines() or ["pip failed"])[-1])
 
 
 # The speech model kept between voice previews, so auditioning several voices
 # does not reload it each time. Released by `_unload_assistant` -- before any
 # other job and by the idle reaper -- so it never sits beside an image model.
-_VOICE: dict[str, Any] = {"model": None}
+_VOICE: dict[str, Any] = {"model": None, "id": None}
 
 # Requests that may find the preview voice model loaded and leave it so.
 _KEEPS_VOICE = {"audio_preview", "audio_voices", "ping", "cancel"}
@@ -7017,13 +7038,22 @@ def op_audio_preview(req_id, req):
         if is_cancelled(req_id):
             raise Cancelled()
     segment = [{"speaker_id": None, "text": text}]
-    if (req.get("model_id") or "macos") == audiobook.NEURAL_MODEL_ID:
+    model_id = req.get("model_id") or "macos"
+    if model_id in (audiobook.NEURAL_MODEL_ID, audiobook.KOKORO_MODEL_ID) and _VOICE.get("id") != model_id:
+        _VOICE.update(model=None, id=None)
+    if model_id == audiobook.KOKORO_MODEL_ID:
+        if _VOICE["model"] is None:
+            CACHE.unload()
+            _unload_assistant()
+            _VOICE.update(model=audiobook.load_kokoro_model(), id=model_id)
+        data, _ = audiobook.synthesize_kokoro(segment, voice, {}, rate, check, load=lambda: _VOICE["model"])
+    elif model_id == audiobook.NEURAL_MODEL_ID:
         if _VOICE["model"] is None:
             CACHE.unload()
             _unload_assistant()
             emit({"id": req_id, "type": "progress", "phase": "load", "progress": 0.0,
                   "message": "Loading neural audiobook voices"})
-            _VOICE["model"] = audiobook.load_neural_model()
+            _VOICE.update(model=audiobook.load_neural_model(), id=model_id)
         data, _ = audiobook.synthesize_neural(segment, voice, {}, rate, check,
             language=req.get("language") or "auto", delivery=req.get("delivery") or "",
             directions={None: str(req.get("direction") or "")[:1500]},
@@ -7059,6 +7089,11 @@ def op_audiobook(req_id, req):
             language=req.get("language") or "auto", delivery=req.get("delivery") or "",
             directions=req.get("directions") or {},
             character_directions={c["id"]: c.get("voice", "") for c in req["book"]["characters"]})
+    elif model_id == audiobook.KOKORO_MODEL_ID:
+        emit({"id": req_id, "type": "progress", "phase": "load", "progress": 0.0,
+              "message": "Loading Kokoro voices"})
+        data, seconds = audiobook.synthesize_kokoro(segments, req["narrator"],
+            req.get("voices") or {}, req.get("rate", 160), check, progress)
     elif model_id == "macos":
         data, seconds = audiobook.synthesize(segments, req["narrator"],
             req.get("voices") or {}, req.get("rate", 160), _stage_dir(), check, progress)

@@ -3126,7 +3126,10 @@ pub async fn generate_audiobook(
     let title = chapter["title"].as_str().unwrap_or("Chapter").to_owned();
     let model_name = if let Some(ref model_id) = args.model_id {
         if model_id != "macos" {
-            if model_id != "qwen3-tts-1.7b-custom-6bit" {
+            let speech = crate::catalog::CATALOG
+                .iter()
+                .any(|m| m.id == model_id && m.tasks.contains(&crate::catalog::Task::Speech));
+            if !speech {
                 return Err(AppError::msg("choose a supported audiobook model"));
             }
             let host = HostInfo::probe(&state.paths());

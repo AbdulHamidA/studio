@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { castFromBook, EMPTY_LIBRARY, keepBook, type StoryBook, type StoryLibrary } from "./story";
+import { castFromBook, EMPTY_LIBRARY, keepBook, voiceGroups, voiceLanguage, type StoryBook, type StoryLibrary } from "./story";
 import { CHAIN_LIMIT, lockStyle, panelPrompt, identityPrompt, storyContinuityReference, storyPanelReferences } from "./board";
 import { staleness } from "./boardDoc";
 import type { Panel } from "./types";
@@ -95,5 +95,14 @@ describe("story appearance continuity", () => {
     expect(prompt).toContain("blue dress");
     expect(prompt).toContain("Current location state: dry floor; dawn");
     expect(identityPrompt(lockStyle("ink"), "Mira: curly black hair")).toContain("No full-body outfit");
+  });
+});
+
+describe("voice choice", () => {
+  it("names system voice languages and lists Indian voices first", () => {
+    expect(voiceLanguage("en_IN")).toBe("English (India)");
+    const groups = voiceGroups([{ id: "Samantha", language: "en_US" }, { id: "Rishi", language: "en_IN" },
+      { id: "Lekha", language: "hi_IN" }, { id: "hm_omega", language: "Hindi / Indian English" }]);
+    expect(groups.map(([label]) => label)).toEqual(["English (India)", "Hindi (India)", "Hindi / Indian English", "American English"]);
   });
 });

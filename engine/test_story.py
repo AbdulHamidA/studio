@@ -972,3 +972,39 @@ class SavedBooksGetTags(unittest.TestCase):
         segments = story.narration_segments(book, book['chapters'][0]['id'])
         self.assertEqual([s['speaker_id'] for s in segments if s['text'] == 'Come in.'], [book['characters'][0]['id']])
         self.assertIsNone(line['speaker_id'])  # the saved book itself is not changed
+
+
+class KokoroNarration(unittest.TestCase):
+    def model(self, calls):
+        from types import SimpleNamespace
+        class Model:
+            def generate(self, **kwargs):
+                calls.append(kwargs)
+                yield SimpleNamespace(audio=[0.0, 0.25, -0.25], sample_rate=24000)
+        return Model()
+
+    def test_hindi_voices_read_devanagari_as_hindi_and_english_with_their_accent(self):
+        self.assertEqual(audiobook.kokoro_language("hf_alpha", "नमस्ते, Agnes."), "h")
+        self.assertEqual(audiobook.kokoro_language("hm_omega", "The ferry was early."), "a")
+        self.assertEqual(audiobook.kokoro_language("bf_emma", "The ferry was early."), "b")
+
+    def test_characters_use_their_voices_at_the_chosen_pace_and_output_is_pcm(self):
+        calls = []
+        segments = [{"speaker_id": None, "text": "The pier was empty."},
+                    {"speaker_id": "agnes", "text": "You are late."}]
+        data, seconds = audiobook.synthesize_kokoro(segments, "af_heart", {"agnes": "hf_beta"}, 200,
+                                                    lambda: None, load=lambda: self.model(calls))
+        self.assertEqual([(c['voice'], c['lang_code'], c['speed']) for c in calls],
+                         [('af_heart', 'a', 1.25), ('hf_beta', 'a', 1.25)])
+        with wave.open(io.BytesIO(data)) as wav:
+            self.assertEqual((wav.getframerate(), wav.getnchannels(), wav.getnframes()), (24000, 1, 6))
+
+    def test_unknown_voices_are_refused_before_loading(self):
+        with self.assertRaisesRegex(ValueError, 'Kokoro voices'):
+            audiobook.synthesize_kokoro([{"speaker_id": None, "text": "x"}], "ryan", {}, 160,
+                                        lambda: None, load=lambda: self.fail("loaded"))
+
+    def test_worker_lists_kokoro_voices_with_indian_ones(self):
+        import worker
+        voices = worker.op_audio_voices('v', {"model_id": audiobook.KOKORO_MODEL_ID})['voices']
+        self.assertIn({"id": "hm_omega", "language": "Hindi / Indian English"}, voices)
