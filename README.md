@@ -619,3 +619,14 @@ Model sizes and peak memory in the catalog are estimates. Automated checks cover
 routing, voice/direction assignment, chunk preservation, cancellation and audio
 validation; real model download, Mac inference and listening quality remain to be
 validated. No claim of human-equivalent voice quality is made.
+
+
+A live Apple Silicon pipeline check is available in the **Live Board and
+Audiobook smoke test** workflow. It installs the pinned runtime, downloads the
+real Qwen3 4B analyst and Qwen3-TTS model, runs the worker JSON protocol, verifies
+full-source analysis and saved Board planning, appends a chapter, and generates
+and decrypts neural narration. Artifacts include diagnostic results and a short
+WAV made from redistributable fixture text for listening review. This checks the
+engine data flow; desktop interaction and Board image rendering are separate
+checks. Locally run `python scripts/smoke_story_audio.py --output smoke-results`
+on Apple Silicon macOS. The command downloads several GiB of model weights.

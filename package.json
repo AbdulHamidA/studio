@@ -2,7 +2,7 @@
   "name": "melp-model-studio",
   "private": true,
   "license": "GPL-3.0-or-later",
-  "version": "0.3.0-preview.1",
+  "version": "0.3.0-preview.2",
   "type": "module",
   "scripts": {
     "dev": "vite",

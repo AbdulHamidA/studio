@@ -1,7 +1,21 @@
-## Model Studio 0.3.0 preview 1
+## Model Studio 0.3.0 preview 2
 
 This preview adds shared story analysis, Board continuity controls, and local
 neural Audiobook generation. Download the Apple Silicon DMG or app ZIP below.
+
+## Fixes in preview 2
+
+Fixes a regression in the shared analyzer where visible characters or dialogue
+speakers referred to by their canonical name or alias were rejected despite
+being declared in the character bible. Exact, unambiguous names and aliases now
+resolve to canonical IDs; unknown and ambiguous references still fail validation.
+Repair calls include the failed reply and valid IDs. Qwen3 4B analyzes smaller
+passages while preserving full source coverage.
+
+This targets the reported “visible character must be in the bible” failure in
+both Board and Audiobook. All 36 story/audio tests pass, including six new
+regression cases. The exact reported chapter has not been run against Qwen3 4B
+in the development workspace; please confirm the result on Mac.
 
 ## Changes
 
@@ -31,7 +45,7 @@ neural Audiobook generation. Download the Apple Silicon DMG or app ZIP below.
 
 ## Validation before tagging
 
-201 frontend tests and the production frontend build passed. All 30 shared-story
+201 frontend tests and the production frontend build passed. All 36 shared-story
 and audio tests passed, with Rust formatting and diff checks clean. Native build
 checks run in the macOS release workflow; they could not run in the Linux coding
 workspace. The full Python suite on Linux retained 10 environment failures due to
