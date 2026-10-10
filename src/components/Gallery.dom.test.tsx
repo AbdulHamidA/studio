@@ -119,6 +119,60 @@ describe("Gallery", () => {
     expect(screen.getByRole("dialog").getAttribute("aria-label")).toBe("Viewer: picture p2");
   });
 
+  it("is one tab stop, walked with the arrow keys; Space selects and Enter opens", () => {
+    show();
+    const tiles = screen.getAllByRole("button", { name: /^(Generated|Audiobook|Comic):/ });
+    // Only one tile is in the tab order.
+    expect(tiles.filter((t) => t.tabIndex === 0)).toHaveLength(1);
+    const first = tiles.find((t) => t.tabIndex === 0)!;
+    first.focus();
+    fireEvent.keyDown(first, { key: "ArrowRight" });
+    const second = document.activeElement as HTMLElement;
+    expect(second).not.toBe(first);
+    expect(second.classList.contains("tile-open")).toBe(true);
+    expect(second.tabIndex).toBe(0);
+    expect(first.tabIndex).toBe(-1);
+    fireEvent.keyDown(second, { key: "ArrowLeft" });
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(first, { key: "End" });
+    expect(document.activeElement).toBe(tiles[tiles.length - 1]);
+    fireEvent.keyDown(document.activeElement!, { key: "Home" });
+    expect(document.activeElement).toBe(first);
+    // Space selects rather than opening.
+    fireEvent.keyDown(first, { key: " " });
+    expect(screen.getByText("1 selected")).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("keeps the pick beside the tile's open button, not inside it", () => {
+    show();
+    const pick = screen.getByRole("button", { name: "Select picture a" });
+    expect(pick.closest("[role=button]")).toBeNull();
+    expect(pick.parentElement?.querySelector(".tile-open")).toBeTruthy();
+    fireEvent.click(pick);
+    expect(screen.getByText("1 selected")).toBeTruthy();
+  });
+
+  it("focuses a comic's title when it opens, and the tile that opened it on Back", () => {
+    show();
+    const tile = card("Night train");
+    tile.focus();
+    fireEvent.click(tile);
+    const heading = screen.getByRole("heading", { name: "Night train" });
+    expect(document.activeElement).toBe(heading);
+    fireEvent.click(screen.getByRole("button", { name: /Back to vault/ }));
+    expect(document.activeElement).toBe(card("Night train"));
+  });
+
+  it("disarms a comic's armed delete on Escape", () => {
+    show();
+    fireEvent.click(card("Night train"));
+    fireEvent.click(screen.getByRole("button", { name: "Delete board" }));
+    expect(screen.getByRole("button", { name: /Really delete/ })).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByRole("button", { name: "Delete board" })).toBeTruthy();
+  });
+
   it("filters by shelf and search, and says so when nothing matches", () => {
     show();
     fireEvent.click(screen.getByRole("button", { name: /^Audio \d/ }));

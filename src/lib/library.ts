@@ -442,6 +442,23 @@ export function zoomAbout(v: View, next: number, point: { x: number; y: number }
     { scale, x: point.x - (point.x - v.x) * k, y: point.y - (point.y - v.y) * k }, nat, box);
 }
 
+/**
+ * Whether the person has asked the system for less motion.
+ *
+ * Read at the moment a video would start rather than once, so changing the
+ * setting takes effect on the next hover without reopening the library. A
+ * host with no matchMedia (tests, very old WebKit) answers no, which keeps
+ * the behaviour everyone had before (WCAG 2.2.2, 2.3.3).
+ */
+export function prefersReducedMotion(): boolean {
+  try {
+    return typeof window !== "undefined" && !!window.matchMedia
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  } catch {
+    return false;
+  }
+}
+
 /* ---------- time ---------- */
 
 /** 0:05, 4:12, 1:02:03. A clock, not a duration in words. */

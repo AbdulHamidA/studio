@@ -123,6 +123,50 @@ describe("Viewer keyboard", () => {
     expect(video.pause).toHaveBeenCalled();
   });
 
+  it("pans a zoomed picture with the arrow keys, and still walks with [ and ]", () => {
+    // jsdom lays nothing out; give the stage a size so there is a fit to zoom past.
+    const w = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
+    const h = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    Object.defineProperty(HTMLElement.prototype, "clientWidth", { configurable: true, get: () => 400 });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get: () => 300 });
+    try {
+      render(<Harness items={three} />);
+      const img = () => screen.getByRole("img", { name: "prompt a" }) as HTMLImageElement;
+      key("1"); // actual size: 512px in a 400px stage
+      expect(img().style.transform).toContain("translate(-56px");
+      key("ArrowRight");
+      // The view moved; the item did not change.
+      expect(screen.getByText(/^1 of 3/)).toBeTruthy();
+      expect(img().style.transform).toContain("translate(-112px");
+      key("ArrowLeft");
+      expect(img().style.transform).toContain("translate(-52px");
+      key("]");
+      expect(screen.getByText(/^2 of 3/)).toBeTruthy();
+      key("PageUp");
+      expect(screen.getByText(/^1 of 3/)).toBeTruthy();
+      // Back at fit, the arrows walk again.
+      key("0");
+      key("ArrowRight");
+      expect(screen.getByText(/^2 of 3/)).toBeTruthy();
+    } finally {
+      if (w) Object.defineProperty(HTMLElement.prototype, "clientWidth", w);
+      if (h) Object.defineProperty(HTMLElement.prototype, "clientHeight", h);
+    }
+  });
+
+  it("does not autoplay or loop a video when reduced motion is asked for", () => {
+    const before = window.matchMedia;
+    window.matchMedia = ((q: string) => ({ ...before(q), matches: q.includes("reduce") })) as typeof window.matchMedia;
+    try {
+      render(<Harness items={[item("v", { mime: "video/mp4", kind: "video" })]} />);
+      const video = document.querySelector("video")!;
+      expect(video.autoplay).toBe(false);
+      expect(video.loop).toBe(false);
+    } finally {
+      window.matchMedia = before;
+    }
+  });
+
   it("reads a comic as pages", () => {
     render(
       <Viewer items={three} index={0} onIndex={() => {}} onClose={closed} all={three}

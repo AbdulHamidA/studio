@@ -3,7 +3,7 @@ import { vaultUrl } from "../../lib/api";
 import type { ModelStatus, VaultItem } from "../../lib/types";
 import {
   aspectOf, entryTitle, isAudio, isBoard, isImage, isPdf, isVideo, justify, kindLabel,
-  type LibraryEntry, type Section,
+  prefersReducedMotion, type LibraryEntry, type Section,
 } from "../../lib/library";
 import SendTo, { type Destination } from "../SendTo";
 import { coverOf } from "./InfoPanel";
@@ -42,6 +42,65 @@ export default function LibraryGrid(props: GridProps) {
   const { sections, size } = props;
   const box = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
+  /**
+   * The one tile that Tab lands on.
+   *
+   * Every card used to be its own tab stop, so getting past a vault of four
+   * hundred pictures to whatever follows took four hundred presses. One stop
+   * for the whole grid, and the arrow keys inside it, is the grid pattern
+   * (WCAG 2.1.1, 2.4.3). Null means the first tile.
+   */
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const firstId = sections[0]?.entries[0]?.item.id ?? null;
+  const allIds = useMemo(
+    () => new Set(sections.flatMap((s) => s.entries.map((e) => e.item.id))), [sections]);
+  const rovingId = focusId && allIds.has(focusId) ? focusId : firstId;
+
+  /**
+   * Arrow keys move between tiles; Home and End go to either end.
+   *
+   * Up and down go to the tile in the next row whose centre is nearest,
+   * because justified rows do not line up in columns. Measured from the DOM
+   * rather than the layout maths so it agrees with what is on screen; with no
+   * layout at all (jsdom) it falls back to the same position in the row.
+   */
+  const onGridKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const from = (e.target as HTMLElement).closest<HTMLElement>(".tile-open");
+    if (!from || !box.current) return;
+    const rows = [...box.current.querySelectorAll<HTMLElement>(".lib-row")]
+      .map((r) => [...r.querySelectorAll<HTMLElement>(".tile-open")])
+      .filter((r) => r.length);
+    const flat = rows.flat();
+    const at = flat.indexOf(from);
+    if (at < 0) return;
+    let to: HTMLElement | undefined;
+    if (e.key === "ArrowRight") to = flat[at + 1];
+    else if (e.key === "ArrowLeft") to = flat[at - 1];
+    else if (e.key === "Home") to = flat[0];
+    else if (e.key === "End") to = flat[flat.length - 1];
+    else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      const r = rows.findIndex((row) => row.includes(from));
+      const next = rows[r + (e.key === "ArrowDown" ? 1 : -1)];
+      if (next) {
+        const centre = (el: HTMLElement) => {
+          const b = el.getBoundingClientRect();
+          return b.left + b.width / 2;
+        };
+        const measured = from.getBoundingClientRect().width > 0;
+        const col = rows[r].indexOf(from);
+        to = measured
+          ? next.reduce((best, el) =>
+              Math.abs(centre(el) - centre(from)) < Math.abs(centre(best) - centre(from)) ? el : best)
+          : next[Math.min(col, next.length - 1)];
+      }
+    } else return;
+    e.preventDefault();
+    if (to) {
+      setFocusId(to.dataset.id ?? null);
+      to.focus();
+      to.scrollIntoView?.({ block: "nearest" });
+    }
+  };
 
   useLayoutEffect(() => {
     const el = box.current;
@@ -61,7 +120,11 @@ export default function LibraryGrid(props: GridProps) {
   })), [sections, w, size]);
 
   return (
-    <div className="lib-grid" ref={box}>
+    <div className="lib-grid" ref={box} onKeyDown={onGridKey}
+         onFocus={(e) => {
+           const id = (e.target as HTMLElement).closest<HTMLElement>(".tile-open")?.dataset.id;
+           if (id) setFocusId(id);
+         }}>
       {laid.map(({ section, rows }) => {
         const all = section.entries.every((e) => props.picked.has(e.item.id));
         return (
@@ -85,6 +148,7 @@ export default function LibraryGrid(props: GridProps) {
                           picked={props.picked.has(entry.item.id)}
                           starred={props.favorites.has(entry.item.id)}
                           selecting={props.picked.size > 0}
+                          tabbable={entry.item.id === rovingId}
                           byId={props.byId} onActivate={props.onActivate}
                           onTogglePick={props.onTogglePick} send={props.send} models={props.models} />
                   );
@@ -110,7 +174,14 @@ function LazyRow({ height, children }: { height: number; children: React.ReactNo
   useEffect(() => {
     const el = ref.current;
     if (!el || typeof IntersectionObserver === "undefined") return;
-    const io = new IntersectionObserver(([e]) => setNear(e.isIntersecting), { rootMargin: "1200px 0px" });
+    const io = new IntersectionObserver(([e]) => {
+      // A row with no size is not off screen, it is not laid out at all --
+      // the grid is hidden behind an open comic. Dropping its pictures then
+      // would mean coming Back to empty rows, and to a tile that cannot take
+      // focus because it no longer exists.
+      if (e.boundingClientRect.width === 0 && e.boundingClientRect.height === 0) return;
+      setNear(e.isIntersecting);
+    }, { rootMargin: "1200px 0px" });
     io.observe(el);
     return () => io.disconnect();
   }, []);
@@ -122,10 +193,10 @@ function LazyRow({ height, children }: { height: number; children: React.ReactNo
 }
 
 const Card = memo(function Card({
-  entry, width, height, picked, starred, selecting, byId, onActivate, onTogglePick, send, models,
+  entry, width, height, picked, starred, selecting, tabbable, byId, onActivate, onTogglePick, send, models,
 }: {
   entry: LibraryEntry; width: number; height: number; picked: boolean; starred: boolean;
-  selecting: boolean; byId: ReadonlyMap<string, VaultItem>;
+  selecting: boolean; tabbable: boolean; byId: ReadonlyMap<string, VaultItem>;
   onActivate: GridProps["onActivate"]; onTogglePick: GridProps["onTogglePick"];
   send?: GridProps["send"]; models: ModelStatus[];
 }) {
@@ -158,7 +229,12 @@ const Card = memo(function Card({
     media = (
       <video src={cover ? vaultUrl(it.id) : `${vaultUrl(it.id)}#t=0.1`} muted loop playsInline
              poster={cover ? vaultUrl(cover) : undefined} preload={cover ? "none" : "metadata"}
-             onMouseEnter={(e) => void e.currentTarget.play()?.catch(() => {})}
+             // Hover-to-play is motion nobody asked for; with reduced motion
+             // on, the poster stays still and the viewer is where it plays.
+             onMouseEnter={(e) => {
+               if (prefersReducedMotion()) return;
+               void e.currentTarget.play()?.catch(() => {});
+             }}
              onMouseLeave={(e) => e.currentTarget.pause()}
              onError={() => setBroken(true)} />
     );
@@ -174,35 +250,49 @@ const Card = memo(function Card({
     );
   }
 
+  // The tile is two controls side by side, not one inside the other. The pick
+  // used to sit inside an element with role="button", where assistive tech
+  // flattens it away, and 20px was all a pointer got (WCAG 4.1.2, 2.5.8).
+  // Now the picture is the open button and the pick is its sibling.
   return (
     <div
       className={"tile" + (picked ? " picked" : "") + (board ? " stack" : "") + (selecting ? " selecting" : "")}
       style={{ width, height }}
-      role="button"
-      tabIndex={0}
-      aria-label={`${board ? "Comic" : kindLabel(it.kind)}: ${title}`}
-      aria-pressed={selecting ? picked : undefined}
-      onClick={(e) => {
-        // The tick selects; a modifier selects; anything else opens. Once
-        // something is selected a plain click keeps selecting, because that
-        // is what a file list does and opening would lose the set.
-        if ((e.target as HTMLElement).closest(".pick, .tile-actions")) return;
-        if (e.shiftKey || e.metaKey || e.ctrlKey) { e.preventDefault(); onTogglePick(entry, e.shiftKey); }
-        else if (selecting) onTogglePick(entry, false);
-        else onActivate(entry, e);
-      }}
-      onKeyDown={(e) => {
-        if (e.target !== e.currentTarget) return;
-        if (e.key === "Enter") { e.preventDefault(); onActivate(entry, e); }
-        else if (e.key === " ") { e.preventDefault(); onTogglePick(entry, e.shiftKey); }
-      }}
     >
-      {media}
       <button
+        type="button"
+        className="tile-open"
+        data-id={it.id}
+        tabIndex={tabbable ? 0 : -1}
+        aria-label={`${board ? "Comic" : kindLabel(it.kind)}: ${title}`}
+        aria-pressed={selecting ? picked : undefined}
+        onClick={(e) => {
+          // A modifier selects; anything else opens. Once something is
+          // selected a plain click keeps selecting, because that is what a
+          // file list does and opening would lose the set.
+          if (e.shiftKey || e.metaKey || e.ctrlKey) { e.preventDefault(); onTogglePick(entry, e.shiftKey); }
+          else if (selecting) onTogglePick(entry, false);
+          else onActivate(entry, e);
+        }}
+        onKeyDown={(e) => {
+          // Space selects, as in a file list; Enter opens (the native click).
+          // Handled on key down and swallowed on key up, because a button
+          // fires its click when Space is released.
+          if (e.key === " ") { e.preventDefault(); onTogglePick(entry, e.shiftKey); }
+        }}
+        onKeyUp={(e) => { if (e.key === " ") e.preventDefault(); }}
+      >
+        {media}
+      </button>
+      {/* Out of the tab order: Space on the tile does the same thing, and one
+          stop per tile is what the roving focus above is there to remove. */}
+      <button
+        type="button"
         className="pick"
+        tabIndex={-1}
         aria-pressed={picked}
         aria-label={picked ? `Deselect ${title}` : `Select ${title}`}
-        onClick={(e) => { e.stopPropagation(); onTogglePick(entry, e.shiftKey); }}
+        onClick={(e) => onTogglePick(entry, e.shiftKey)}
       >✓</button>
       {board && (
         <span className="count" title={`${entry.members.length} pictures in this board`}>
