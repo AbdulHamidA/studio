@@ -1082,7 +1082,8 @@ def _helpers_resident() -> str | None:
     one-resident rule exists to prevent.
     """
     return _ASSIST.get("key") if _ASSIST.get("model") is not None else (
-        _WRITER.get("key") if _WRITER.get("model") is not None else None
+        _WRITER.get("key") if _WRITER.get("model") is not None else (
+            "audiobook voices" if _VOICE.get("model") is not None else None)
     )
 
 
@@ -1254,6 +1255,7 @@ def _release_assistant_only() -> None:
 
 def _unload_assistant() -> None:
     _unload_writer()
+    _VOICE.update(model=None)
     _ASSIST.update(key=None, model=None, processor=None, config=None)
     gc.collect()
     try:
@@ -6996,6 +6998,41 @@ def op_audio_voices(_req_id, _req):
     return {"voices": audiobook.neural_voices() if _req.get("model_id") == audiobook.NEURAL_MODEL_ID else audiobook.voices()}
 
 
+# The speech model kept between voice previews, so auditioning several voices
+# does not reload it each time. Released by `_unload_assistant` -- before any
+# other job and by the idle reaper -- so it never sits beside an image model.
+_VOICE: dict[str, Any] = {"model": None}
+
+# Requests that may find the preview voice model loaded and leave it so.
+_KEEPS_VOICE = {"audio_preview", "audio_voices", "ping", "cancel"}
+
+
+def op_audio_preview(req_id, req):
+    """A few seconds of one voice, returned in memory and never written out."""
+    import audiobook
+    import base64
+    text = str(req.get("text") or "").strip()[:300] or "This is how I will read your story."
+    voice, rate = req.get("voice"), req.get("rate", 160)
+    def check():
+        if is_cancelled(req_id):
+            raise Cancelled()
+    segment = [{"speaker_id": None, "text": text}]
+    if (req.get("model_id") or "macos") == audiobook.NEURAL_MODEL_ID:
+        if _VOICE["model"] is None:
+            CACHE.unload()
+            _unload_assistant()
+            emit({"id": req_id, "type": "progress", "phase": "load", "progress": 0.0,
+                  "message": "Loading neural audiobook voices"})
+            _VOICE["model"] = audiobook.load_neural_model()
+        data, _ = audiobook.synthesize_neural(segment, voice, {}, rate, check,
+            language=req.get("language") or "auto", delivery=req.get("delivery") or "",
+            directions={None: str(req.get("direction") or "")[:1500]},
+            load=lambda: _VOICE["model"])
+    else:
+        data, _ = audiobook.synthesize(segment, voice, {}, rate, _stage_dir(), check)
+    return {"wav_base64": base64.b64encode(data).decode("ascii")}
+
+
 def op_audiobook(req_id, req):
     import audiobook
     import story as story_model
@@ -7064,6 +7101,7 @@ OPS = {
     "direct_story": lambda _id, req: {"panels": __import__("story").direct(req["book"], req["chapter_id"])},
     "audio_voices": op_audio_voices,
     "audiobook": op_audiobook,
+    "audio_preview": op_audio_preview,
     "character_reference": op_character_reference,
     "capabilities": op_capabilities,
     "lora_info": op_lora_info,
@@ -7094,6 +7132,9 @@ OPS = {
 def handle(req: dict[str, Any]) -> None:
     req_id = req.get("id", "?")
     op = req.get("op", "")
+    if op not in _KEEPS_VOICE and _VOICE["model"] is not None:
+        _VOICE.update(model=None)
+        gc.collect()
     fn = OPS.get(op)
     if fn is None:
         emit({"id": req_id, "type": "error", "error": f"unknown op: {op}",

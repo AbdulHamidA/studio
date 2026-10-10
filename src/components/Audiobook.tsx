@@ -44,6 +44,45 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
   const outputs = chapter ? settings.outputs[chapter.id] ?? [] : [];
   const writerReady = models.some((m) => ANALYST_IDS.includes(m.id) && m.installed && !m.hopeless);
 
+  // Hear a voice before choosing it. The sample is the character's own first
+  // line when there is one, so the choice is made on words from this story.
+  const [previewing, setPreviewing] = useState<string | null>(null);
+  const player = useRef<HTMLAudioElement | null>(null);
+  useEffect(() => () => { player.current?.pause(); }, []);
+  const sampleFor = (characterId: string | null) => {
+    const lines = chapter?.scenes.flatMap((s) => s.beats.flatMap((b) => b.dialogue)) ?? [];
+    const line = characterId ? lines.find((d) => d.speaker_id === characterId)?.text : null;
+    if (line) return line;
+    const opening = (chapter?.source ?? "").slice(0, 300);
+    return characterId ? "Hello. This is how I will sound in your story."
+      : opening.slice(0, Math.max(opening.lastIndexOf(". ") + 1, 120)) || "This is how I will read your story.";
+  };
+  const preview = async (key: string, voice: string, characterId: string | null) => {
+    setPreviewing(key);
+    try {
+      const { wav_base64 } = await api.audioPreview({ model_id: speechModel, voice, text: sampleFor(characterId),
+        language: settings.language || "auto", delivery: settings.delivery || "",
+        direction: characterId ? (settings.directions?.[characterId]
+          ?? book?.characters.find((c) => c.id === characterId)?.voice ?? "") : "",
+        rate: settings.rate });
+      const bytes = Uint8Array.from(atob(wav_base64), (c) => c.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+      player.current?.pause();
+      const audio = new Audio(url);
+      audio.onended = () => URL.revokeObjectURL(url);
+      player.current = audio;
+      await audio.play();
+    } catch (e) {
+      notify(`Could not preview ${voice}: ${errText(e)}`, true);
+    } finally {
+      if (mounted.current) setPreviewing(null);
+    }
+  };
+  const PreviewButton = ({ id, voice, character, label }: { id: string; voice: string; character: string | null; label: string }) =>
+    <button type="button" className="btn small" aria-label={label} title={`Hear ${voice}`}
+      disabled={!!job || !!previewing || !voice || !speechReady}
+      onClick={() => void preview(id, voice, character)}>{previewing === id ? "…" : "▶"}</button>;
+
   const saveSettings = (patch: Partial<AudioSettings> | ((latest: AudioSettings) => Partial<AudioSettings>)) => {
     if (!book) return;
     const id = book.id;
@@ -152,10 +191,10 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
             placeholder="Warm, intimate storytelling with restrained emotion and natural pauses."
             onChange={(e) => saveSettings({ delivery: e.target.value })} /></label>
         </>}
-        <label>Narrator<select value={narrator} disabled={!!job || !voices.length}
+        <label>Narrator<span style={{ display: "flex", gap: 6 }}><select value={narrator} disabled={!!job || !voices.length}
           onChange={(e) => saveSettings({ narrator: e.target.value })}>
           {voices.map((v) => <option key={v.id} value={v.id}>{v.id} · {v.language}</option>)}
-        </select></label>
+        </select><PreviewButton id="narrator" voice={narrator} character={null} label="Preview narrator voice" /></span></label>
         <label>{neural ? `Reading pace · ${settings.rate} (approximate)` : `Reading speed · ${settings.rate} words/minute`}<input type="range" min={80} max={300}
           value={settings.rate} disabled={!!job} onChange={(e) => saveSettings({ rate: Number(e.target.value) })} /></label>
         <div className="sub-head">Character voices</div>
@@ -173,6 +212,7 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
             <option value="">Use narrator</option>
             {voices.map((v) => <option key={v.id} value={v.id}>{v.id} · {v.language}</option>)}
           </select>
+          <PreviewButton id={c.id} voice={assignedVoices[c.id] ?? narrator} character={c.id} label={`Preview ${c.name} voice`} />
           {neural && <input aria-label={`${c.name} voice direction`} maxLength={1500}
             value={settings.directions?.[c.id] ?? c.voice} disabled={!!job} placeholder="Quiet, guarded; a slight tremor when afraid"
             onChange={(e) => { const value = e.target.value;

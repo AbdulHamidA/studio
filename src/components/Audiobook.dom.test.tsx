@@ -7,7 +7,7 @@ import { api } from "../lib/api";
 import { SPEECH_MODEL_ID, type StoryLibrary } from "../lib/story";
 
 vi.mock("../lib/api", () => ({
-  api: { audioVoices: vi.fn(), generateAudiobook: vi.fn(), cancelJob: vi.fn(), analyzeStory: vi.fn(), resumeStory: vi.fn() },
+  api: { audioVoices: vi.fn(), generateAudiobook: vi.fn(), cancelJob: vi.fn(), analyzeStory: vi.fn(), resumeStory: vi.fn(), audioPreview: vi.fn() },
   errText: (e: unknown) => String(e), isCancelled: () => false,
   newJobId: () => "job", onEngineProgress: async () => () => {},
   vaultUrl: (id: string) => `vault://localhost/${id}`,
@@ -58,6 +58,20 @@ describe("Audiobook", () => {
     fireEvent.change(screen.getByPlaceholderText("Paste the original prose…"), { target: { value: "Exact original prose." } });
     fireEvent.click(screen.getByRole("button", { name: "Analyze chapter" }));
     await waitFor(() => expect(api.analyzeStory).toHaveBeenCalledWith("job", "Exact original prose.", expect.any(String), null, null, "voice"));
+  });
+  it("plays a sample of a character's chosen voice before narrating", async () => {
+    const play = vi.fn(async () => {});
+    vi.stubGlobal("Audio", class { play = play; pause = vi.fn(); onended = null; });
+    URL.createObjectURL = vi.fn(() => "blob:sample");
+    vi.mocked(api.audioPreview).mockResolvedValue({ wav_base64: btoa("RIFF") });
+    render(<Harness />);
+    await waitFor(() => expect(screen.getAllByRole("option", { name: "Karen · en_AU" }).length).toBe(2));
+    fireEvent.change(screen.getByLabelText("Mira voice"), { target: { value: "Karen" } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview Mira voice" }));
+    await waitFor(() => expect(play).toHaveBeenCalled());
+    expect(api.audioPreview).toHaveBeenCalledWith(expect.objectContaining({ voice: "Karen", model_id: "macos" }));
+    expect(api.generateAudiobook).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
   it("does not enable narration when no local speech voices are available", async () => {
     vi.mocked(api.audioVoices).mockResolvedValue({ voices: [] });

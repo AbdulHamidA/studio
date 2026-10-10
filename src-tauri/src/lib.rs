@@ -235,6 +235,7 @@ pub fn run() {
             commands::resume_story,
             commands::direct_story,
             commands::audio_voices,
+            commands::audio_preview,
             commands::generate_audiobook,
             commands::character_reference,
             commands::compose_board,

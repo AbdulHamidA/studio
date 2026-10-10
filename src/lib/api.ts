@@ -105,6 +105,9 @@ export const api = {
     invoke<StoryAnalysisResult>("resume_story", { jobId, book, chapterId, modelId }),
   directStory: (jobId: string, book: StoryBook, chapterId: string) =>
     invoke<{ panels: Panel[] }>("direct_story", { jobId, book, chapterId }),
+  audioPreview: (args: { model_id: string; voice: string; text: string; language?: string;
+                         delivery?: string; direction?: string; rate: number }) =>
+    invoke<{ wav_base64: string }>("audio_preview", { args }),
   audioVoices: (modelId = "macos") => invoke<{ voices: { id: string; language: string }[] }>("audio_voices", { modelId }),
   generateAudiobook: (jobId: string, book: StoryBook, chapterId: string,
                      narrator: string, voices: Record<string, string>, rate: number,

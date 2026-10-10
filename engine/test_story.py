@@ -448,6 +448,31 @@ class NeuralNarration(unittest.TestCase):
         self.assertEqual(seen, sorted(seen))
         self.assertLess(seen[-1], 1)
 
+    def test_preview_returns_a_playable_sample_and_keeps_the_model_only_between_previews(self):
+        import base64
+        import worker
+        calls, loads = [], []
+        def load():
+            loads.append(1)
+            return self.model(calls)
+        worker._VOICE.update(model=None)
+        req = {"model_id": audiobook.NEURAL_MODEL_ID, "voice": "vivian", "text": "Wait for me.",
+               "direction": "breathless", "rate": 160}
+        with patch.object(audiobook, 'load_neural_model', load):
+            first = worker.op_audio_preview('test-preview', req)
+            worker.op_audio_preview('test-preview', {**req, "voice": "ryan"})
+        with wave.open(io.BytesIO(base64.b64decode(first['wav_base64']))) as wav:
+            self.assertEqual((wav.getframerate(), wav.getnchannels()), (24000, 1))
+            self.assertGreater(wav.getnframes(), 0)
+        self.assertEqual(len(loads), 1)
+        self.assertEqual([c['speaker'] for c in calls], ['vivian', 'ryan'])
+        self.assertIn('breathless', calls[0]['instruct'])
+        with patch.object(worker, 'emit'):
+            worker.handle({"id": "other", "op": "ping"})
+            self.assertIsNotNone(worker._VOICE['model'])
+            worker.handle({"id": "other", "op": "unload"})
+        self.assertIsNone(worker._VOICE['model'])
+
     def test_voice_direction_streaming_and_pcm_output(self):
         calls = []
         data, seconds = audiobook.synthesize_neural([

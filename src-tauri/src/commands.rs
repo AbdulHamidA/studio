@@ -3037,6 +3037,43 @@ pub async fn resume_story(
         .await
 }
 
+#[derive(Deserialize)]
+pub struct VoicePreview {
+    model_id: Option<String>,
+    voice: String,
+    text: String,
+    language: Option<String>,
+    delivery: Option<String>,
+    direction: Option<String>,
+    rate: u32,
+}
+
+/// A few seconds of one voice, returned as WAV bytes in memory.
+#[tauri::command]
+pub async fn audio_preview(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    args: VoicePreview,
+) -> Result<serde_json::Value> {
+    let _job = state.job_gate.read().await;
+    state.require_unlocked()?;
+    let id = format!("audio-preview-{}", uuid::Uuid::new_v4());
+    state
+        .engine(&app)
+        .await?
+        .request(
+            &id,
+            "audio_preview",
+            json!({
+                "model_id": args.model_id, "voice": args.voice,
+                "text": args.text.chars().take(300).collect::<String>(),
+                "language": args.language, "delivery": args.delivery,
+                "direction": args.direction, "rate": args.rate,
+            }),
+        )
+        .await
+}
+
 #[tauri::command]
 pub async fn audio_voices(
     app: AppHandle,
