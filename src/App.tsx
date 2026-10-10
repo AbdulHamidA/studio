@@ -1,3 +1,5 @@
+import Audiobook from "./components/Audiobook";
+import { EMPTY_LIBRARY, keepBook, type CharacterReference, type StoryBook, type StoryLibrary } from "./lib/story";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errText, onEngineExit, onEngineProgress } from "./lib/api";
 import type { HostInfo, ModelStatus, Recipe, SetupState, VaultItem, VaultStatus } from "./lib/types";
@@ -16,12 +18,13 @@ import Security from "./components/Security";
 import Activity from "./components/Activity";
 import { Toast } from "./components/shared";
 
-type Tab = "generate" | "edit" | "board" | "video" | "upscale" | "models" | "gallery" | "activity" | "security";
+type Tab = "generate" | "edit" | "board" | "audiobook" | "video" | "upscale" | "models" | "gallery" | "activity" | "security";
 
 const TABS: [Tab, string, string][] = [
   ["generate", "✦", "Generate"],
   ["edit", "✎", "Edit"],
   ["board", "▤", "Board"],
+  ["audiobook", "♫", "Audiobook"],
   ["video", "▷", "Video"],
   ["upscale", "⤢", "Upscale"],
   ["models", "◍", "Models"],
@@ -58,6 +61,27 @@ export default function App() {
    * the board it opens is in Board.
    */
   const [openBoard, setOpenBoard] = useState<string | null>(null);
+
+  const [storyLibrary, setStoryLibrary] = useState<StoryLibrary | null>(null);
+  const libraryRef = useRef<StoryLibrary | null>(null);
+  const libraryWrites = useRef<Promise<void>>(Promise.resolve());
+  const saveLibrary = useCallback((update: (current: StoryLibrary) => StoryLibrary) => {
+    const write = libraryWrites.current.catch(() => {}).then(async () => {
+      if (!libraryRef.current) throw new Error("The story library has not loaded; nothing was overwritten.");
+      const next = update(libraryRef.current);
+      await api.storyLibrarySet(JSON.stringify(next));
+      libraryRef.current = next;
+      setStoryLibrary(next);
+    });
+    libraryWrites.current = write;
+    return write;
+  }, []);
+  const keepStory = useCallback((book: StoryBook) =>
+    saveLibrary((current) => keepBook(current, book)), [saveLibrary]);
+
+  const saveCharacterReference = useCallback((bookId: string, characterId: string, reference: CharacterReference) =>
+    saveLibrary((current) => ({ ...current, books: current.books.map((book) => book.id === bookId
+      ? { ...book, references: { ...book.references, [characterId]: reference } } : book) })), [saveLibrary]);
 
   const notify = useCallback((msg: string, bad?: boolean) => setToast({ msg, bad }), []);
 
@@ -179,6 +203,23 @@ export default function App() {
     }).then((u) => { un = u; });
     return () => { un?.(); window.clearTimeout(idle); };
   }, []);
+
+  useEffect(() => {
+    if (!vault?.unlocked) {
+      libraryRef.current = null;
+      setStoryLibrary(null);
+      return;
+    }
+    let live = true;
+    void api.storyLibraryGet().then((raw) => {
+      if (!live) return;
+      const loaded = raw ? JSON.parse(raw) as StoryLibrary : { ...EMPTY_LIBRARY };
+      if (loaded.version !== 1 || !Array.isArray(loaded.books)) throw new Error("Unsupported story library");
+      libraryRef.current = loaded;
+      setStoryLibrary(loaded);
+    }).catch((e) => notify(`Could not load the story library: ${errText(e)}`, true));
+    return () => { live = false; };
+  }, [vault?.unlocked, notify]);
 
   const refreshModels = useCallback(async () => {
     try {
@@ -504,9 +545,16 @@ export default function App() {
               models={models}
               notify={notify}
               onProduced={refreshItems}
+              storyLibrary={storyLibrary}
+              onStoryAnalyzed={keepStory}
+              onCharacterReference={saveCharacterReference}
               openProject={openBoard}
               onOpened={() => setOpenBoard(null)}
             />
+          </div>
+          <div style={{ display: tab === "audiobook" ? "block" : "none" }}>
+            <Audiobook library={storyLibrary} models={models} notify={notify}
+              onLibraryChange={saveLibrary} onProduced={refreshItems} />
           </div>
           <div style={{ display: tab === "video" ? "block" : "none" }}>
             <Video

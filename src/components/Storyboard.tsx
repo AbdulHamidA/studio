@@ -1,3 +1,4 @@
+import { ANALYST_IDS, castFromBook, type CharacterReference, type StoryBook, type StoryLibrary } from "../lib/story";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api, errText, isCancelled, newJobId, onEngineProgress, vaultUrl,
          type TextOverflow } from "../lib/api";
@@ -12,7 +13,7 @@ import { anchorOverflow, artOf, fromArrays, identify, setArt, toArrays,
 import { loadBoardDraft, loadSavedBoard, type BoardDraft, type Coverage }
   from "../lib/boardDraft";
 import { CUSTOM_STYLE, STYLES, isKnownStyle, lockCustomStyle, lockStyle,
-         panelPrompt, panelReferences, panelSeed, placeKey, placePrompt,
+         panelPrompt, panelReferences, panelSeed, placeKey, placePrompt, identityPrompt, storyContinuityReference,
          placeSeed, previousPanel, reviveLock, sheetPrompt, styleHasMoved,
          styleLabel } from "../lib/board";
 import type { StyleLock } from "../lib/board";
@@ -60,9 +61,12 @@ const PANEL_SIZES: [string, number][] = [
 type Stage = "idle" | "dividing" | "enriching" | "casting" | "building" | "drawing";
 
 export default function Storyboard({
-  models, notify, onProduced, openProject, onOpened,
+  models, notify, onProduced, openProject, onOpened, storyLibrary, onStoryAnalyzed, onCharacterReference,
 }: {
   models: ModelStatus[];
+  storyLibrary: StoryLibrary | null;
+  onStoryAnalyzed: (book: StoryBook) => Promise<void>;
+  onCharacterReference: (bookId: string, characterId: string, reference: CharacterReference) => Promise<void>;
   notify: (m: string, bad?: boolean) => void;
   onProduced: () => void;
   /** A saved board the Vault asked to reopen, by project id. */
@@ -78,7 +82,7 @@ export default function Storyboard({
     [models]
   );
   const writerReady = useMemo(
-    () => models.some((m) => m.id === "qwen3-4b-instruct-4bit" && m.installed),
+    () => models.some((m) => ANALYST_IDS.includes(m.id) && m.installed && !m.hopeless),
     [models]
   );
 
@@ -86,10 +90,26 @@ export default function Storyboard({
   const model = usable.find((m) => m.id === modelId) ?? usable[0];
 
   const [story, setStory] = useState("");
+  const [storyBook, setStoryBook] = useState<StoryBook | null>(null);
+  const storyBookRef = useRef<StoryBook | null>(null);
+  useEffect(() => { storyBookRef.current = storyBook; }, [storyBook]);
+  const ignoreSavedReferences = useRef(false);
+  const [chapterId, setChapterId] = useState<string | null>(null);
+  const [chapterTitle, setChapterTitle] = useState("Chapter 1");
+  const [appendChapter, setAppendChapter] = useState(false);
+  const [continuationBookId, setContinuationBookId] = useState("");
+  const [analystId, setAnalystId] = useState("");
+  const [characterSheets, setCharacterSheets] = useState<Record<string, string>>({});
+  const characterSheetsRef = useRef<Record<string, string>>({});
+  const referenceCache = useRef<Record<string, string>>({});
+  const clearCharacterSheets = () => {
+    characterSheetsRef.current = {}; setCharacterSheets({});
+    referenceCache.current = {};
+  };
+
   // The cast, read out of the story rather than typed in. `null` means the
   // story has not been read yet.
   const [cast, setCast] = useState<Cast | null>(null);
-  const [reading, setReading] = useState(false);
   /**
    * How many panels one press draws.
    *
@@ -301,6 +321,15 @@ export default function Storyboard({
    * what they look like? -- is the one the tool stops guessing at.
    */
   const describePerson = (name: string, look: string) => {
+    clearCharacterSheets();
+    const currentBook = storyBookRef.current;
+    const personId = cast?.people.find((p) => p.name === name)?.id;
+    if (currentBook && personId) {
+      const updated = { ...currentBook, characters: currentBook.characters.map((c) =>
+        c.id === personId ? { ...c, visual: look } : c) };
+      storyBookRef.current = updated; setStoryBook(updated);
+      void onStoryAnalyzed(updated).catch((error) => notify(`Could not save the character bible: ${errText(error)}`, true));
+    }
     setCast((c) => c && ({
       ...c,
       people: c.people.map((p) => p.name === name
@@ -310,6 +339,7 @@ export default function Storyboard({
   };
 
   const addPerson = (name: string, look: string, lead = false) => {
+    clearCharacterSheets();
     const clean = name.trim();
     if (!clean) return;
     setCast((c) => {
@@ -438,6 +468,13 @@ export default function Storyboard({
   const applyDraft = (draft: Partial<BoardDraft>) => {
         setStory(typeof draft.story === "string" ? draft.story : "");
         setCast(draft.cast ?? null);
+        setStoryBook(draft.storyBook ?? null);
+        storyBookRef.current = draft.storyBook ?? null;
+        ignoreSavedReferences.current = false;
+        setChapterId(draft.chapterId ?? null);
+        characterSheetsRef.current = draft.characterSheets ?? {};
+        setCharacterSheets(draft.characterSheets ?? {});
+        referenceCache.current = {};
         setProjectId(draft.projectId ?? null);
         setCharacter(typeof draft.character === "string" ? draft.character : "");
         // A v1 draft holds the parallel arrays; a v2 one holds the same
@@ -542,7 +579,7 @@ export default function Storyboard({
     const draft: BoardDraft = {
       version: 1, story, cast, projectId, style, character, panels, sheet, drawn,
       redraws, notes, pages, ownSheet, placeSheets,
-      coverage, overflow, variants,
+      coverage, overflow, variants, storyBook, chapterId, characterSheets,
     };
     const timeout = window.setTimeout(() => {
       const body = JSON.stringify(draft);
@@ -570,7 +607,7 @@ export default function Storyboard({
       }
     }, 350);
     return () => window.clearTimeout(timeout);
-  }, [draftLoaded, overflow, variants,
+  }, [draftLoaded, overflow, variants, storyBook, chapterId, characterSheets,
       story, cast, projectId, style, character, panels, sheet, drawn,
       redraws, notes, pages, ownSheet, placeSheets, coverage, notify]);
 
@@ -630,11 +667,12 @@ export default function Storyboard({
   useEffect(() => { savePref("boardStyle", style.id); }, [style.id]);
   useEffect(() => { savePref("boardLayout", layout); }, [layout]);
 
-  const busy = stage !== "idle" || reading;
+  const busy = stage !== "idle";
 
   const changeStory = (next: string) => {
     if (next === story) return;
     setStory(next);
+    setStoryBook(null); setChapterId(null); clearCharacterSheets();
     // Every downstream decision was made from the previous manuscript. Keeping
     // any of it would quietly mix two different stories.
     setCast(null); setProjectId(null); setSheet(null);
@@ -669,6 +707,7 @@ export default function Storyboard({
     if (next.id === style.id && next.words === style.words) return;
     if (drawnInStyle && confirmStyle !== id) { setConfirmStyle(id); return; }
     setStyle(next);
+    clearCharacterSheets();
     setSheet(null);
     setDoc((d) => ({ ...d, art: {} }));
     setPlaceSheets({}); setPages([]); setOverflow([]);
@@ -684,6 +723,8 @@ export default function Storyboard({
    * because a page is only as current as the panels in it.
    */
   const recastSheet = () => {
+    ignoreSavedReferences.current = true;
+    clearCharacterSheets();
     setSheet(null); setPages([]); setOverflow([]);
     notify("The cast sheet will be drawn again on the next run. Panels already "
       + "drawn were drawn against the old one -- redraw the ones that no "
@@ -712,103 +753,31 @@ export default function Storyboard({
   }, [panels]);
 
   /** Step one: divide the prose. Nothing is drawn yet. */
-  /**
-   * Read the story: who is in it, where it happens.
-   *
-   * This runs on its own, because it costs a little of the text model and no
-   * picture time at all. Everything that costs picture time is asked for
-   * explicitly; this is not. It is also what makes pasting a story *do*
-   * something, instead of sitting there until you type a character in.
-   */
-  const read = async () => {
-    if (!story.trim()) { notify("Paste a story first.", true); return; }
-    const id = newJobId();
-    setReading(true); setJobId(id);
-    const un = await onEngineProgress((p) => { if (p.job_id === id) setProg(p); });
-    try {
-      const c = await api.storyCast(id, story);
-      setCast(c);
-      if (c.people.length === 0) {
-        notify("No one named in that story could be verified against the text.");
-      }
-    } catch (e) {
-      notify(errText(e), true);
-    } finally {
-      un(); setReading(false); setProg(null); setJobId(null);
-    }
-  };
-
+  /** Validate the chapter's story model, save it, then replace the panel plan. */
   const divide = async () => {
     if (!story.trim()) { notify("Write the story first.", true); return; }
     const id = newJobId();
-    setStage("dividing"); setJobId(id); setSheet(null);
-    setDoc({ panels: [], art: {} }); setDivided(false);
-    // Everything keyed by panel index has to go with the panels. A note is a
-    // correction to one moment in the story; carried across a fresh division
-    // it silently attaches to a different moment, and the panel it was written
-    // for is drawn without it. Same for the redraw counters, which move the
-    // seed on, and for the selection, which can now point past the end.
-    setSelected(0); setPages([]); setOverflow([]);
-    // Rooms are keyed by scene number, and scene 1 of a new story is not scene
-    // 1 of the last one. Kept, they would be reused: buildPlaces skips any
-    // scene that already has a sheet, so the new comic would quietly inherit
-    // the previous comic's rooms.
-    setPlaceSheets({});
+    if (!storyLibrary) { notify("The story library has not loaded yet.", true); return; }
+    setStage("dividing"); setJobId(id);
     const un = await onEngineProgress((p) => { if (p.job_id === id) setProg(p); });
     try {
-      const r = await api.shotList(id, story, null);
-      // A fresh division, so fresh identities and no art: these are not the
-      // panels that were drawn before, whatever their positions were.
-      setDoc(fromArrays(r.panels));
-      setDivided(true);
-      setCoverage(r.coverage ?? null);
-      // The writer is told to vary the shot sizes and nothing checked whether
-      // it had. Said now, before any of it is drawn, because the fix is to
-      // divide again -- which is free -- and finding out afterwards means
-      // forty minutes of drawing a page that reads flat.
-      const mix = r.shot_mix;
-      if (mix?.uniform && mix.total > 0) {
-        const n = mix.counts[mix.uniform] ?? 0;
-        notify(
-          `${n} of ${mix.total} panels are ${mix.uniform} shots. A page of one `
-          + `size reads flat — worth dividing again, or changing a few by hand.`,
-        );
-      }
-      // A fresh division is a different comic, so it gets its own identity
-      // rather than adding panels to whatever was in the library before.
+      const previous = appendChapter
+        ? storyLibrary.books.find((b) => b.id === (continuationBookId || storyLibrary.activeBookId)) ?? null
+        : null;
+      const r = await api.analyzeStory(id, story, chapterTitle, previous, analystId || null);
+      // Save the shared model before replacing the current Board's work.
+      await onStoryAnalyzed(r.book);
+      setStoryBook(r.book); storyBookRef.current = r.book; setChapterId(r.chapter_id);
+      ignoreSavedReferences.current = false;
+      setCast(castFromBook(r.book));
+      setDoc(fromArrays(r.panels)); setDivided(true);
+      setSheet(null); clearCharacterSheets();
+      setSelected(0); setPages([]); setOverflow([]); setPlaceSheets({});
       setProjectId(newJobId());
-      if (r.too_long) {
-        // Sixty panels is as much as one board holds, so a chapter this long
-        // becomes a part of itself. Say that, rather than quoting a range.
-        notify(
-          `${r.words} words is more than one board holds, so this is the ` +
-          `first ${r.panels.length} panels of it. Split the story and ` +
-          `divide each part for the rest.`
-        );
-      } else if (r.truncated_from) {
-        // The writer divided the story further than this board can hold, and
-        // the extra beats used to be sliced off with nothing said -- so the
-        // end of the story was simply not in the board, and the range check
-        // compared the shortened length against the range it had been
-        // shortened into and stayed quiet. The coverage panel below lists
-        // exactly which passages went.
-        notify(
-          `The writer divided this into ${r.truncated_from} beats and the board `
-          + `holds ${r.panels.length}, so the last `
-          + `${r.truncated_from - r.panels.length} are not here. Check the `
-          + "unanchored passages below, and split the story if its ending matters.",
-          true,
-        );
-      } else if (r.out_of_range) {
-        // Say it rather than hide it: a division far outside what this much
-        // prose should produce usually means the story was cut short or the
-        // writer lost the thread, and the panels are worth a look before any
-        // of them are drawn.
-        notify(
-          `Divided into ${r.panels.length} panels; ${r.words} words usually ` +
-          `makes ${r.expected_low}\u2013${r.expected_high}. Worth checking.`
-        );
-      }
+      const beats = r.book.chapters.at(-1)!.scenes.flatMap((s) => s.beats);
+      setCoverage({ covered: beats.length, total: beats.length, percent: 100, missing: [] });
+      setAppendChapter(false);
+      notify(`Analyzed ${beats.length} beats and directed ${r.panels.length} panels. The chapter is also available in Audiobook.`);
     } catch (e) {
       notify(errText(e), true);
     } finally {
@@ -874,14 +843,14 @@ export default function Storyboard({
     if (pages.length) bits.push(plural(pages.length, "composed page"));
     return bits;
   }, [drawnCount, notes, pages]);
-  const preparedCount = panels?.filter((p) => (p.description ?? "").trim()).length ?? 0;
+  const preparedCount = panels?.filter((p) => p.cast !== undefined || (p.description ?? "").trim()).length ?? 0;
   // Every panel still waiting for a picture has to be worked up first. Gating
   // on "at least one" let a single prepared panel unlock drawing all of them,
   // and the rest were drawn from the terse fields -- which is the difference
   // between a scene and a caption, and costs a minute of drawing each to find
   // out.
   const unpreparedRemaining = panels?.filter(
-    (p, i) => !drawn[i] && !(p.description ?? "").trim()).length ?? 0;
+    (p, i) => !drawn[i] && p.cast === undefined && !(p.description ?? "").trim()).length ?? 0;
   const workflow = !cast ? "read" : !panels ? "plan" : unpreparedRemaining > 0
     ? "prepare" : remaining > 0 ? "draw" : "compose";
 
@@ -929,7 +898,7 @@ export default function Storyboard({
     // reason the character survives from one shot to the next -- so if the
     // user brought their own, there is nothing to cast.
     const existingSheet = ownSheet[0] ?? sheet;
-    if (existingSheet || !castForSheet.trim()) {
+    if (existingSheet || !castForSheet.trim() || panels.some((p) => p.cast !== undefined)) {
       setSheet(existingSheet ?? null);
       const places = await buildPlaces();
       setStage("drawing");
@@ -997,6 +966,8 @@ export default function Storyboard({
     if (!model || !panels) return {};
     const wanted = new Map<string, string>();
     for (const p of panels) {
+      // Structured panels use story state and compatible finished frames, not a fixed room sheet.
+      if (p.cast !== undefined) continue;
       const key = placeKey(p);
       const place = (p.place ?? "").trim();
       if (place && !wanted.has(key) && !placeSheets[key]) wanted.set(key, place);
@@ -1097,14 +1068,72 @@ export default function Storyboard({
     // board had no continuity at all: every panel was drawn from the sheet and
     // the room, so the light, the weather and the state of the character's
     // clothes reset between one panel and the next inside a single scene.
-    const refs = panelReferences(
-      panels[i], sheetId, places[placeKey(panels[i])] ?? null,
-      previousPanel(i, panels, drawnRef.current),
-      model.max_edit_images || 1);
     try {
+      let identity = sheetId;
+      if (panels[i].cast !== undefined) {
+        const actors = panels[i].cast!;
+        const ids: string[] = [];
+        for (const actor of actors) {
+          if (stop.current) return false;
+          const person = cast?.people.find((p) => p.id === actor.character_id);
+          let ref: string | undefined = characterSheetsRef.current[actor.character_id];
+          const currentBook = storyBookRef.current;
+          const saved = storyLibrary?.books.find((b) => b.id === currentBook?.id)?.references?.[actor.character_id]
+            ?? currentBook?.references?.[actor.character_id];
+          if (saved?.kind !== "identity-face-v1") ref = undefined;
+          const visual = (person === lead && character.trim()) || person?.description || actor.visual;
+          if (!ref && !ignoreSavedReferences.current && saved?.kind === "identity-face-v1" && saved.style_words === style.words && saved.visual === visual) {
+            ref = saved.image;
+          }
+          if (person === lead && ownSheet[0]) ref = ownSheet[0];
+          if (!ref) {
+            const generated = await api.generate({
+              job_id: id, model_id: model.id,
+              prompt: identityPrompt(style, `${actor.name}: ${visual}`),
+              negative_prompt: null, width: panelPx, height: panelPx,
+              steps: model.steps_default || 4, guidance: Math.min(1.0, model.guidance_max),
+              seed: panelSeed(actors.indexOf(actor), 0), count: 1,
+              images: [], image_strength: null, i2i_mode: null,
+              low_ram: true, preview: false, cache_limit_gb: null,
+              allow_over_budget: false, loras: [], mask: null,
+              outpaint_padding: null, outpaint_fill: null,
+              project: projectId, project_name: projectName,
+            });
+            if (!generated[0]) throw new Error(`No character sheet returned for ${actor.name}`);
+            ref = generated[0]; onProduced();
+          }
+          if (currentBook && (currentBook.references?.[actor.character_id]?.image !== ref
+              || currentBook.references?.[actor.character_id]?.visual !== visual
+              || currentBook.references?.[actor.character_id]?.style_words !== style.words)) {
+            const updated = { ...currentBook, references: { ...currentBook.references,
+              [actor.character_id]: { image: ref, style_words: style.words, visual, kind: "identity-face-v1" as const } } };
+            await onCharacterReference(currentBook.id, actor.character_id, updated.references[actor.character_id]);
+            storyBookRef.current = updated; setStoryBook(updated);
+          }
+          characterSheetsRef.current = { ...characterSheetsRef.current, [actor.character_id]: ref };
+          setCharacterSheets(characterSheetsRef.current);
+          ids.push(ref);
+        }
+        identity = ids[0] ?? null;
+        if (ids.length > 1) {
+          const key = ids.join(":");
+          identity = referenceCache.current[key] ?? await api.characterReference(id, ids);
+          referenceCache.current[key] = identity;
+        }
+      }
+      if (stop.current) return false;
+      const continuation = panels[i].cast !== undefined
+        ? storyContinuityReference(i, panels, drawnRef.current) : null;
+      const refs = panelReferences(
+        panels[i], continuation ?? identity, places[placeKey(panels[i])] ?? null,
+        panels[i].cast !== undefined ? null : previousPanel(i, panels, drawnRef.current),
+        model.max_edit_images || 1);
       const params = {
         job_id: id, model_id: model.id,
-        prompt: panelPrompt(panels[i], style, panelWho(panels[i]), notes[i]),
+        prompt: panelPrompt({ ...panels[i], cast: panels[i].cast?.map((actor) => ({
+          ...actor, visual: (cast?.people.find((p) => p.id === actor.character_id) === lead && character.trim())
+            || cast?.people.find((p) => p.id === actor.character_id)?.description || actor.visual,
+        })) }, style, panelWho(panels[i]), notes[i]),
         negative_prompt: null,
         width: panelPx, height: panelPx,
         steps: model.steps_default || 4,
@@ -1209,6 +1238,18 @@ export default function Storyboard({
   const edit = (i: number, patch: Partial<Panel>) => {
     const panel = doc.panels[i];
     if (!panel) return;
+    if (patch.characters && panel.cast !== undefined) {
+      const actors = patch.characters.map((name) => {
+        const person = cast?.people.find((c) => c.name.toLowerCase() === name.toLowerCase()
+          || c.aliases?.some((a) => a.toLowerCase() === name.toLowerCase()));
+        const old = panel.cast?.find((a) => a.character_id === person?.id);
+        return person?.id ? { character_id: person.id, name: person.name, visual: person.description,
+          expression: old?.expression ?? "", body_language: old?.body_language ?? "",
+          appearance: old?.appearance ?? "" } : null;
+      });
+      // An unknown hand-entered name still uses the legacy free-form route.
+      patch = { ...patch, cast: actors.every((a) => a !== null) ? actors.filter((a) => a !== null) : undefined };
+    }
     const { doc: next, stale } = editPanel(doc, panel.id, patch);
     setDoc(next);
     if (stale.art) {
@@ -1443,8 +1484,8 @@ export default function Storyboard({
         <h2>Picture board</h2>
         <div className="notice warn">
           <strong>Needs a model that can both generate and edit</strong>
-          A board is drawn by making one character sheet and then referencing it
-          in every panel, so the model has to do both. FLUX.2 Klein is the
+          A board generates individual character references and uses them to draw
+          the panels, so the image model has to do both. FLUX.2 Klein is the
           smallest that does — add it from the Models tab.
         </div>
       </div>
@@ -1529,6 +1570,50 @@ export default function Storyboard({
           <div className="inner">
             {!panels ? (
               <>
+                {!!storyLibrary?.books.length && <label>Use an analyzed chapter<select
+                  value="" disabled={busy} onChange={(e) => {
+                    const [bid, cid] = e.target.value.split(":");
+                    const book = storyLibrary.books.find((b) => b.id === bid);
+                    const chapter = book?.chapters.find((c) => c.id === cid);
+                    if (!book || !chapter) return;
+                    void (async () => {
+                      setStage("dividing");
+                      try {
+                        const result = await api.directStory(newJobId(), book, cid);
+                        setStory(chapter.source); setChapterTitle(chapter.title);
+                        setStoryBook(book); storyBookRef.current = book; setChapterId(cid);
+                        ignoreSavedReferences.current = false; setCast(castFromBook(book));
+                        setDoc(fromArrays(result.panels)); setDivided(true); setProjectId(newJobId());
+                        setSheet(null); clearCharacterSheets(); setPages([]); setOverflow([]); setPlaceSheets({});
+                        setSelected(0); setCoverage(null);
+                      } catch (error) { notify(errText(error), true); }
+                      finally { setStage("idle"); }
+                    })();
+                  }}>
+                  <option value="">Choose a saved chapter…</option>
+                  {storyLibrary.books.flatMap((book) => book.chapters.map((chapter) =>
+                    <option key={chapter.id} value={`${book.id}:${chapter.id}`}>{book.chapters[0]?.title} · {chapter.title}</option>))}
+                </select></label>}
+                <label>Chapter title<input value={chapterTitle} disabled={busy}
+                  onChange={(e) => setChapterTitle(e.target.value)} /></label>
+                <label>Story analyst<select value={analystId} disabled={busy}
+                  onChange={(e) => setAnalystId(e.target.value)}>
+                  <option value="">Best installed model for this Mac</option>
+                  {models.filter((m) => ANALYST_IDS.includes(m.id) && m.installed && !m.hopeless)
+                    .map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                </select></label>
+                {!!storyLibrary?.books.length && <label>
+                  <input type="checkbox" checked={appendChapter} disabled={busy}
+                    onChange={(e) => setAppendChapter(e.target.checked)} />
+                  Add to the current book and reuse its character bible
+                </label>}
+                {appendChapter && storyLibrary && <label>Continue book<select
+                  value={continuationBookId || storyLibrary.activeBookId || storyLibrary.books.at(-1)?.id}
+                  disabled={busy} onChange={(e) => setContinuationBookId(e.target.value)}>
+                  {storyLibrary.books.map((book) => <option key={book.id} value={book.id}>
+                    {book.chapters[0]?.title} · {book.chapters.length} chapters
+                  </option>)}
+                </select></label>}
                 <textarea
                   value={story}
                   rows={14}
@@ -1541,7 +1626,7 @@ export default function Storyboard({
                 <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 6,
                               lineHeight: 1.55 }}>
                   Prose, not prompts. It is divided into panels for you, and
-                  nothing is invented that the story does not contain.
+                  review its interpretation before drawing.
                 </div>
               </>
             ) : (
@@ -1651,6 +1736,21 @@ export default function Storyboard({
               </div>
             )}
 
+            {Object.entries(characterSheets).length > 0 && <div className="story-character-sheets">
+              <div className="sub-head">Individual character references</div>
+              {Object.entries(characterSheets).map(([cid, image]) => <figure key={cid}>
+                <img src={vaultUrl(image)} alt={cast?.people.find((p) => p.id === cid)?.name ?? "Character"} />
+                <figcaption>{cast?.people.find((p) => p.id === cid)?.name}</figcaption>
+              </figure>)}
+            </div>}
+            {storyBook && chapterId && <details className="notice">
+              <summary>Story direction · {storyBook.chapters.find((c) => c.id === chapterId)?.title}</summary>
+              {storyBook.chapters.find((c) => c.id === chapterId)?.scenes.map((scene) => <div key={scene.id}>
+                <strong>{scene.title}</strong><p>{scene.summary}</p>
+                {scene.beats.filter((b) => b.importance >= 4).map((b) =>
+                  <p key={b.id}>{b.importance === 5 ? "Climax" : "Turn"}: {b.action} · {b.mood}</p>)}
+              </div>)}
+            </details>}
             {sheet && (
               <div style={{ marginTop: 18 }}>
                 <div className="sub-head">Character sheet</div>
@@ -1745,21 +1845,19 @@ export default function Storyboard({
                     value={character}
                     rows={3}
                     disabled={busy}
-                    onChange={(e) => setCharacter(e.target.value)}
+                    onChange={(e) => { setCharacter(e.target.value); clearCharacterSheets(); setPages([]); setOverflow([]); }}
                     placeholder="short black hair, red scarf, narrow face"
                   />
                 </div>
                 <div className="field">
                   <label>Or bring a picture of them</label>
-                  <ImageDrop images={ownSheet} onChange={setOwnSheet} max={1}
+                  <ImageDrop images={ownSheet} onChange={(images) => { setOwnSheet(images); clearCharacterSheets(); setPages([]); setOverflow([]); }} max={1}
                              onError={(m) => notify(m, true)} />
                   <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5,
                                 lineHeight: 1.5 }}>
                     {ownSheet.length > 0
-                      ? "Every panel is drawn against this picture, and no character "
-                        + "sheet is made \u2014 it anchors them better than a description can."
-                      : "A photo, a drawing, or a sheet from an earlier board. Given one, "
-                        + "the board skips casting and draws against it directly."}
+                      ? "This picture anchors the lead character. Other visible characters keep their individual references."
+                      : "A photo, drawing, or reference from an earlier chapter for the lead character."}
                   </div>
                 </div>
                 <div className="field">
@@ -1915,6 +2013,25 @@ export default function Storyboard({
                   <input type="text" value={sel.setting} disabled={busy}
                          onChange={(e) => edit(selIndex, { setting: e.target.value })} />
                 </div>
+                {sel.cast !== undefined && <>
+                  <div className="field"><label>Mood</label><input value={sel.mood ?? ""} disabled={busy}
+                    onChange={(e) => edit(selIndex, { mood: e.target.value })} /></div>
+                  <div className="field"><label>Current location state</label><input value={sel.location_state ?? ""} disabled={busy}
+                    onChange={(e) => edit(selIndex, { location_state: e.target.value })} /></div>
+                  {sel.cast.map((actor, index) => <div className="field" key={actor.character_id}>
+                    <label>{actor.name} · expression and body language</label>
+                    <input aria-label={`${actor.name} expression`} value={actor.expression} disabled={busy}
+                      onChange={(e) => edit(selIndex, { cast: sel.cast!.map((a, at) => at === index
+                        ? { ...a, expression: e.target.value } : a) })} />
+                    <input aria-label={`${actor.name} current outfit and condition`} placeholder="Current outfit and condition (replaces earlier appearance)"
+                      value={actor.appearance ?? ""} disabled={busy}
+                      onChange={(e) => edit(selIndex, { cast: sel.cast!.map((a, at) => at === index
+                        ? { ...a, appearance: e.target.value } : a) })} />
+                    <input aria-label={`${actor.name} body language`} value={actor.body_language} disabled={busy}
+                      onChange={(e) => edit(selIndex, { cast: sel.cast!.map((a, at) => at === index
+                        ? { ...a, body_language: e.target.value } : a) })} />
+                  </div>)}
+                </>}
                 <div className="field">
                   <label>Caption <em>what the picture cannot say</em></label>
                   <input type="text" value={sel.caption} disabled={busy}
@@ -2194,24 +2311,16 @@ export default function Storyboard({
       <div className="board-run">
         {!panels ? (
           <>
-            {story.trim() && writerReady && (
-              <button className={"btn small" + (!cast ? " primary" : "")}
-                      disabled={busy} onClick={read}>
-                {reading ? "Reading the story…" : cast ? "Read again" : "Read story and cast"}
-              </button>
-            )}
-            {cast && (
-              <button className="btn primary small"
-                      disabled={busy || !story.trim() || !writerReady}
-                      onClick={divide}>
-                {stage === "dividing" ? "Planning panels…" : "Plan the panels"}
-              </button>
-            )}
+            <button className="btn primary small"
+              disabled={busy || !story.trim() || !writerReady || !storyLibrary}
+              onClick={() => void divide()}>
+              {stage === "dividing" ? "Understanding and directing…" : "Analyze story and plan panels"}
+            </button>
             {!writerReady && (
               // Reading and dividing are both the writer's work. Saying so here
               // beats a failure after the press.
               <span style={{ fontSize: 10.5, color: "var(--warn)" }}>
-                Needs the prompt writer — add it from the Models tab.
+                Install a story analyst or prompt writer from Models.
               </span>
             )}
           </>
@@ -2312,7 +2421,7 @@ export default function Storyboard({
               }
               setConfirmReset(null);
               setStory(""); setCast(null); setProjectId(null);
-              setCharacter(""); setSheet(null);
+              setCharacter(""); setSheet(null); clearCharacterSheets(); setStoryBook(null); setChapterId(null);
               setDoc({ panels: [], art: {} }); setDivided(false);
               setPages([]); setOverflow([]); setOwnSheet([]); setPlaceSheets({});
               setCoverage(null);

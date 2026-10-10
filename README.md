@@ -43,16 +43,15 @@ drives [MLX-Gen](https://github.com/lpalbou/mlx-gen) and
 - **Generate** — text to image, with live previews as the picture forms.
 - **Edit** — instruction editing, inpainting with a painted mask, outpainting,
   latent image-to-image, and reference-guided edits.
-- **Board** — paste prose and get an illustrated comic. It reads the story
-  first: who is in it, where it happens, and how many panels the story needs —
-  there is no panel count to choose, because a number picked before the story
-  is read is a guess. Every name it returns is checked against your text, so a
-  character it invented is dropped rather than drawn. One character sheet and
-  one room per scene are cast once, and every panel references both, so the
-  same person appears in the same place throughout. Panels are drawn a few at a
-  time, and a frame that comes out wrong is repaired by writing what is wrong
-  with it rather than rolling a new seed. The result is one comic in the
-  library, not a pile of loose pictures.
+- **Board** — paste prose and get an illustrated comic. Scene analysis first
+  identifies causal beats, dramatic importance, emotion, canonical characters,
+  and exact dialogue. A director gives turns and reveals more space while
+  retaining the author's words. Each visible character gets an individual
+  reference; multi-person panels combine only the relevant sheets. The story
+  model and character bible persist across chapters and are shared with
+  Audiobook. Panels are drawn a few at a time, with editable expressions,
+  body language and written corrections. Finished pages are grouped as one
+  comic in the library.
 
   <table>
   <tr>
@@ -64,6 +63,13 @@ drives [MLX-Gen](https://github.com/lpalbou/mlx-gen) and
   <td><sub>A panel referencing both the sheet and that scene&rsquo;s room, which is what keeps the same person in the same place.</sub></td>
   </tr>
   </table>
+- **Audiobook** — choose a chapter analyzed in Board, or analyze prose here.
+  Narration uses the original text, with local Qwen3-TTS neural voices for
+  the narrator and optional separate voices for each canonical character.
+  Chapters are saved as encrypted WAV files, played inside the app and
+  exported through Vault. Neural narration supports delivery directions;
+  system voices remain a fallback. Voice cloning is not implemented.
+
 - **Upscale** — SeedVR2 restoration. About 27 seconds to 512 px and 64 to 768;
   anything too large for one pass is done in overlapping pieces, which is the
   difference between a finished picture and a dead engine.
@@ -519,7 +525,7 @@ and the memory controls.
 
 ```sh
 cargo test --lib                                   # crypto, URL parsing, engine liveness
-python engine/test_worker.py                       # 48 engine tests
+python -m unittest discover -s engine -v           # engine and shared-story/audio tests
 cargo run --example vault_vectors > vectors.json   # cross-language format vectors
 cargo run --example vault_lifecycle                # create, dedup, repair, export
 cargo run --example storage_move                   # relocation preserves symlinks
@@ -539,3 +545,77 @@ double the space used.
 `setup_probe` runs the real `setup::bootstrap` against a throwaway directory, so
 the first-run path can be verified without destroying a working installation.
 Add `--full` to include the multi-gigabyte engine install.
+
+## Shared story analysis
+
+Board and Audiobook now share an encrypted, versioned story library. Add a
+chapter to an existing book to retain canonical character IDs, aliases,
+appearance and voice descriptions. Board stores individual character sheets
+with the book and reuses them across chapters when appearance and style match.
+A panel with several people gets a deterministic side-by-side composite of
+only its visible characters; an offscreen speaker is never added by speech
+alone. Previously saved boards remain readable.
+
+Analysis splits the source at paragraph/scene and sentence boundaries into
+small calls (at most eight source units and normally 450 words). Replies must
+cover every numbered unit exactly once and quote dialogue verbatim. Invalid
+JSON is retried once, then reported; partial output is never accepted. Chapters
+retain the exact source and a SHA-256 hash. Director panels retain beat IDs,
+importance, tension, mood and per-character expressions. Turns get two frames
+and climaxes three; long lettering adds frames without cutting the ending.
+The old 60-panel cap does not apply to this workflow. Lighting enrichment is
+optional and cannot replace the action or structured cast.
+
+The installed 4B writer remains supported; 8B and 14B story analysts are
+available in Models, with estimated memory figures. Automatic selection uses
+14B only on Macs with at least 24 GB; every model is unloaded before switching
+to another. Model-generated interpretation still needs review before drawing:
+strict structure and exact source spans do not prove an emotion or attribution
+is correct.
+
+Audiobook defaults to the downloadable **Audiobook voices (Qwen3-TTS 1.7B)**
+model in Models (`mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit`). The
+already-pinned MLX Audio 0.5.3 runtime runs it locally. Select
+voices matching the chapter language and reading speed. Unknown dialogue
+speakers fall back to the narrator. Generation preserves source order and
+retains only the sealed output. Neural generation produces audio in memory;
+system speech uses private temporary files deleted on success, failure and
+cancellation. Stop interrupts neural streaming or terminates the system speech
+command. Voice assignments and recording IDs live in the encrypted
+story library. Media requests support byte ranges for seeking without caching
+decrypted content.
+
+Portable regression checks: `npm run build` and
+`python -m unittest discover -s engine -p test_story.py -v`.
+Full Tauri build, actual model analysis/image generation, system voice output
+and WebKit audio playback must be verified on Apple Silicon macOS. On Linux,
+the existing worker suite also has failures from missing macOS fonts and the
+system dictionary; these are separate from the shared-story tests.
+
+
+Board continuity separates lasting character identity from a panel's current outfit,
+injuries, wetness and other temporary conditions. Story analysis carries those facts
+forward and replaces them when the source changes them. Identity references show
+faces rather than locking every panel to one full-body costume. Structured boards
+skip fixed place sheets and reuse a finished frame only when visible cast, outfits
+and location conditions match. The panel editor exposes current outfit/condition
+and location state for correcting analysis. Previously analyzed chapters need fresh
+analysis to populate these fields; older boards remain readable. These controls
+reduce conflicting conditioning but do not guarantee image-model consistency.
+
+
+Neural narration offers nine preset speaker identities, a language selector,
+overall delivery instructions and per-character direction. Dialogue additionally
+uses the analyzed scene mood. Reading pace is approximate, expressed as delivery
+instructions rather than an exact words-per-minute promise. Text is processed in
+bounded chunks; streaming permits cancellation between audio chunks. Inference
+loads only the downloaded local model snapshot and releases it after the job.
+Outputs remain encrypted mono 24 kHz PCM WAVs. System voices can be selected as
+an explicit fallback. Neural voice cloning is not part of this route.
+
+The neural API integration follows the pinned MLX Audio
+[Qwen3-TTS documentation](https://github.com/Blaizzy/mlx-audio/blob/v0.5.3/mlx_audio/tts/models/qwen3_tts/README.md).
+Model sizes and peak memory in the catalog are estimates. Automated checks cover
+routing, voice/direction assignment, chunk preservation, cancellation and audio
+validation; real model download, Mac inference and listening quality remain to be
+validated. No claim of human-equivalent voice quality is made.

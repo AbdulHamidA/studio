@@ -1,3 +1,4 @@
+import type { StoryBook, StoryAnalysisResult } from "./story";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { AssistResult, CastPlace, EngineProgress, GenerateArgs, HostInfo, Lora, ModelStatus, Orphans, Panel, RepairReport, ResolvedLora, ResolvedModel, SetupProgress, SetupState, StorageInfo, VaultItem, VaultStatus } from "./types";
@@ -75,6 +76,22 @@ export const api = {
     quantize: number | null, family: string | null, backend: string | null
   ) => invoke<void>("add_custom_model",
                     { spec: { repo, name, tasks, bytes, quantize, family, backend } }),
+  storyLibraryGet: () => invoke<string | null>("story_library_get"),
+  storyLibrarySet: (value: string) => invoke<void>("story_library_set", { value }),
+  analyzeStory: (jobId: string, source: string, title: string,
+                 previous: StoryBook | null = null, modelId: string | null = null) =>
+    invoke<StoryAnalysisResult>("analyze_story", { jobId,
+      args: { source, title, previous, model_id: modelId } }),
+  directStory: (jobId: string, book: StoryBook, chapterId: string) =>
+    invoke<{ panels: Panel[] }>("direct_story", { jobId, book, chapterId }),
+  audioVoices: (modelId = "macos") => invoke<{ voices: { id: string; language: string }[] }>("audio_voices", { modelId }),
+  generateAudiobook: (jobId: string, book: StoryBook, chapterId: string,
+                     narrator: string, voices: Record<string, string>, rate: number,
+                     options: { model_id: string; language?: string; delivery?: string; directions?: Record<string, string> } = { model_id: "macos" }) =>
+    invoke<string>("generate_audiobook", { jobId,
+      args: { book, chapter_id: chapterId, narrator, voices, rate, ...options } }),
+  characterReference: (jobId: string, images: string[]) =>
+    invoke<string>("character_reference", { jobId, images }),
   /** Who is in the story and where it happens. Free of picture time. */
   storyCast: (jobId: string, story: string) =>
     invoke<{

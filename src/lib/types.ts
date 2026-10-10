@@ -1,4 +1,4 @@
-export type Task = "text_to_image" | "edit" | "upscale" | "video" | "assist";
+export type Task = "text_to_image" | "edit" | "upscale" | "video" | "assist" | "speech";
 export type Fit = "good" | "tight" | "too_much_memory" | "too_much_disk" | "broken";
 
 export interface HostInfo {
@@ -328,6 +328,12 @@ export interface ResolvedLora {
 
 /** One frame of a picture board, as the writer divided the story. */
 export interface Panel {
+  beat_id?: string;
+  chapter_id?: string;
+  importance?: number;
+  tension?: number;
+  mood?: string;
+  cast?: { character_id: string; name: string; visual: string; expression: string; body_language: string; appearance?: string }[];
   shot: "wide" | "medium" | "close-up";
   subject: string;
   action: string;
@@ -351,7 +357,7 @@ export interface Panel {
   scene?: number;
   scene_title?: string;
   /** What is spoken aloud in this panel. Usually empty. */
-  dialogue?: { speaker: string; text: string }[];
+  dialogue?: { speaker: string; text: string; speaker_id?: string | null; offscreen?: boolean }[];
   /** The scene's location, settled once and shared by every panel in it.
    *  Without this each panel invented its own version of the same room. */
   place?: string;
@@ -359,6 +365,7 @@ export interface Panel {
    *  room, so returning to the kitchen looks like returning to it -- and a
    *  story the writer left in one scene still changes rooms when it moves. */
   place_key?: string;
+  location_state?: string;
   /** The worked-up description: surface, background, light. Empty until the
    *  panel has been through the enrich stage, and the prompt falls back to
    *  the terse fields when it is. Distinct from `scene`, which is a number. */
@@ -375,6 +382,8 @@ export interface Orphans {
 
 /** Who is in a story and where it happens, read out of the prose itself. */
 export interface CastMember {
+  id?: string;
+  aliases?: string[];
   name: string;
   description: string;
   /** How often the story refers to them. Drives the tier. */

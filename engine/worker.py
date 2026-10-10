@@ -1140,6 +1140,10 @@ def _load_writer(req_id: str, repo: str | None = None) -> tuple[Any, Any]:
     if _WRITER["key"] == repo and _WRITER["model"] is not None:
         return _WRITER["model"], _WRITER["tokenizer"]
 
+    if _WRITER["model"] is not None:
+        # Drop the previous analyst before loading a different one.
+        _unload_writer()
+
     # See `_load_assistant`: the ceiling, then the generator, then the other
     # helper. This is the larger of the two models and the one that was
     # allocating unbounded.
@@ -1187,6 +1191,8 @@ def _write(req_id: str, system: str, user: str, max_tokens: int = 160,
         [{"role": "system", "content": system},
          {"role": "user", "content": user}],
         add_generation_prompt=True,
+        **({"enable_thinking": False} if (repo or WRITER_REPO) in {
+            "mlx-community/Qwen3-8B-4bit", "mlx-community/Qwen3-14B-4bit"} else {}),
     )
     pieces: list[str] = []
     last = 0.0
@@ -3952,6 +3958,33 @@ def op_enrich_panels(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
     panels: list[dict[str, Any]] = list(req.get("panels") or [])
     if not panels:
         raise ValueError("divide the story into panels first")
+
+    if all("cast" in p for p in panels):
+        out = []
+        for i, panel in enumerate(panels):
+            if is_cancelled(req_id):
+                raise Cancelled()
+            emit({"id": req_id, "type": "progress", "phase": "denoise",
+                  "progress": i / len(panels), "message": f"Lighting panel {i + 1} of {len(panels)}"})
+            try:
+                raw = _write(req_id,
+                    'Return only JSON {"lighting": string, "surfaces": string}. '
+                    'Describe visible light and surfaces matching the mood and setting. '
+                    'Do not repeat or change characters, actions, dialogue, or camera framing.',
+                    json.dumps({"setting": panel.get("setting"), "mood": panel.get("mood"),
+                                "tension": panel.get("tension"), "shot": panel.get("shot"),
+                                "style": req.get("style")}),
+                    max_tokens=240, repo=req.get("writer"), label="Lighting the panel")
+                surface = json.loads(raw)
+                if not isinstance(surface, dict) or any(not isinstance(surface.get(k), str) for k in ("lighting", "surfaces")):
+                    raise ValueError("invalid lighting description")
+                out.append({**panel, "description": ". ".join(surface[k] for k in ("lighting", "surfaces") if surface[k])})
+            except Cancelled:
+                raise
+            except Exception as exc:
+                log(req_id, f"panel {i + 1} keeps its original structured brief: {exc}", "warn")
+                out.append(panel)
+        return {"panels": out}
 
     style = (req.get("style") or "").strip()
     writer = req.get("writer")
@@ -6868,8 +6901,96 @@ def op_set_memory(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
     return set_cache_limit(req.get("cache_limit_gb"))
 
 
+
+def op_story_analyze(req_id, req):
+    import story as story_model
+    def progress(i, total):
+        if is_cancelled(req_id):
+            raise Cancelled()
+        emit({"id": req_id, "type": "progress", "phase": "denoise",
+              "progress": i / total, "message": f"Understanding scene {i + 1} of {total}"})
+    book = story_model.analyze(req.get("source"),
+        lambda system, user: _write(req_id, system, user, max_tokens=3200,
+            temperature=0.2, repo=req.get("writer"), label="Understanding the story"),
+        previous=req.get("previous"), title=req.get("title", "Chapter"), progress=progress)
+    chapter = book["chapters"][-1]
+    panels = story_model.direct(book, chapter["id"])
+    return {"book": book, "chapter_id": chapter["id"], "panels": panels}
+
+
+def op_audio_voices(_req_id, _req):
+    import audiobook
+    return {"voices": audiobook.neural_voices() if _req.get("model_id") == audiobook.NEURAL_MODEL_ID else audiobook.voices()}
+
+
+def op_audiobook(req_id, req):
+    import audiobook
+    import story as story_model
+    import vaultcrypto as vc
+    slots = req.get("vault_slots") or []
+    if len(slots) != 1:
+        raise ValueError("audiobook needs one encrypted output slot")
+    segments = story_model.narration_segments(req["book"], req["chapter_id"])
+    CACHE.unload()
+    _unload_assistant()
+    def check():
+        if is_cancelled(req_id):
+            raise Cancelled()
+    def progress(i, total):
+        emit({"id": req_id, "type": "progress", "phase": "denoise",
+              "progress": i / total, "message": f"Narrating passage {i + 1} of {total}"})
+    model_id = req.get("model_id") or "macos"
+    if model_id == audiobook.NEURAL_MODEL_ID:
+        _apply_policy_once(req_id)
+        emit({"id": req_id, "type": "progress", "phase": "load", "progress": 0.0,
+              "message": "Loading neural audiobook voices"})
+        data, seconds = audiobook.synthesize_neural(segments, req["narrator"],
+            req.get("voices") or {}, req.get("rate", 160), check, progress,
+            language=req.get("language") or "auto", delivery=req.get("delivery") or "",
+            directions=req.get("directions") or {},
+            character_directions={c["id"]: c.get("voice", "") for c in req["book"]["characters"]})
+    elif model_id == "macos":
+        data, seconds = audiobook.synthesize(segments, req["narrator"],
+            req.get("voices") or {}, req.get("rate", 160), _stage_dir(), check, progress)
+    else:
+        raise ValueError("unsupported audiobook speech model")
+    check()
+    slot = slots[0]
+    size = vc.write_sealed(slot["path"], bytes.fromhex(slot["key"]),
+                           bytes.fromhex(slot["file_id"]), data)
+    return {"outputs": [slot["id"]], "sizes": [size], "seconds": seconds, "sealed": True}
+
+
+def op_character_reference(req_id, req):
+    from PIL import Image, ImageOps
+    import vaultcrypto as vc
+    inputs = req.get("vault_inputs") or []
+    slots = req.get("vault_slots") or []
+    if not 2 <= len(inputs) <= 8 or len(slots) != 1:
+        raise ValueError("compose between two and eight individual character sheets")
+    canvas = Image.new("RGB", (512 * len(inputs), 768), "white")
+    for i, item in enumerate(inputs):
+        if is_cancelled(req_id):
+            raise Cancelled()
+        data = vc.open_with_file_key(bytes.fromhex(item["key"]), Path(item["path"]).read_bytes())
+        with Image.open(io.BytesIO(data)) as original:
+            image = ImageOps.contain(original.convert("RGB"), (512, 768))
+            canvas.paste(image, (512 * i + (512 - image.width) // 2, (768 - image.height) // 2))
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    slot = slots[0]
+    size = vc.write_sealed(slot["path"], bytes.fromhex(slot["key"]),
+                           bytes.fromhex(slot["file_id"]), buf.getvalue())
+    return {"outputs": [slot["id"]], "sizes": [size], "sealed": True}
+
+
 OPS = {
     "ping": op_ping,
+    "story_analyze": op_story_analyze,
+    "direct_story": lambda _id, req: {"panels": __import__("story").direct(req["book"], req["chapter_id"])},
+    "audio_voices": op_audio_voices,
+    "audiobook": op_audiobook,
+    "character_reference": op_character_reference,
     "capabilities": op_capabilities,
     "lora_info": op_lora_info,
     "verify_adapter": op_verify_adapter,

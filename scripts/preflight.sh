@@ -3,7 +3,7 @@
 #
 # Every red build in this repository so far came from checking a proxy
 # instead of the thing itself: `cargo clippy --lib` instead of --all-targets,
-# an interpreter that happened to have numpy, a deploy workflow that reported
+# an interpreter with undeclared dependencies, a deploy workflow that reported
 # success while publishing nothing. This runs the real checks so that gap
 # cannot open again.
 set -uo pipefail
@@ -20,7 +20,7 @@ step "engine tests, with CI's exact dependency set"
 if "$VENV" - <<'PY'
 import sys, builtins, unittest
 
-# CI installs pillow, pillow-heif and cryptography and nothing else, so a test
+# CI installs pillow, pillow-heif, cryptography and numpy, so a test
 # that reaches for anything beyond them passes here and fails there. This
 # blocked numpy alone, which is how four tests importing huggingface_hub went
 # green locally and red on push -- the gate said "exactly as CI has it" while
@@ -30,7 +30,7 @@ import sys, builtins, unittest
 # the workflow's install line. A module missing from both is already absent and
 # needs no help.
 ABSENT = {
-    "numpy", "huggingface_hub", "mlx", "mlx_lm", "mlx_vlm", "mlxgen", "mflux",
+    "huggingface_hub", "mlx", "mlx_lm", "mlx_vlm", "mlxgen", "mflux",
     "torch", "transformers", "safetensors", "arabic_reshaper", "bidi",
     "tokenizers", "sentencepiece", "scipy", "cv2",
 }

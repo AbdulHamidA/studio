@@ -16,6 +16,7 @@ pub enum Task {
     Video,
     /// Reads and rewrites prompts; not an image generator.
     Assist,
+    Speech,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -66,6 +67,26 @@ pub struct ModelEntry {
 }
 
 pub const CATALOG: &[ModelEntry] = &[
+    ModelEntry {
+        id: "qwen3-tts-1.7b-custom-6bit",
+        repo: "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit",
+        name: "Audiobook voices (Qwen3-TTS 1.7B)",
+        family: None,
+        tasks: &[Task::Speech],
+        quantize: Some(6),
+        package_gib: 2.0,
+        peak_gib: 5.0,
+        peak_estimated: true,
+        steps_default: 0,
+        max_edit_images: 0,
+        gated: false,
+        video_from_image: false,
+        guidance_default: 1.0,
+        guidance_max: 1.0,
+        notes: "Local neural narration with nine character voices and delivery instructions. Multilingual. Package and memory are estimates; listening validation on Mac is pending. No voice cloning in this route.",
+        broken: None,
+        backend: None,
+    },
     // ---- Prompt assistant ------------------------------------------------
     ModelEntry {
         id: "qwen3-4b-instruct-4bit",
@@ -86,6 +107,46 @@ pub const CATALOG: &[ModelEntry] = &[
         notes: "Makes your prompt precise without inventing anything, and \
                 turns a story into a shot list. Answers in about two seconds. \
                 Runs entirely on this Mac — nothing is sent anywhere.",
+        broken: None,
+        backend: None,
+    },
+    ModelEntry {
+        id: "qwen3-8b-story-4bit",
+        repo: "mlx-community/Qwen3-8B-4bit",
+        name: "Story analyst (Qwen3 8B)",
+        family: None,
+        tasks: &[Task::Assist],
+        quantize: Some(4),
+        package_gib: 4.5,
+        peak_gib: 6.5,
+        peak_estimated: true,
+        steps_default: 0,
+        max_edit_images: 0,
+        gated: false,
+        video_from_image: false,
+        guidance_default: 1.0,
+        guidance_max: 1.0,
+        notes: "Scene-by-scene story analysis for Board and Audiobook. Memory is estimated; validate on your Mac. Runs one model at a time.",
+        broken: None,
+        backend: None,
+    },
+    ModelEntry {
+        id: "qwen3-14b-story-4bit",
+        repo: "mlx-community/Qwen3-14B-4bit",
+        name: "Story analyst (Qwen3 14B)",
+        family: None,
+        tasks: &[Task::Assist],
+        quantize: Some(4),
+        package_gib: 8.0,
+        peak_gib: 11.0,
+        peak_estimated: true,
+        steps_default: 0,
+        max_edit_images: 0,
+        gated: false,
+        video_from_image: false,
+        guidance_default: 1.0,
+        guidance_max: 1.0,
+        notes: "Scene-by-scene story analysis for Board and Audiobook. Memory is estimated; validate on your Mac. Recommended for 24 GB or more. Runs one model at a time.",
         broken: None,
         backend: None,
     },

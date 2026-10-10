@@ -4,6 +4,7 @@ mod diagnose;
 mod engine;
 mod error;
 mod hostinfo;
+mod media;
 mod models;
 pub mod paths;
 mod setup;
@@ -104,10 +105,36 @@ fn vault_protocol(
         Err(_) => return deny(404, "could not read item"),
     };
 
-    http::Response::builder()
-        .status(200)
+    let total = bytes.len();
+    let range = request.headers().get("Range").and_then(|h| h.to_str().ok());
+    let (status, bytes, content_range) = if let Some(range) = range {
+        match media::byte_range(range, total) {
+            Some((start, end)) => (
+                206,
+                bytes[start..=end].to_vec(),
+                Some(format!("bytes {start}-{end}/{total}")),
+            ),
+            None => {
+                return http::Response::builder()
+                    .status(416)
+                    .header("Content-Range", format!("bytes */{total}"))
+                    .header("Cache-Control", "no-store")
+                    .body(Vec::new())
+                    .expect("static response")
+            }
+        }
+    } else {
+        (200, bytes, None)
+    };
+    let mut response = http::Response::builder()
+        .status(status)
+        .header("Accept-Ranges", "bytes")
         .header("Content-Type", item.mime)
-        .header("Content-Length", bytes.len().to_string())
+        .header("Content-Length", bytes.len().to_string());
+    if let Some(range) = content_range {
+        response = response.header("Content-Range", range);
+    }
+    response
         // Decrypted bytes must not be cached anywhere they could outlive a lock.
         .header("Cache-Control", "no-store, no-cache, must-revalidate")
         // Readable back off a canvas.
@@ -195,6 +222,13 @@ pub fn run() {
             commands::remove_custom_model,
             commands::shot_list,
             commands::story_cast,
+            commands::story_library_get,
+            commands::story_library_set,
+            commands::analyze_story,
+            commands::direct_story,
+            commands::audio_voices,
+            commands::generate_audiobook,
+            commands::character_reference,
             commands::compose_board,
             commands::bind_comic,
             commands::enrich_panels,
