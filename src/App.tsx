@@ -228,8 +228,22 @@ export default function App() {
     } catch (e) { notify(errText(e), true); }
   }, [notify]);
 
+  // Whether the vault has been listed yet, and why it could not be. Without
+  // these the library said "The vault is empty" while the first listing was
+  // still on its way, and said it again when the listing failed.
+  const [itemsLoaded, setItemsLoaded] = useState(false);
+  const [itemsError, setItemsError] = useState<string | null>(null);
   const refreshItems = useCallback(async () => {
-    try { setItems(await api.vaultList()); } catch { /* locked or empty */ }
+    try {
+      setItems(await api.vaultList());
+      setItemsError(null);
+    } catch (e) {
+      // A locked vault fails here too, but then the lock screen is what is
+      // on show; this only ever reaches the library while it is unlocked.
+      setItemsError(errText(e));
+    } finally {
+      setItemsLoaded(true);
+    }
   }, []);
 
   useEffect(() => {
@@ -587,6 +601,8 @@ export default function App() {
               models={models}
               onReuse={reuse}
               onOpenBoard={(project) => { setOpenBoard(project); setTab("board"); }}
+              loading={!itemsLoaded}
+              loadError={itemsError}
             />
           )}
           {tab === "activity" && <Activity notify={notify} />}
