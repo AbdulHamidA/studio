@@ -69,6 +69,14 @@ export default function Gallery({
   const [viewer, setViewer] = useState<ViewerState | null>(null);
   const { favorites, toggleFavorite } = useFavorites();
   const search = useRef<HTMLInputElement>(null);
+  const libraryEl = useRef<HTMLDivElement>(null);
+  /**
+   * Where the grid was when a comic was opened over it: which tile, and how
+   * far down the page. Back puts both back, so leaving a comic lands on the
+   * card that opened it rather than at the top of a vault of hundreds
+   * (WCAG 2.4.3).
+   */
+  const returnTo = useRef<{ id: string; scroller: Element | null; top: number } | null>(null);
 
   /** Which comics kept their story, so the board page knows what it can offer. */
   const [reopenable, setReopenable] = useState<Set<string>>(new Set());
@@ -182,7 +190,12 @@ export default function Gallery({
   /* ---------- opening ---------- */
 
   const openEntry = useCallback((entry: LibraryEntry) => {
-    if (isBoard(entry) && entry.item.project) { setBoard(entry.item.project); return; }
+    if (isBoard(entry) && entry.item.project) {
+      const scroller = scrollParent(libraryEl.current);
+      returnTo.current = { id: entry.item.id, scroller, top: scroller?.scrollTop ?? 0 };
+      setBoard(entry.item.project);
+      return;
+    }
     // Walk the grid in the order shown. Boards are not in the walk: they open
     // as a comic of their own, and stepping into one from a picture would
     // swap the viewer's meaning halfway through.
@@ -207,6 +220,19 @@ export default function Gallery({
     () => (board ? all.filter((i) => i.project === board && i.kind !== "mask").sort(projectOrder) : []),
     [board, all]);
   useEffect(() => { if (board && boardMembers.length === 0) setBoard(null); }, [board, boardMembers.length]);
+
+  // Back from a comic: the grid was kept mounted underneath, so its rows and
+  // tiles are all still there to scroll to and focus.
+  useEffect(() => {
+    if (board) return;
+    const back = returnTo.current;
+    if (!back) return;
+    returnTo.current = null;
+    if (back.scroller) back.scroller.scrollTop = back.top;
+    const tile = [...(libraryEl.current?.querySelectorAll<HTMLElement>(".tile-open") ?? [])]
+      .find((el) => el.dataset.id === back.id);
+    tile?.focus({ preventScroll: true });
+  }, [board]);
 
   /* ---------- keys on the grid ---------- */
 
@@ -331,37 +357,37 @@ export default function Gallery({
     );
   }
 
-  if (board && boardMembers.length) {
-    return (
-      <>
-        <BoardView
-          members={boardMembers}
-          onBack={() => setBoard(null)}
-          onRead={(pages, index, title) => setViewer({
-            ids: pages.map((p) => p.id), current: pages[index].id, at: index, reader: { title },
-          })}
-          onView={(list, index) => setViewer({
-            ids: list.map((p) => p.id), current: list[index].id, at: index,
-          })}
-          onChanged={() => void onChanged()}
-          notify={notify}
-          send={send}
-          models={models}
-          onOpenBoard={onOpenBoard}
-          reopenable={reopenable}
-          onDeleteAll={deleteBoard}
-        />
-        {viewerEl}
-        {undoBar}
-      </>
-    );
-  }
-
   const shelfName = SHELVES.find(([s]) => s === filter.shelf)?.[1];
   const bytes = filtered.reduce((n, i) => n + i.bytes, 0);
 
+  const comic = board && boardMembers.length > 0;
+
+  // The grid stays mounted while a comic is open, hidden rather than
+  // replaced. Unmounting it threw away its scroll position and the tile that
+  // had focus, so Back always landed at the top of the vault.
   return (
-    <div className="library">
+    <>
+    {comic && (
+      <BoardView
+        members={boardMembers}
+        onBack={() => setBoard(null)}
+        onRead={(pages, index, title) => setViewer({
+          ids: pages.map((p) => p.id), current: pages[index].id, at: index, reader: { title },
+        })}
+        onView={(list, index) => setViewer({
+          ids: list.map((p) => p.id), current: list[index].id, at: index,
+        })}
+        onChanged={() => void onChanged()}
+        notify={notify}
+        send={send}
+        models={models}
+        onOpenBoard={onOpenBoard}
+        reopenable={reopenable}
+        onDeleteAll={deleteBoard}
+      />
+    )}
+    <div className="library" ref={libraryEl} style={comic ? { display: "none" } : undefined}
+         aria-hidden={comic || undefined}>
       <div className="lib-head">
         <LibraryToolbar
           ref={search}
@@ -442,8 +468,18 @@ export default function Gallery({
           models={models}
         />
       )}
-      {viewerEl}
-      {undoBar}
     </div>
+    {viewerEl}
+    {undoBar}
+    </>
   );
+}
+
+/** The nearest ancestor that scrolls, which is where the grid's position lives. */
+function scrollParent(el: Element | null): Element | null {
+  for (let at = el?.parentElement ?? null; at; at = at.parentElement) {
+    const y = getComputedStyle(at).overflowY;
+    if ((y === "auto" || y === "scroll") && at.scrollHeight > at.clientHeight) return at;
+  }
+  return document.scrollingElement;
 }

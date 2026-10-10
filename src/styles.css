@@ -1098,3 +1098,128 @@ details.mask-rect .row { margin-top: 6px; }
   font-size: var(--fs-caption); color: var(--warn); margin-top: 6px; line-height: var(--lh-body);
 }
 .gated .panel { width: 100%; color: var(--text); }
+
+/* ---------- board and library fixes ---------- */
+
+/* Library tiles: the picture is the open button, the pick is its sibling.
+   The media used to be a direct child of .tile; it now sits in .tile-open. */
+.tile-open {
+  position: absolute; inset: 0; padding: 0; margin: 0; border: 0;
+  background: none; color: inherit; cursor: pointer; border-radius: inherit;
+}
+.tile-open > img, .tile-open > video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tile.picked .tile-open > img, .tile.picked .tile-open > video {
+  transform: scale(.92); border-radius: 4px; transition: transform .12s;
+}
+.tile-open:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+/* 24px is the smallest target WCAG 2.5.8 allows. */
+.tile .pick { width: 24px; height: 24px; font-size: 12px; }
+.tile:focus-within .pick, .tile:focus-within .tile-caption { opacity: 1; }
+
+/* "Select all" was invisible until hovered, so nobody knew it was there. It
+   is always shown now, quietly. */
+.lib-section-head .link-btn { opacity: 1; color: var(--text-faint); font-size: var(--fs-small); }
+.lib-section-head .link-btn:hover, .lib-section-head .link-btn:focus-visible { color: var(--accent); }
+
+/* An opened comic's title takes focus; it does not need a ring for that. */
+.board-view h2:focus { outline: none; }
+.board-view h2:focus-visible { outline: var(--focus-ring); outline-offset: 3px; }
+.board-script ol { margin: 8px 0 0; padding-left: 22px; font-size: var(--fs-small); line-height: 1.6; color: var(--text-dim); }
+.board-script li { margin-bottom: 8px; }
+.board-script p { margin: 0; user-select: text; }
+.board-script b { color: var(--text); font-weight: 600; }
+/* The badges sit over the open button now rather than inside the old card,
+   so a click on one has to fall through to it. */
+.tile .count, .tile .star, .tile .badge { pointer-events: none; }
+
+/* Board: the five steps across the top. Reached steps are buttons; the
+   current one is marked by a frame and an underline, not by a tint alone
+   (WCAG 1.4.1). */
+.board-top { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin: 0 0 var(--sp-2); }
+.board-top .board-save { margin-left: auto; color: var(--good); font-size: var(--fs-caption); }
+.board-steps { display: flex; flex-wrap: wrap; gap: var(--sp-1); list-style: none; margin: 0; padding: 0; }
+.board-steps li > button, .board-steps li > span {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 28px;
+  padding: 3px 10px 3px 6px; border-radius: 6px; border: 1px solid transparent;
+  background: none; color: var(--text-dim); font: inherit; font-size: var(--fs-caption); text-align: left;
+}
+.board-steps li > button { cursor: pointer; border-color: var(--border); }
+.board-steps li > button:hover { border-color: var(--border-control); }
+.board-steps .step-n {
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+  width: 18px; height: 18px; border-radius: 50%; border: 1px solid currentColor;
+  font-size: 10.5px; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.board-steps li.done .step-n { background: var(--good); border-color: var(--good); color: #0b0d14; }
+.board-steps .step-label { font-weight: 600; color: var(--text); }
+.board-steps .step-detail { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.board-steps li.ahead .step-label { color: var(--text-faint); font-weight: 500; }
+.board-steps [aria-current="step"] {
+  border-color: var(--accent); background: var(--bg-raised); box-shadow: inset 0 -2px 0 var(--accent);
+}
+.board-steps [aria-current="step"] .step-label { text-decoration: underline; text-underline-offset: 3px; }
+
+/* The run bar sits under the steps now, so the action, Stop, the progress
+   and the outcome are always in the same place. */
+.board-top + .board-run { margin-top: 0; }
+.board-run .btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
+.board-progress { margin-top: var(--sp-2); }
+.board-progress .progress { margin-top: 4px; }
+.board-progress-line { font-size: var(--fs-small); color: var(--text); font-variant-numeric: tabular-nums; }
+.board-outcome { margin: 6px 0 10px; font-size: var(--fs-small); color: var(--text-dim); }
+.board-outcome:empty { margin: 0 0 10px; }
+
+/* Pressed toggles on the board: a border and a tick as well as the tint. */
+.board-rail-toggle { display: flex; gap: var(--sp-1); }
+.board-rail-toggle .pill, .board-pane .field .pill { cursor: pointer; min-height: 24px; border: 1px solid transparent; }
+.board-rail-toggle .pill[aria-pressed="true"], .board-pane .field .pill[aria-pressed="true"] {
+  border-color: currentColor; font-weight: 650;
+}
+.board-pane-head .btn { letter-spacing: 0; text-transform: none; font-weight: 500; }
+.board-locked { margin-bottom: var(--sp-3); padding: 6px 8px; border: 1px dashed var(--border-control); border-radius: 5px; }
+
+/* The cast: people are buttons, and their tier is a word. */
+.board-cast-pill {
+  cursor: pointer; min-height: 24px; color: var(--text);
+  border: 1px solid var(--border-control);
+}
+.board-cast-pill:hover { border-color: var(--text-dim); }
+.board-cast-pill[aria-expanded="true"] { border-color: var(--accent); }
+.board-cast-pill .tier {
+  font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-faint);
+}
+.board-cast-editor { flex-basis: 100%; margin-top: 6px; }
+.board-cast-editor .field { margin: 0; }
+.board-narrator { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: flex-end; margin-top: var(--sp-2); }
+.board-narrator label { display: block; font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+.board-narrator label em { font-style: normal; color: var(--text-faint); }
+.board-narrator-name { width: 160px; }
+.board-narrator-look { flex: 1; min-width: 180px; }
+
+/* The manuscript drawer, for windows too narrow for three panes. Above
+   1080px it is an ordinary pane and its toggle is not shown. */
+.board-ms-toggle, .board-ms-close { display: none; }
+.board-ms:focus { outline: none; }
+@media (max-width: 1080px) {
+  .board-work {
+    position: relative;
+    grid-template-columns: minmax(0, 1.5fr) minmax(240px, 1fr);
+    height: calc(100vh - 250px);
+  }
+  .board-pane { max-height: none; }
+  .board-ms-toggle, .board-ms-close { display: inline-flex; }
+  .board-work > .board-ms { display: none; }
+  .board-work.ms-open > .board-ms {
+    display: block; position: absolute; top: 0; bottom: 0; left: 0; z-index: 5;
+    width: min(420px, 88%); border-right: 1px solid var(--border-strong);
+    box-shadow: 12px 0 28px rgba(0, 0, 0, .5);
+  }
+}
+/* Too narrow even for two: the panel editor goes directly under the board,
+   which scrolls in a box of its own so the editor is never far below. */
+@media (max-width: 760px) {
+  .board-work { grid-template-columns: 1fr; height: auto; }
+  .board-work > .board-pane:not(.board-ms) { max-height: none; overflow: visible; }
+  .board-work > .board-pane:nth-child(2) { max-height: 55vh; overflow-y: auto; }
+  .board-work.ms-open > .board-ms { position: fixed; width: 92vw; overflow-y: auto; }
+}

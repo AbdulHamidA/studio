@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { vaultUrl } from "../../lib/api";
 import type { ModelStatus, VaultItem } from "../../lib/types";
-import { descendants, isAudio, isImage, isPdf, isVideo, kindLabel, lineage } from "../../lib/library";
+import { descendants, isAudio, isImage, isPdf, isVideo, kindLabel, lineage, prefersReducedMotion } from "../../lib/library";
 import { loadPref, savePref } from "../../lib/prefs";
 import SendTo, { type Destination } from "../SendTo";
 import Adjust from "../Adjust";
@@ -12,6 +12,8 @@ import ZoomStage, { type ZoomHandle } from "./ZoomStage";
 
 /** How many neighbours either side the filmstrip draws. */
 const STRIP_REACH = 40;
+/** How far one arrow press pans a zoomed picture; Shift goes four times as far. */
+const PAN_STEP = 60;
 
 export interface ViewerProps {
   /** What ←/→ walks through, in the order the grid showed it. */
@@ -115,16 +117,37 @@ export default function Viewer(props: ViewerProps) {
       .catch(() => notify("Could not reach the clipboard.", true));
   }, [item, notify]);
 
+  /**
+   * Whether the picture on screen is enlarged past fitting.
+   *
+   * While it is, the arrow keys look around it, the way they do in Preview
+   * and Photos; at fit they walk the library as before. Walking needs keys
+   * that work either way, so [ and ] and Page Up / Page Down always go to the
+   * previous and next item.
+   */
+  const zoomedIn = !!item && isImage(item) && scale.scale > scale.fit + 1e-3;
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || typing(e) || !item) return;
       const plain = !e.metaKey && !e.ctrlKey && !e.altKey;
+      const step = e.shiftKey ? PAN_STEP * 4 : PAN_STEP;
       switch (e.key) {
         case "Escape":
           if (side === "adjust") setSide("info"); else onClose();
           break;
-        case "ArrowLeft": if (!plain) return; go(index - 1); break;
-        case "ArrowRight": if (!plain) return; go(index + 1); break;
+        case "ArrowLeft":
+          if (!plain) return;
+          if (zoomedIn) zoom.current?.panBy(-step, 0); else go(index - 1);
+          break;
+        case "ArrowRight":
+          if (!plain) return;
+          if (zoomedIn) zoom.current?.panBy(step, 0); else go(index + 1);
+          break;
+        case "ArrowUp": if (!plain || !zoomedIn) return; zoom.current?.panBy(0, -step); break;
+        case "ArrowDown": if (!plain || !zoomedIn) return; zoom.current?.panBy(0, step); break;
+        case "[": case "PageUp": if (!plain) return; go(index - 1); break;
+        case "]": case "PageDown": if (!plain) return; go(index + 1); break;
         case "Home": go(0); break;
         case "End": go(items.length - 1); break;
         case " ": {
@@ -155,7 +178,7 @@ export default function Viewer(props: ViewerProps) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [item, index, items.length, go, onClose, side, toggleSide, onToggleFavorite, onDelete, copyPrompt]);
+  }, [item, index, items.length, go, onClose, side, toggleSide, onToggleFavorite, onDelete, copyPrompt, zoomedIn]);
 
   // The next and previous pictures are fetched before they are asked for,
   // so walking through the library does not wait on a decrypt at every step.
@@ -211,13 +234,18 @@ export default function Viewer(props: ViewerProps) {
   } else if (isImage(item)) {
     body = (
       <ZoomStage ref={zoom} key={item.id} src={vaultUrl(item.id)}
-                 alt={item.prompt || item.name} width={item.width} height={item.height}
+                 // A composed page's prompt is "page 1 of 2", which tells a
+                 // screen reader nothing about which comic it is in.
+                 alt={reader ? `${reader.title}, page ${index + 1} of ${items.length}` : item.prompt || item.name} width={item.width} height={item.height}
                  onScale={onScale} onError={() => setBroken(true)} />
     );
   } else if (isVideo(item)) {
     const poster = coverOf(item, byId);
+    // Someone who asked the system for less motion presses play themselves.
+    const still = prefersReducedMotion();
     body = (
-      <video key={item.id} className="viewer-video" src={vaultUrl(item.id)} controls loop autoPlay muted
+      <video key={item.id} className="viewer-video" src={vaultUrl(item.id)} controls
+             loop={!still} autoPlay={!still} muted
              playsInline poster={poster ? vaultUrl(poster) : undefined}
              aria-label={item.prompt || item.name} onError={() => setBroken(true)} />
     );
@@ -248,7 +276,8 @@ export default function Viewer(props: ViewerProps) {
           <div className="pdf-pages">
             {pages.map((p, i) => (
               <figure key={p.id}>
-                <img src={vaultUrl(p.id)} alt={`Page ${i + 1}`} loading="lazy" />
+                <img src={vaultUrl(p.id)} alt={`${item.name.replace(/\.pdf$/i, "")}, page ${i + 1} of ${pages.length}`}
+                     loading="lazy" />
                 <figcaption>Page {i + 1} of {pages.length}</figcaption>
               </figure>
             ))}
@@ -296,7 +325,7 @@ export default function Viewer(props: ViewerProps) {
               <button className="zoom-pct" onClick={() =>
                         scale.scale > scale.fit + 1e-3 ? zoom.current?.fit() : zoom.current?.actual()}
                       aria-label={scale.scale > scale.fit + 1e-3 ? "Fit to window" : "Actual size"}
-                      title="Fit (0) / 100% (1)">
+                      title="Fit (0) / 100% (1) · arrow keys pan when zoomed, [ and ] change item">
                 {scale.scale > scale.fit + 1e-3 ? `${pct}%` : "Fit"}
               </button>
               <button className="icon-btn" onClick={() => zoom.current?.zoomBy(1.25)}

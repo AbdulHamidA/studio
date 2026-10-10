@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, errText, fmtBytes, newJobId, vaultUrl } from "../../lib/api";
 import type { ModelStatus, VaultItem } from "../../lib/types";
 import { compositions } from "../../lib/board";
 import { isPdf } from "../../lib/library";
+import { loadSavedBoard } from "../../lib/boardDraft";
+import type { Panel } from "../../lib/types";
 import { exportMany } from "../shared";
 import SendTo, { type Destination } from "../SendTo";
 
@@ -53,6 +55,46 @@ export default function BoardView({
   // the vault is the only copy.
   const [confirm, setConfirm] = useState(false);
   useEffect(() => { setConfirm(false); }, [head.project]);
+  // An armed delete is disarmed by anything else happening: Escape, focus
+  // going somewhere else, or five seconds passing. A destructive button left
+  // loaded is how a later, unrelated press deletes a whole comic.
+  useEffect(() => {
+    if (!confirm) return;
+    const timer = window.setTimeout(() => setConfirm(false), 5000);
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setConfirm(false); };
+    window.addEventListener("keydown", onKey);
+    return () => { window.clearTimeout(timer); window.removeEventListener("keydown", onKey); };
+  }, [confirm]);
+
+  // Opening a comic replaces the whole screen, so focus goes to its title.
+  // Left where it was -- on a tile that is now hidden -- a keyboard or
+  // screen-reader user is nowhere at all (WCAG 2.4.3).
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => { heading.current?.focus(); }, [head.project]);
+
+  /**
+   * The words of the comic, for anyone who cannot read them off the page.
+   *
+   * The lettering is drawn into the page pictures, so a page's alt text is
+   * all a screen reader gets. The vault does not record which panel landed on
+   * which page, but a comic saved with its board does keep every panel's
+   * caption and dialogue, in reading order, and that is the script.
+   */
+  const [script, setScript] = useState<Panel[] | null>(null);
+  const canReopen = !!head.project && reopenable.has(head.project);
+  useEffect(() => {
+    setScript(null);
+    if (!canReopen || !head.project) return;
+    let live = true;
+    void loadSavedBoard(head.project).then((saved) => {
+      if (!live || !saved || !Array.isArray(saved.panels)) return;
+      // Only what was drawn is on the pages; a planned panel never drawn is
+      // not part of what someone is reading.
+      const drawn = Array.isArray(saved.drawn) ? saved.drawn : null;
+      setScript(saved.panels.filter((_, i) => !drawn || drawn[i]));
+    }).catch(() => { /* no script is not an error: the pages still read */ });
+    return () => { live = false; };
+  }, [head.project, canReopen]);
 
   // One composition is one comic; see `compositions`. Newest last, as the
   // project sort already put them, so the current one is at the end.
@@ -74,7 +116,7 @@ export default function BoardView({
         ← Back to vault
       </button>
       <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-        <h2 style={{ margin: 0 }}>{name}</h2>
+        <h2 style={{ margin: 0 }} ref={heading} tabIndex={-1}>{name}</h2>
         {/* Pages first, because the pages are what was made. The panels and
             the sheets are how it was made, and leading with "12 panels"
             described the machinery to someone looking for their comic. */}
@@ -189,6 +231,7 @@ export default function BoardView({
         <button
           className="btn small danger"
           disabled={busy}
+          onBlur={() => setConfirm(false)}
           onClick={async () => {
             if (!confirm) { setConfirm(true); return; }
             setBusy(true);
@@ -212,7 +255,11 @@ export default function BoardView({
               <button className="page-sheet" key={it.id}
                       aria-label={`Read from page ${i + 1}`}
                       onClick={() => onRead(pagesOf, i, name)}>
-                <img src={vaultUrl(it.id)} alt={`Page ${i + 1}`} loading="lazy" />
+                {/* The button already says "Read from page N"; the picture
+                    names the comic, so the two together say which page of
+                    what. */}
+                <img src={vaultUrl(it.id)} alt={`${name}, page ${i + 1} of ${pagesOf.length}`}
+                     loading="lazy" />
                 <div className="page-no">Page {i + 1} of {pagesOf.length}</div>
               </button>
             ))}
@@ -223,6 +270,22 @@ export default function BoardView({
           <strong>No pages yet.</strong> The panels are drawn; composing them
           in the Board tab turns them into the pages you read.
         </div>
+      )}
+
+      {pagesOf.length > 0 && script && script.some((p) => p.caption || p.dialogue?.length) && (
+        <details className="board-script" style={{ marginBottom: 18 }}>
+          <summary className="board-summary">Text</summary>
+          <ol>
+            {script.map((p, i) => (p.caption || p.dialogue?.length) ? (
+              <li key={i}>
+                {p.caption && <p>{p.caption}</p>}
+                {(p.dialogue ?? []).map((d, k) => (
+                  <p key={k}>{d.speaker ? <b>{d.speaker}: </b> : null}{d.text}</p>
+                ))}
+              </li>
+            ) : null)}
+          </ol>
+        </details>
       )}
 
       {bound.length > 0 && (

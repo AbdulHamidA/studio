@@ -5,6 +5,12 @@ export interface ZoomHandle {
   fit: () => void;
   actual: () => void;
   zoomBy: (factor: number) => void;
+  /**
+   * Move a zoomed picture by this many pixels. A positive dx shows more of
+   * the right-hand side, the way an arrow key reads: the view moves, not the
+   * picture. Does nothing at fit, where there is nothing to pan to.
+   */
+  panBy: (dx: number, dy: number) => void;
 }
 
 /**
@@ -57,7 +63,13 @@ const ZoomStage = forwardRef<ZoomHandle, {
     fit: () => setView(null),
     actual: () => setView(clampView(centred(1, nat, boxSize), nat, boxSize)),
     zoomBy: (factor: number) => setScaleAt(shown.scale * factor),
-  }), [nat, boxSize, setScaleAt, shown.scale]);
+    // Dragging was the only way to look around a zoomed picture, which left
+    // the keyboard able to zoom in and then stuck there (WCAG 2.1.1).
+    panBy: (dx: number, dy: number) => {
+      if (!view) return;
+      setView(clampView({ scale: view.scale, x: view.x - dx, y: view.y - dy }, nat, boxSize));
+    },
+  }), [nat, boxSize, setScaleAt, shown.scale, view]);
 
   // React's wheel listener is passive, and a passive listener cannot stop the
   // page from scrolling underneath, so this one is attached by hand.
