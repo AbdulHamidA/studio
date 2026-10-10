@@ -134,21 +134,26 @@ export default function Storage({
         <button className="btn small primary" disabled={!!busy} onClick={() => relocate(true)}>
           {busy ?? "Move models to another drive…"}
         </button>
-        <button
-          className={"btn small" + (confirmSwitch ? " danger" : "")}
-          disabled={!!busy}
-          onClick={() => {
-            // Only worth asking when there is something to lose sight of.
-            if (!confirmSwitch && (info?.models_bytes ?? 0) > 0) {
-              setConfirmSwitch(true); return;
-            }
-            void relocate(false);
-          }}
-        >
-          {confirmSwitch
-            ? `Point elsewhere? ${fmtBytes(info?.models_bytes ?? 0)} here stays on disk but stops being found`
-            : "Change location without moving"}
-        </button>
+        {/* The consequence is stated beside the button, with a way back; it
+            used to replace the button label with a 70-character question. */}
+        {confirmSwitch ? (
+          <span role="alert" style={{ display: "inline-flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+            <span className="t-meta">
+              {fmtBytes(info?.models_bytes ?? 0)} here stays on disk but stops being found.
+            </span>
+            <button className="btn small danger" disabled={!!busy} onClick={() => void relocate(false)}>
+              Point elsewhere
+            </button>
+            <button className="btn small" onClick={() => setConfirmSwitch(false)}>Cancel</button>
+          </span>
+        ) : (
+          <button className="btn small" disabled={!!busy}
+            onClick={() => {
+              // Only worth asking when there is something to lose sight of.
+              if ((info?.models_bytes ?? 0) > 0) { setConfirmSwitch(true); return; }
+              void relocate(false);
+            }}>Change location without moving</button>
+        )}
         <button className="btn small" disabled={!!busy} onClick={refresh}>Refresh</button>
       </div>
       <div style={{ marginTop: 9, fontSize: 10.5, color: "var(--text-faint)", lineHeight: 1.6 }}>

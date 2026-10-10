@@ -442,8 +442,10 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .empty-state .big { font-size: 34px; display: block; margin-bottom: 10px; opacity: .3; }
 .spin { display: inline-block; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* Bottom-right, clear of the centred controls and the now-playing bar, so a
+   pinned error never covers the control you are using (WCAG 2.4.11). */
 .toast {
-  position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+  position: fixed; bottom: 76px; right: 18px;
   background: var(--bg-input); border: 1px solid var(--border-strong);
   border-radius: 8px; padding: 9px 15px; font-size: 12px; z-index: 50;
   box-shadow: 0 8px 28px rgba(0,0,0,.5); max-width: 620px; user-select: text;

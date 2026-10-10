@@ -77,12 +77,12 @@ export default function Activity({ notify }: { notify: (m: string, bad?: boolean
               <span><b>mlx-gen</b> {health.mlxgen ?? "—"}</span>
               <span><b>MLX</b> {health.mlx ?? "—"}</span>
             </div>
-            <div className="field" style={{ marginTop: 12 }}>
-              <label>Model held in memory</label>
-              <div style={{ fontSize: 12, color: "var(--text-dim)" }}>
+            <dl className="field" style={{ marginTop: 12 }}>
+              <dt style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 5 }}>Model held in memory</dt>
+              <dd style={{ margin: 0, fontSize: 12, color: "var(--text-dim)" }}>
                 {health.resident_model ?? "none — the next run will load one"}
-              </div>
-            </div>
+              </dd>
+            </dl>
             <div className="notice" style={{ marginTop: 12, marginBottom: 12 }}>
               <strong>
                 Limited to {health.memory_budget_gib ?? "?"} GB of memory

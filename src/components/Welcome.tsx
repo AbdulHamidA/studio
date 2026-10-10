@@ -130,7 +130,7 @@ export default function Welcome({
             <button className="btn small" onClick={cancel}>Cancel</button>
           ) : (
             <>
-              <button className="btn primary small"
+              <button className="btn primary"
                       disabled={pending.length === 0}
                       onClick={() => void installAll()}>
                 {pending.length === 0

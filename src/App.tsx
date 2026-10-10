@@ -398,7 +398,9 @@ export default function App() {
   }, [items]);
 
   if (!setup || !vault) {
-    return <div className="empty-state" style={{ paddingTop: 160 }}>Loading…</div>;
+    // Draggable while it loads, like every other screen.
+    return <><div className="drag-region" data-tauri-drag-region />
+      <div className="empty-state" role="status" style={{ paddingTop: 160 }}>Loading…</div></>;
   }
 
   // The runtime has to exist before a vault is worth creating.
@@ -551,11 +553,13 @@ export default function App() {
                 ? "No data has arrived for a while. It may need cancelling and retrying."
                 : "A job is running in the engine"}
             >
-              <span className="spin">◐</span> {busyLabel}
+              <span className="spin" aria-hidden="true">◐</span> {busyLabel}
+              {/* Said, not only hovered: a stall needs action. */}
+              {busyLabel.includes("stalled") && <span> — may need cancelling and retrying</span>}
             </span>
           )}
           <span className="pill good" title="Content is encrypted at rest">
-            <span className="dot" />Unlocked
+            <span className="dot" aria-hidden="true" />Unlocked<span className="visually-hidden"> — content is encrypted at rest</span>
           </span>
           {(tab === "generate" || tab === "edit" || tab === "upscale") && (
             <button
