@@ -3959,7 +3959,10 @@ def op_enrich_panels(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
     if not panels:
         raise ValueError("divide the story into panels first")
 
-    if all("cast" in p for p in panels):
+    # One story panel makes this a story board. A panel added by hand, or one
+    # whose cast was cleared, used to send every panel down the legacy path,
+    # which rewrites `place`/`place_key` and breaks location continuity.
+    if any("cast" in p for p in panels):
         out = []
         for i, panel in enumerate(panels):
             if is_cancelled(req_id):

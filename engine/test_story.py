@@ -341,6 +341,16 @@ class WorkerIntegration(unittest.TestCase):
                          [('Understanding scene 1 of 2', 0.0, 3200), ('Understanding scene 1 of 2', 0.0, 4800),
                           ('Understanding scene 2 of 2', 0.5, 3200)])
 
+    def test_a_hand_added_panel_keeps_the_board_on_the_story_path(self):
+        import worker
+        book = example()
+        panels = story.direct(book, book['chapters'][0]['id'])
+        plain = {"shot": "medium", "action": "Jonas sits down", "setting": "station"}
+        with patch.object(worker, '_write', return_value='{"lighting":"cold light","surfaces":"stone"}'):
+            result = worker.op_enrich_panels('test-enrichment', {'panels': panels + [plain]})['panels']
+        self.assertEqual([p.get('place_key') for p in result[:-1]], [p['place_key'] for p in panels])
+        self.assertIn('cold light', result[-1]['description'])
+
     def test_switching_analysts_unloads_the_previous_writer_before_loading(self):
         import sys
         import types
