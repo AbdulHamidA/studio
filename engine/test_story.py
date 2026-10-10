@@ -101,16 +101,17 @@ class StoryAnalysis(unittest.TestCase):
             story.analyze('The ending matters.', write)
         self.assertEqual(len(calls), 2)
 
-    def test_missing_source_unit_and_invented_dialogue_are_rejected(self):
+    def test_missing_source_unit_is_rejected_and_invented_dialogue_never_enters(self):
         source = 'Mira waited. Jonas said “Come home.”'
         group = story.passages(source)[0]
         data = reply(group)
-        with self.assertRaisesRegex(ValueError, 'every complete quoted'):
-            story.parse_scene(json.dumps(data), group, [], 's1')
-        data['beats'][0]['dialogue'] = [{"speaker_id": None, "text": "Come home.", "offscreen": True}]
         data['beats'][0]['units'] = [0]
-        with self.assertRaisesRegex(ValueError, 'quote this beat'):
+        with self.assertRaisesRegex(ValueError, 'every source unit'):
             story.parse_scene(json.dumps(data), group, [], 's1')
+        data = reply(group)
+        data['beats'][0]['dialogue'] = [{"speaker_id": None, "text": "I never said this.", "offscreen": True}]
+        scene, _ = story.parse_scene(json.dumps(data), group, [], 's1')
+        self.assertEqual([d['text'] for d in scene['beats'][0]['dialogue']], ['Come home.'])
 
     def test_source_mutation_and_overlapping_dialogue_fail_before_rendering(self):
         book = example()
@@ -544,3 +545,43 @@ class NarratorIdentity(unittest.TestCase):
         data['beats'][0]['visible'] = [{"character_id": "narrator", "expression": "", "body_language": ""}]
         scene, _ = story.parse_scene(json.dumps(data), group, [], 's1')
         self.assertEqual(scene['beats'][0]['visible'], [])
+
+
+class DialogueFromSource(unittest.TestCase):
+    """The in-app failure 'dialogue must include every complete quoted utterance'."""
+
+    def lines(self, source, said):
+        group = story.passages(source)[0]
+        data = reply(group, [{"id": "m", "name": "Mira", "aliases": [], "visual": "", "voice": ""}])
+        data['beats'][0]['dialogue'] = [{"speaker_id": "m", "text": t, "offscreen": False} for t in said]
+        scene, _ = story.parse_scene(json.dumps(data), group, [], 's1')
+        mira = scene['beats'][0]
+        return [(d['text'], d['speaker_id'] is not None, source[d['start']:d['end']] == d['text'])
+                for d in mira['dialogue']]
+
+    def test_retyped_quotes_are_attributed_but_text_comes_from_source(self):
+        for said in (['Go home'], ['“Go home.”'], ['go home.']):
+            self.assertEqual(self.lines('Mira said, “Go home.”', said), [('Go home.', True, True)])
+
+    def test_a_skipped_quote_is_kept_without_a_guessed_speaker(self):
+        self.assertEqual(self.lines('Mira read the sign: “Closed.” She said, “Go home.”', ['Go home.']),
+                         [('Closed.', False, True), ('Go home.', True, True)])
+
+    def test_one_reply_line_attributes_an_interrupted_utterance(self):
+        self.assertEqual(self.lines('Mira said, “Go,” and then, “home.”', ['Go, home.']),
+                         [('Go,', True, True), ('home.', True, True)])
+
+    def test_continued_speech_across_paragraphs_is_dialogue(self):
+        for q in ('“', '"'):
+            close = '”' if q == '“' else '"'
+            source = f'Mira said, {q}Go home.\n\n{q}Now, please.{close} Mira wept.'
+            self.assertEqual(self.lines(source, ['Go home.', 'Now, please.']),
+                             [('Go home.', True, True), ('Now, please.', True, True)])
+
+    def test_whole_book_still_validates_and_reconstructs_for_audio(self):
+        source = 'Mira read the sign: “Closed.” She said, “Go,” and then, “home.”'
+        data = reply(story.passages(source)[0], [{"id": "m", "name": "Mira", "aliases": [], "visual": "", "voice": ""}])
+        data['beats'][0]['dialogue'] = [{"speaker_id": "m", "text": "Go home", "offscreen": False}]
+        book = story.analyze(source, lambda *_: json.dumps(data))
+        segments = story.narration_segments(book, book['chapters'][0]['id'])
+        self.assertEqual(''.join(s['text'] for s in segments), source)

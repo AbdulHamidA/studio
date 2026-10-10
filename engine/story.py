@@ -131,6 +131,29 @@ def _text(value, field, empty=True):
     return value.strip()
 
 
+# Curly, straight and Japanese quotes. A quote never crosses a line break, so
+# a paragraph left open by the continued-speech convention cannot swallow the
+# narration that follows it.
+# An opening quote that ends its paragraph unclosed, with the next paragraph
+# reopening, is continued speech and still a complete utterance.
+QUOTE = re.compile(r'[“"]([^”"\n]+)(?:[”"]|(?=\n[ \t]*\n\s*[“"]))|「([^」\n]+)」')
+
+
+def quotes(text):
+    """(offset, utterance) for each complete quoted utterance, outer space trimmed."""
+    result = []
+    for m in QUOTE.finditer(text):
+        group = 1 if m.group(1) is not None else 2
+        inner = m.group(group)
+        if inner.strip():
+            result.append((m.start(group) + len(inner) - len(inner.lstrip()), inner.strip()))
+    return result
+
+
+def _plain(text):
+    return re.sub(r'[\W_]+', ' ', text).strip().casefold()
+
+
 def _array(value, field):
     if not isinstance(value, list):
         raise ValueError(f"{field} must be an array")
@@ -151,7 +174,7 @@ def parse_scene(raw, group, bible, scene_id):
     lookup = {c["id"]: c["id"] for c in characters}
     source = ''.join(u["text"] for u in group)
     local_ids, dropped = set(), set()
-    narrative = re.sub(r'[“"]([^”"]+)[”"]|「([^」]+)」', "", source)
+    narrative = QUOTE.sub("", source)
     first_person = bool(re.search(r'\b(?:I|me|my|myself|we|us|our)\b', narrative, re.I))
     for person in _array(reply.get("characters"), "characters"):
         name = _text(person.get("name"), "name", False)
@@ -255,24 +278,32 @@ def parse_scene(raw, group, bible, scene_id):
                             "expression": _text(actor.get("expression"), "expression"),
                             "body_language": _text(actor.get("body_language"), "body language"),
                             "appearance": _text(actor.get("appearance", ""), "appearance")})
-        dialogue = []
-        # The second alternative is Japanese dialogue.
-        quoted = [(m.group(1) or m.group(2)).strip() for m in re.finditer(r'[“"]([^”"]+)[”"]|「([^」]+)」', excerpt)]
-        local_end = 0
+        # The source, not the reply, decides what was said and where: every
+        # quoted utterance becomes a line with its exact span. Model lines only
+        # attribute speakers, so a retyped, trimmed, merged or skipped quote
+        # cannot drop or alter the author's words.
+        dialogue = [{"speaker_id": None, "text": text, "offscreen": True,
+                     "start": start + a, "end": start + a + len(text)} for a, text in quotes(excerpt)]
+        cursor = 0
         for line in _array(beat.get("dialogue"), "dialogue"):
-            text = _text(line.get("text"), "dialogue text", False)
-            at = excerpt.find(text, local_end)
-            if at < 0:
-                raise ValueError("dialogue must quote this beat exactly and in order")
-            cid = resolve(line.get("speaker_id"), "dialogue speaker") if line.get("speaker_id") is not None else None
-            offscreen = line.get("offscreen")
-            if type(offscreen) is not bool:
-                raise ValueError("offscreen must be boolean")
-            dialogue.append({"speaker_id": cid, "text": text, "offscreen": offscreen,
-                             "start": start + at, "end": start + at + len(text)})
-            local_end = at + len(text)
-        if [line["text"] for line in dialogue] != quoted:
-            raise ValueError("dialogue must include every complete quoted utterance in source order")
+            if not isinstance(line, dict) or not isinstance(line.get("text"), str):
+                continue
+            said = _plain(line["text"])
+            at = next((n for n in range(cursor, len(dialogue)) if said and (
+                said == _plain(dialogue[n]["text"]) or said in _plain(dialogue[n]["text"])
+                or _plain(dialogue[n]["text"]) in said)), None)
+            if at is None:
+                continue
+            # One reply line may join an utterance the narration interrupts.
+            last = at
+            while last + 1 < len(dialogue) and _plain(dialogue[last + 1]["text"]) in said:
+                last += 1
+            for n in range(at, last + 1):
+                if line.get("speaker_id") is not None:
+                    dialogue[n]["speaker_id"] = resolve(line["speaker_id"], "dialogue speaker")
+                if type(line.get("offscreen")) is bool:
+                    dialogue[n]["offscreen"] = line["offscreen"]
+            cursor = last + 1
         beats.append({"id": f"{scene_id}-b{i + 1}", "start": start, "end": end,
                       "source": excerpt, "importance": importance, "tension": tension,
                       "action": _text(beat.get("action"), "action", False),
