@@ -11,39 +11,6 @@ import json
 import re
 import uuid
 
-SCENE_SYSTEM = """You are a story editor and director. Return only the requested JSON,
-compact on one line with no indentation.
-Read this scene for causality, dramatic turns and emotion, not equal coverage.
-Use the supplied numbered source units, each exactly once, in order. Group
-adjacent units into beats. Importance is 1 (context), 2 (quiet action), 3
-(meaningful change), 4 (turn), 5 (climax/reveal). Preserve the ending.
-Every visible.character_id and dialogue.speaker_id must EXACTLY match an id in
-the character bible or in this reply's characters array. For a new character,
-declare a unique short local id (c1, c2, c3), then reuse that exact ID in beats.
-Never use an undeclared ID or the schema placeholder as a character reference.
-Canonical characters have stable IDs. Reuse them for aliases; never create a
-second person for a narrator already named. New characters must have a name
-or noun phrase literally in this scene; never invent appearance or aliases.
-List in characters only people new to the bible, or a known person with a new
-literal alias; refer to everyone else by their bible id without repeating them.
-Keep a speaking character offscreen when only heard. Dialogue holds only words
-inside quotation marks, never narration. Attribute every quoted utterance; use
-null speaker_id when uncertain rather than guessing. Dialogue text must be an
-exact substring of the source. Do not paraphrase it.
-Beats describe visible action, location, tension, mood, and each visible
-character's expression and body language. Do not invent events. Distinguish
-what happens from how the frame conveys its emotional meaning.
-Character visual describes lasting identity only (face, hair, build, distinguishing
-features), never clothing, accessories, injury or wetness. Those belong in each
-visible actor's appearance: the COMPLETE current outfit and temporary condition,
-not a delta. Carry it forward until the source changes it; a changed dress REPLACES
-the old dress, never layers over it. Do not invent unspecified details.
-location_id is a stable descriptive key for the actual room/place; reuse on return.
-location_state describes current layout, important objects, lighting and weather.
-Carry unchanged facts forward, but replace facts changed by the story.
-"""
-
-
 VOICE_SYSTEM = """You cast an audiobook. Return only the requested JSON, compact on one line.
 Quoted speech in the passage is numbered like [3]“...”. For every number give the
 speaker's character id, or null when the text does not make the speaker clear.
@@ -161,28 +128,123 @@ def passages(source, max_words=450, max_units=8):
     return groups
 
 
-def instruction(group, characters, continuity=None):
-    schema = {
-        "title": "scene title", "summary": "causal/emotional meaning",
-        "characters": [{"id": "c1", "name": "literal source name",
-                        "aliases": [], "visual": "lasting face/hair/build only, no outfit",
-                        "voice": "voice direction"}],
-        "beats": [{"units": [0], "importance": 3, "action": "visible action",
-                   "setting": "location", "location_id": "stable room/place key",
-                   "location_state": "current layout, objects, light and weather", "mood": "emotional tone", "tension": 3,
-                   "visible": [{"character_id": "c1", "expression": "expression",
-                                "body_language": "pose", "appearance": "complete current outfit and temporary condition"}],
-                   "dialogue": [{"speaker_id": None, "text": "exact quoted words",
-                                 "offscreen": True}]}],
-    }
-    return ("For unnamed first-person narration only, canonical name Narrator is allowed. "
-            "Never use Narrator when a known character already narrates. "
-            "Do not group multiple people by shared third-person pronouns.\nCharacter bible:\n"
-            + json.dumps([{**c, "visual": c["visual"][:VISUAL_LIMIT]} for c in characters], ensure_ascii=False)
-            + "\nPrior continuity state (apply only unchanged facts):\n" + json.dumps(continuity or {}, ensure_ascii=False)
-            + "\nReturn this schema with one beat per meaningful moment:\n"
-            + json.dumps(schema, ensure_ascii=False)
-            + "\nNumbered source units:\n" + json.dumps(group, ensure_ascii=False))
+# The Board's analysis in as few written tokens as the drawing needs. The old
+# reply restated every quote, and every visible person's expression, pose and
+# full outfit in every beat: about 22 output tokens per word of story, which on
+# a laptop-sized writer is an hour for a long chapter before a panel is drawn.
+# Here quotes are numbered and attributed by number, outfits and rooms are
+# stated once per passage, and the reply is restated into the scene format so
+# `parse_scene` still applies every identity and source rule.
+COMPACT_SYSTEM = """You are a story editor and director. Return only the requested JSON,
+compact on one line with no indentation.
+Read the numbered source units for causality, dramatic turns and emotion. Group
+adjacent units into beats; use every unit exactly once, in order. importance is
+1 (context), 2 (quiet action), 3 (meaningful change), 4 (turn), 5 (climax/reveal).
+Quoted speech is numbered like [3]“...”. In speakers give, for each number, the
+speaker's id, or null when the text does not make the speaker clear.
+Use ids from the character bible. Declare in characters only people new to the
+bible (short local id c1, c2, with the name exactly as the source gives it), or
+a known person with a new literal alias. Never use a pronoun, a group, or a
+phrase describing someone as a name. For unnamed first-person narration the
+name Narrator is allowed; never when a known character already narrates.
+visual is lasting identity only (face, hair, build), never clothing.
+cast lists who is visible in a beat; keep someone only heard out of it. feel is
+their expression and pose in a few words.
+looks gives, once for this passage, each visible person's COMPLETE current outfit
+and condition; a change REPLACES the old outfit. Omit people whose look has not
+changed from the continuity state. places gives each place's layout, objects,
+light and weather once; place is a short stable name, reused when the story
+returns there. Do not invent events, appearance or details the source lacks.
+"""
+
+
+def compact_instruction(group, characters, continuity=None):
+    """Units with their quotes numbered, and only the continuity that matters."""
+    text = ''.join(u["text"] for u in group)
+    marks = {}
+    for n, (at, _) in enumerate(quotes(text), 1):
+        marks[at - 1 if at and text[at - 1] in '“"「' else at] = n
+    numbered, offset = [], 0
+    for u in group:
+        body = u["text"]
+        for at in sorted((a - offset for a in marks if offset <= a < offset + len(body)), reverse=True):
+            body = body[:at] + f"[{marks[at + offset]}]" + body[at:]
+        numbered.append({"id": u["id"], "text": body})
+        offset += len(u["text"])
+    continuity = continuity or {}
+    known = {c["id"] for c in characters}
+    state = {"looks": {k: v for k, v in continuity.get("characters", {}).items() if k in known},
+             "places": dict(list(continuity.get("locations", {}).items())[-6:])}
+    bible = [{**c, "visual": c["visual"][:VISUAL_LIMIT]} for c in characters]
+    schema = {"title": "scene title",
+              "characters": [{"id": "c1", "name": "literal source name", "aliases": [],
+                              "visual": "face, hair, build", "voice": "voice direction"}],
+              "looks": [{"id": "c1", "appearance": "complete current outfit and condition"}],
+              "places": [{"place": "kitchen", "state": "layout, objects, light, weather"}],
+              "beats": [{"units": [0, 1], "importance": 3, "action": "visible action", "place": "kitchen",
+                         "mood": "emotional tone", "cast": [{"id": "c1", "feel": "expression and pose"}]}],
+              "speakers": [{"quote": 1, "id": "c1"}]}
+    return ("Character bible:\n" + json.dumps(bible, ensure_ascii=False)
+            + "\nContinuity state:\n" + json.dumps(state, ensure_ascii=False)
+            + "\nReturn this schema:\n" + json.dumps(schema, ensure_ascii=False)
+            + "\nNumbered source units:\n" + json.dumps(numbered, ensure_ascii=False))
+
+
+def _place_key(place):
+    return re.sub(r'[^\w]+', '-', place.casefold()).strip('-')
+
+
+def compact_scene_reply(raw, group, continuity=None):
+    """A compact reply restated as a scene reply. A reply already in the scene
+    format (a larger writer may keep it) is passed through unchanged."""
+    raw = raw.strip()
+    if raw.startswith('```json') and raw.endswith('```'):
+        raw = raw[7:-3].strip()
+    reply = json.loads(raw)
+    if not isinstance(reply, dict):
+        raise ValueError("scene must be an object")
+    beats = _array(reply.get("beats"), "beats")
+    if "summary" in reply or any(isinstance(b, dict) and ("visible" in b or "setting" in b) for b in beats):
+        return raw
+    continuity = continuity or {}
+    looks = {l.get("id"): l.get("appearance") for l in _array(reply.get("looks", []), "looks")
+             if isinstance(l, dict) and isinstance(l.get("appearance"), str)}
+    places = {l.get("place"): l.get("state") for l in _array(reply.get("places", []), "places")
+              if isinstance(l, dict) and isinstance(l.get("state"), str)}
+    said = {}
+    for line in _array(reply.get("speakers", []), "speakers"):
+        if isinstance(line, dict) and type(line.get("quote")) is int:
+            who = line.get("id", line.get("speaker_id"))
+            said[line["quote"]] = who if isinstance(who, str) and who.strip() else None
+    text = ''.join(u["text"] for u in group)
+    spoken = [(at, quoted, said.get(n)) for n, (at, quoted) in enumerate(quotes(text), 1)]
+    starts = [sum(len(g["text"]) for g in group[:i]) for i in range(len(group) + 1)]
+    out = []
+    for beat in beats:
+        if not isinstance(beat, dict):
+            raise ValueError("each beat must be an object")
+        ids = _array(beat.get("units"), "units")
+        if not ids or any(type(n) is not int or n < 0 or n >= len(group) for n in ids):
+            raise ValueError("beat units must be valid source-unit numbers")
+        lo, hi = starts[ids[0]], starts[ids[-1] + 1]
+        place = beat.get("place") if isinstance(beat.get("place"), str) else ""
+        cast = [a for a in _array(beat.get("cast", []), "cast") if isinstance(a, dict)]
+        present = {a.get("id") for a in cast}
+        visible = [{"character_id": a.get("id"), "expression": str(a.get("feel") or "")[:300],
+                    "body_language": "",
+                    "appearance": looks.get(a.get("id")) or continuity.get("characters", {}).get(a.get("id"), "")}
+                   for a in cast]
+        importance = beat.get("importance")
+        out.append({"units": ids, "importance": importance, "tension": importance,
+                    "action": beat.get("action"), "setting": place, "location_id": _place_key(place),
+                    "location_state": places.get(place) or continuity.get("locations", {}).get(_place_key(place), ""),
+                    "mood": beat.get("mood") if isinstance(beat.get("mood"), str) else "",
+                    "visible": visible,
+                    "dialogue": [{"speaker_id": who, "text": quoted, "offscreen": who not in present}
+                                 for at, quoted, who in spoken if lo <= at < hi]})
+    title = reply.get("title") if isinstance(reply.get("title"), str) and reply["title"].strip() else "Scene"
+    return json.dumps({"title": title, "summary": title, "characters": reply.get("characters", []),
+                       "beats": out})
 
 
 def _text(value, field, empty=True):
@@ -450,11 +512,12 @@ def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: N
     for i, group in enumerate(groups):
         progress(i, len(groups))
         voice = mode == "voice"
-        prompt = voice_instruction(group, book["characters"]) if voice else instruction(group, book["characters"], continuity)
+        prompt = (voice_instruction(group, book["characters"]) if voice
+                  else compact_instruction(group, book["characters"], continuity))
         for attempt in range(2):
-            raw = write(VOICE_SYSTEM if voice else SCENE_SYSTEM, prompt)
+            raw = write(VOICE_SYSTEM if voice else COMPACT_SYSTEM, prompt)
             try:
-                reply = voice_scene_reply(raw, group, i + 1) if voice else raw
+                reply = voice_scene_reply(raw, group, i + 1) if voice else compact_scene_reply(raw, group, continuity)
                 scene, characters = parse_scene(reply, group, book["characters"], f"{chapter_id}-s{i + 1}")
                 break
             except (ValueError, TypeError, KeyError, AttributeError) as exc:

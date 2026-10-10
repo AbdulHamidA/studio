@@ -338,8 +338,8 @@ class WorkerIntegration(unittest.TestCase):
                 patch.object(story, 'passages', lambda s, **_: [[{**u, 'id': 0}] for u in story.units(s)]):
             worker.op_story_analyze('test-progress', {'source': source})
         self.assertEqual([(c['label'].split(' · ')[0], c['fraction'], c['max_tokens']) for c in calls],
-                         [('Understanding scene 1 of 2', 0.0, 3200), ('Understanding scene 1 of 2', 0.0, 4800),
-                          ('Understanding scene 2 of 2', 0.5, 3200)])
+                         [('Understanding scene 1 of 2', 0.0, 1800), ('Understanding scene 1 of 2', 0.0, 2700),
+                          ('Understanding scene 2 of 2', 0.5, 1800)])
 
     def test_a_hand_added_panel_keeps_the_board_on_the_story_path(self):
         import worker
@@ -350,6 +350,17 @@ class WorkerIntegration(unittest.TestCase):
             result = worker.op_enrich_panels('test-enrichment', {'panels': panels + [plain]})['panels']
         self.assertEqual([p.get('place_key') for p in result[:-1]], [p['place_key'] for p in panels])
         self.assertIn('cold light', result[-1]['description'])
+
+    def test_lighting_is_written_once_per_place_and_mood(self):
+        import worker
+        book = example()
+        panels = story.direct(book, book['chapters'][0]['id'])
+        places = {(p['place_key'], p['mood']) for p in panels}
+        with patch.object(worker, '_write', return_value='{"lighting":"cold light","surfaces":"stone"}') as write:
+            result = worker.op_enrich_panels('test-enrichment', {'panels': panels})['panels']
+        self.assertEqual(write.call_count, len(places))
+        self.assertLess(len(places), len(panels))
+        self.assertTrue(all('cold light' in p['description'] for p in result))
 
     def test_switching_analysts_unloads_the_previous_writer_before_loading(self):
         import sys
@@ -402,7 +413,7 @@ class AppearanceContinuity(unittest.TestCase):
         for beat in book["chapters"][0]["scenes"][0]["beats"]:
             story._remember_state(state, beat)
         self.assertEqual(list(state["characters"].values()), ["blue dress"])
-        self.assertIn("blue dress", story.instruction(story.passages("Mira leaves.")[0], book["characters"], state))
+        self.assertIn("blue dress", story.compact_instruction(story.passages("Mira leaves.")[0], book["characters"], state))
 
 
 class NeuralNarration(unittest.TestCase):
@@ -747,7 +758,57 @@ class VoiceAnalysis(unittest.TestCase):
             return json.dumps({"mood": "calm", "characters": [], "speakers": []})
         with patch.object(worker, '_write', side_effect=write):
             result = worker.op_story_analyze('test-voice', {'source': source, 'mode': 'voice'})
-        # 120 sentences: two voice calls, where full analysis makes thirty.
+        # 120 sentences: two voice calls, where full analysis makes fifteen.
         self.assertEqual(budgets, [1000, 1000])
-        self.assertEqual(len(story.passages(source, max_words=250, max_units=4)), 30)
+        self.assertEqual(len(story.passages(source, max_words=450, max_units=8)), 15)
         self.assertEqual(result['book']['chapters'][0]['analysis'], 'voice')
+
+
+class CompactBoardAnalysis(unittest.TestCase):
+    SOURCE = ('Agnes Thorne waited in her kitchen in a grey apron. “You’re late,” she said.\n\n'
+              '“The ferry was early,” I said. Tam poured tea without a word.')
+
+    def reply(self):
+        return {"title": "Arrival",
+                "characters": [{"id": "c1", "name": "Agnes Thorne", "aliases": [], "visual": "broad", "voice": "gruff"},
+                               {"id": "c2", "name": "Narrator", "aliases": [], "visual": "", "voice": ""},
+                               {"id": "c3", "name": "Tam", "aliases": [], "visual": "boy", "voice": ""}],
+                "looks": [{"id": "c1", "appearance": "grey apron"}],
+                "places": [{"place": "Agnes's kitchen", "state": "tar and oranges, storm outside"}],
+                "beats": [{"units": [0, 1], "importance": 3, "action": "Agnes scolds", "place": "Agnes's kitchen",
+                           "mood": "wry", "cast": [{"id": "c1", "feel": "arms folded"}]},
+                          {"units": [2, 3], "importance": 2, "action": "Tam pours tea", "place": "Agnes's kitchen",
+                           "mood": "quiet", "cast": [{"id": "c3", "feel": "eyes down"}]}],
+                "speakers": [{"quote": 1, "id": "c1"}, {"quote": 2, "id": "c2"}]}
+
+    def test_quotes_are_numbered_inside_their_units(self):
+        group = story.passages(self.SOURCE)[0]
+        prompt = story.compact_instruction(group, [])
+        units = json.loads(prompt.split('Numbered source units:\n')[1])
+        self.assertIn('[1]“You’re late,”', units[1]['text'])
+        self.assertIn('[2]“The ferry was early,”', ''.join(u['text'] for u in units))
+
+    def test_compact_reply_becomes_a_full_valid_scene(self):
+        book = story.analyze(self.SOURCE, lambda *_: json.dumps(self.reply()))
+        chapter = book['chapters'][0]
+        people = {c['id']: c['name'] for c in book['characters']}
+        beats = chapter['scenes'][0]['beats']
+        self.assertEqual([[(people[d['speaker_id']], d['text'], d['offscreen']) for d in b['dialogue']] for b in beats],
+                         [[('Agnes Thorne', 'You’re late,', False)], [('Narrator', 'The ferry was early,', True)]])
+        self.assertEqual(beats[0]['visible'][0]['appearance'], 'grey apron')
+        self.assertEqual(beats[1]['location_state'], 'tar and oranges, storm outside')
+        self.assertEqual({b['location_id'] for b in beats}, {'agnes-s-kitchen'})
+        panels = story.direct(book, chapter['id'])
+        self.assertEqual(''.join(p['source'] for p in panels), self.SOURCE)
+        self.assertEqual(panels[0]['cast'][0]['expression'], 'arms folded')
+
+    def test_unchanged_looks_and_places_carry_over_from_continuity(self):
+        book = story.analyze(self.SOURCE, lambda *_: json.dumps(self.reply()))
+        agnes = next(c['id'] for c in book['characters'] if c['name'] == 'Agnes Thorne')
+        later = {"title": "Later", "characters": [], "looks": [], "places": [],
+                 "beats": [{"units": [0], "importance": 2, "action": "Agnes sits", "place": "Agnes's kitchen",
+                            "mood": "calm", "cast": [{"id": agnes, "feel": "tired"}]}], "speakers": []}
+        book = story.analyze('Agnes sat down.', lambda *_: json.dumps(later), previous=book)
+        beat = book['chapters'][1]['scenes'][0]['beats'][0]
+        self.assertEqual(beat['visible'][0]['appearance'], 'grey apron')
+        self.assertEqual(beat['location_state'], 'tar and oranges, storm outside')

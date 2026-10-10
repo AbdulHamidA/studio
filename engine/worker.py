@@ -3964,31 +3964,40 @@ def op_enrich_panels(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
     # whose cast was cleared, used to send every panel down the legacy path,
     # which rewrites `place`/`place_key` and breaks location continuity.
     if any("cast" in p for p in panels):
-        out = []
-        for i, panel in enumerate(panels):
+        # Light and surfaces belong to a place in a mood, not to a panel: one
+        # writer call per pair, shared by every panel there. Per panel, a
+        # long chapter's ~300 panels cost ~40 minutes before anything was drawn.
+        def where(panel):
+            return (panel.get("place_key") or str(panel.get("setting") or "").casefold(),
+                    str(panel.get("mood") or "").casefold())
+        keys = list(dict.fromkeys(where(p) for p in panels))
+        lit: dict[Any, str | None] = {}
+        for n, key in enumerate(keys):
             if is_cancelled(req_id):
                 raise Cancelled()
+            panel = next(p for p in panels if where(p) == key)
             emit({"id": req_id, "type": "progress", "phase": "denoise",
-                  "progress": i / len(panels), "message": f"Lighting panel {i + 1} of {len(panels)}"})
+                  "progress": n / len(keys), "message": f"Lighting place {n + 1} of {len(keys)}"})
             try:
                 raw = _write(req_id,
                     'Return only JSON {"lighting": string, "surfaces": string}. '
                     'Describe visible light and surfaces matching the mood and setting. '
                     'Do not repeat or change characters, actions, dialogue, or camera framing.',
                     json.dumps({"setting": panel.get("setting"), "mood": panel.get("mood"),
-                                "tension": panel.get("tension"), "shot": panel.get("shot"),
-                                "style": req.get("style")}),
-                    max_tokens=240, repo=req.get("writer"), label="Lighting the panel")
+                                "state": panel.get("location_state"), "style": req.get("style")}),
+                    max_tokens=240, repo=req.get("writer"), label="Lighting the panel",
+                    fraction=n / len(keys))
                 surface = json.loads(raw)
                 if not isinstance(surface, dict) or any(not isinstance(surface.get(k), str) for k in ("lighting", "surfaces")):
                     raise ValueError("invalid lighting description")
-                out.append({**panel, "description": ". ".join(surface[k] for k in ("lighting", "surfaces") if surface[k])})
+                lit[key] = ". ".join(surface[k] for k in ("lighting", "surfaces") if surface[k])
             except Cancelled:
                 raise
             except Exception as exc:
-                log(req_id, f"panel {i + 1} keeps its original structured brief: {exc}", "warn")
-                out.append(panel)
-        return {"panels": out}
+                log(req_id, f"place {n + 1} keeps its original structured brief: {exc}", "warn")
+                lit[key] = None
+        return {"panels": [{**p, "description": lit[where(p)]} if lit[where(p)] is not None else p
+                           for p in panels]}
 
     style = (req.get("style") or "").strip()
     writer = req.get("writer")
@@ -6937,15 +6946,19 @@ def op_story_analyze(req_id, req):
         # A repair carries the failed reply as well; a reply cut off at the
         # first budget would be cut off again at the same one.
         repair = "Your previous reply failed validation" in user
-        budget = (1000, 1600) if voice else (3200, 4800)
+        # A compact reply runs to a few hundred tokens; the ceiling only stops
+        # a writer that has started repeating itself, which at 3,200 tokens
+        # cost minutes per scene.
+        budget = (1000, 1600) if voice else (1800, 2700)
         return _write(req_id, system, user, max_tokens=budget[repair],
                       temperature=0.2, repo=req.get("writer"), label=where["label"],
                       fraction=where["fraction"])
     def warn(message):
         log(req_id, message, "warn")
     # A voice reply is a few tokens per quote, so a passage can be far longer
-    # than one whose every beat is described for drawing.
-    words, units = (700, 60) if voice else (250, 4) if small else (450, 8)
+    # than one whose every beat is directed for drawing. Compact replies let
+    # the small writer take twice the four sentences it once could.
+    words, units = (700, 60) if voice else (450, 8) if small else (600, 12)
     book = story_model.analyze(req.get("source"), write,
         previous=req.get("previous"), title=req.get("title", "Chapter"), progress=progress,
         passage_words=words, passage_units=units, warn=warn, mode=mode)
