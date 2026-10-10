@@ -339,10 +339,17 @@ export default function App() {
   // Idle auto-lock. Leaving a machine unattended is the failure mode an
   // at-rest-encrypted vault is otherwise powerless against.
   const timer = useRef<number | undefined>(undefined);
+  const warnTimer = useRef<number | undefined>(undefined);
+  // A minute's notice: the lock unmounts every screen, so an unsaved prompt
+  // or a half-edited panel would otherwise vanish without warning.
+  const [lockSoon, setLockSoon] = useState(false);
   useEffect(() => {
     if (!ready) return;
     const reset = () => {
       window.clearTimeout(timer.current);
+      window.clearTimeout(warnTimer.current);
+      setLockSoon(false);
+      warnTimer.current = window.setTimeout(() => setLockSoon(true), IDLE_LOCK_MS - 60_000);
       timer.current = window.setTimeout(async () => {
         try {
           setVault(await api.vaultLock());
@@ -359,6 +366,7 @@ export default function App() {
     reset();
     return () => {
       window.clearTimeout(timer.current);
+      window.clearTimeout(warnTimer.current);
       events.forEach((e) => window.removeEventListener(e, reset));
     };
   }, [ready, notify]);
@@ -671,6 +679,13 @@ export default function App() {
             />
           )}
         </div>
+        {lockSoon && (
+          <div className="notice warn lock-soon" role="alert">
+            The vault locks in a minute to protect your work while you are away.
+            <button type="button" className="btn small primary"
+              onClick={() => window.dispatchEvent(new Event("modelstudio:activity"))}>Stay unlocked</button>
+          </div>
+        )}
         {track && (
           <section className="now-playing" aria-label="Now playing">
             <AudioPlayer key={track.src} src={track.src} title={track.title} markers={track.markers ?? []} autoPlay />

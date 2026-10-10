@@ -975,3 +975,4 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 }
 .now-playing > :first-child { flex: 1; min-width: 0; }
 .field-error { font-size: var(--fs-small); color: var(--bad); margin-top: var(--sp-1); }
+.lock-soon { display: flex; align-items: center; gap: var(--sp-3); margin: 0 var(--sp-4) var(--sp-2); }
