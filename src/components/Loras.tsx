@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, errText, fmtBytes, newJobId } from "../lib/api";
 import type { Lora, ResolvedLora } from "../lib/types";
+import Field from "./Field";
 
 /**
  * Style and task adapters.
@@ -24,6 +25,23 @@ export default function Loras({
   const [found, setFound] = useState<ResolvedLora | null>(null);
   const [file, setFile] = useState("");
   const [busy, setBusy] = useState(false);
+  /**
+   * Which adapter's removal is waiting for a yes.
+   *
+   * Removing was only offered once an adapter was switched on, and then
+   * happened on one click -- so an unused adapter could not be removed at
+   * all, and a used one could be lost by a slip.
+   */
+  const [confirming, setConfirming] = useState<string | null>(null);
+
+  const remove = async (l: Lora) => {
+    setConfirming(null);
+    try {
+      setInstalled(await api.removeLora(l.handle));
+      onSelectedChange(selected.filter(([h]) => h !== l.handle));
+      notify(`Removed ${l.name}.`);
+    } catch (e) { notify(errText(e), true); }
+  };
 
   const refresh = async () => {
     try { setInstalled(await api.listLoras()); } catch { /* none yet */ }
@@ -65,7 +83,7 @@ export default function Loras({
       <h2>Style adapters</h2>
 
       {installed.length === 0 && !adding && (
-        <div style={{ fontSize: 11.5, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 10 }}>
           None yet. Adapters are usually tens of megabytes and change how a
           model draws — a look, a medium, or a specific task.
         </div>
@@ -74,39 +92,37 @@ export default function Loras({
       {installed.map((l) => {
         const active = selected.find(([h]) => h === l.handle);
         return (
-          <div key={l.handle} style={{ marginBottom: 10 }}>
-            <label style={{ cursor: "pointer" }}>
-              <span>
-                <input
-                  type="checkbox" checked={!!active} style={{ width: "auto", marginRight: 6 }}
-                  onChange={() => toggle(l)}
-                />
+          <div key={l.handle} className="lora">
+            <div className="lora-head">
+              <label className="check">
+                <input type="checkbox" checked={!!active} onChange={() => toggle(l)} />
                 {l.name}
-              </span>
-              <em>{fmtBytes(l.bytes)}</em>
-            </label>
+              </label>
+              <span className="t-help">{fmtBytes(l.bytes)}</span>
+              {confirming === l.handle ? (
+                <span className="lora-confirm" role="group" aria-label={`Remove ${l.name}?`}>
+                  <span className="t-note">Remove?</span>
+                  <button className="btn small danger" onClick={() => void remove(l)}>
+                    Remove {fmtBytes(l.bytes)}
+                  </button>
+                  <button className="btn small" autoFocus onClick={() => setConfirming(null)}>Keep</button>
+                </span>
+              ) : (
+                <button className="btn small" aria-label={`Remove ${l.name}`}
+                  onClick={() => setConfirming(l.handle)}>
+                  Remove
+                </button>
+              )}
+            </div>
             {active && (
-              <>
+              <Field className="field tight"
+                label={<>Strength for {l.name} <em aria-hidden="true">{active[1].toFixed(2)}</em></>}>
                 <input
                   type="range" min={0} max={1.5} step={0.05} value={active[1]}
+                  aria-valuetext={`strength ${active[1].toFixed(2)}`}
                   onChange={(e) => setStrength(l.handle, +e.target.value)}
-                  style={{ marginTop: 5 }}
                 />
-                <div style={{ display: "flex", justifyContent: "space-between",
-                              fontSize: 10.5, color: "var(--text-faint)" }}>
-                  <span>strength {active[1].toFixed(2)}</span>
-                  <button
-                    className="btn small"
-                    style={{ padding: "1px 7px", fontSize: 10 }}
-                    onClick={async () => {
-                      try {
-                        setInstalled(await api.removeLora(l.handle));
-                        onSelectedChange(selected.filter(([h]) => h !== l.handle));
-                      } catch (e) { notify(errText(e), true); }
-                    }}
-                  >Forget</button>
-                </div>
-              </>
+              </Field>
             )}
           </div>
         );
@@ -114,21 +130,19 @@ export default function Loras({
 
       {adding ? (
         <>
-          <div className="field">
-            <label>Adapter repository</label>
+          <Field label="Adapter repository" hint="A Hugging Face repo id, like owner/name.">
             <input
               type="text" value={repo} spellCheck={false} autoFocus
               placeholder="fal/flux-2-klein-4B-outpaint-lora"
               onChange={(e) => { setRepo(e.target.value); setFound(null); }}
               onKeyDown={(e) => { if (e.key === "Enter" && repo.length > 2) void check(); }}
             />
-          </div>
+          </Field>
 
           {found && found.files.length > 0 && (
             <>
               {found.files.length > 1 && (
-                <div className="field">
-                  <label>Which adapter</label>
+                <Field label="Which adapter">
                   <select value={file} onChange={(e) => setFile(e.target.value)}>
                     {found.files.map((f) => (
                       <option key={f.name} value={f.name}>
@@ -136,7 +150,7 @@ export default function Loras({
                       </option>
                     ))}
                   </select>
-                </div>
+                </Field>
               )}
               {found.not_an_adapter ? (
                 // Checked before the download, not after. Nothing used to

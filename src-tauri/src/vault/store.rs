@@ -155,6 +155,12 @@ fn derive_kek(passphrase: &str, kdf: &KdfParams) -> Result<[u8; 32], VaultError>
 // Index
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct AudioMarker {
+    pub time: f64,
+    pub label: String,
+}
+
 // `Default` so a caller states only the provenance it actually knows. An
 // import has no seed and no adapters; a generation has all of it.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -213,6 +219,11 @@ pub struct VaultItem {
     /// which is honestly unknown provenance rather than membership.
     #[serde(default)]
     pub composition: Option<String>,
+
+    /// Where each scene begins in a narrated chapter, for the player to jump
+    /// between. Empty for everything that is not an audiobook.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<AudioMarker>,
 
     // ---- How this was actually made -------------------------------------
     //
@@ -658,10 +669,17 @@ impl Vault {
     /// Write the index, keeping one previous copy.
     ///
     /// The index is the only record of what every blob *is*: lose it and the
-    /// content is still decryptable but anonymous. Rotating a `.bak` costs one
-    /// rename and turns a corrupt write from total metadata loss into the loss
-    /// of whatever changed since the last save.
+    /// content is still decryptable but anonymous. Keeping a `.bak` turns a
+    /// corrupt write from total metadata loss into the loss of whatever
+    /// changed since the last save.
+    ///
+    /// The live file is never moved out of the way: the backup is a copy, and
+    /// the new index replaces the old one in a single rename once its bytes
+    /// are flushed. Renaming `index.enc` to `.bak` first left a window in
+    /// which a crash meant no `index.enc` at all, which read back as an empty
+    /// library and was then saved over the good backup.
     fn write_index(&self, dek: &[u8; 32], index: &Index) -> Result<(), VaultError> {
+        use std::io::Write;
         let mut plain =
             serde_json::to_vec(index).map_err(|e| VaultError::Corrupt(e.to_string()))?;
         let sealed = crypto::seal(dek, &plain);
@@ -669,36 +687,60 @@ impl Vault {
 
         let path = self.index_path();
         let tmp = path.with_extension("enc.tmp");
-        std::fs::write(&tmp, &sealed)?;
+        {
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(&sealed)?;
+            file.sync_all()?;
+        }
 
         if path.exists() {
-            let backup = path.with_extension("enc.bak");
             // A failed backup must not block the write; the new index is still
             // strictly better than no write at all.
-            let _ = std::fs::rename(&path, &backup);
+            let _ = self.copy_durably(&path, &self.index_backup_path());
         }
         std::fs::rename(&tmp, &path)?;
+        // Best-effort, as for the manifest: the data itself is already flushed.
+        let _ = std::fs::File::open(&self.root).and_then(|dir| dir.sync_all());
         Ok(())
     }
 
+    fn index_backup_path(&self) -> PathBuf {
+        self.index_path().with_extension("enc.bak")
+    }
+
+    /// Copy `from` over `to` through a flushed temporary file, so `to` is
+    /// always either the old backup or the complete new one.
+    fn copy_durably(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        let tmp = to.with_extension("bak.tmp");
+        std::fs::copy(from, &tmp)?;
+        std::fs::File::open(&tmp)?.sync_all()?;
+        std::fs::rename(&tmp, to)
+    }
+
     fn read_index_with_fallback(&self, dek: &[u8; 32]) -> Result<Index, VaultError> {
-        match self.read_index(dek) {
-            Ok(i) => Ok(i),
-            Err(primary) => {
-                let backup = self.index_path().with_extension("enc.bak");
-                if !backup.exists() {
-                    return Err(primary);
-                }
-                // The live index is unreadable. The previous one loses only the
-                // most recent change, which beats losing every name and prompt.
-                let sealed = std::fs::read(&backup)?;
-                let plain = crypto::open(dek, &sealed)?;
-                let index: Index = serde_json::from_slice(&plain)
-                    .map_err(|e| VaultError::Corrupt(e.to_string()))?;
-                eprintln!("vault: index was unreadable ({primary}); recovered the backup");
-                Ok(index)
+        let backup = self.index_backup_path();
+        // A missing live index next to a backup is an interrupted write, not
+        // an empty library. Reading it as empty would show no items and the
+        // next save would rotate the only good copy away.
+        let primary = if self.index_path().exists() || !backup.exists() {
+            match self.read_index(dek) {
+                Ok(i) => return Ok(i),
+                Err(e) => e,
             }
+        } else {
+            VaultError::Corrupt("index.enc is missing".into())
+        };
+        if !backup.exists() {
+            return Err(primary);
         }
+        // The live index is unreadable. The previous one loses only the
+        // most recent change, which beats losing every name and prompt.
+        let sealed = std::fs::read(&backup)?;
+        let plain = crypto::open(dek, &sealed)?;
+        let index: Index =
+            serde_json::from_slice(&plain).map_err(|e| VaultError::Corrupt(e.to_string()))?;
+        eprintln!("vault: index was unreadable ({primary}); recovered the backup");
+        Ok(index)
     }
 
     fn with_unlocked<T>(
@@ -850,6 +892,54 @@ impl Vault {
             }
             let sealed = std::fs::read(&path)?;
             Ok(crypto::open(&u.dek, &sealed)?)
+        })
+    }
+
+    /// Plaintext length of an item, read from its header and file size.
+    pub fn plain_len(&self, id: &str) -> Result<u64, VaultError> {
+        Self::validate_id(id)?;
+        self.with_unlocked(|_| {
+            let mut file = std::fs::File::open(self.blob_path(id))
+                .map_err(|_| VaultError::NoSuchItem(id.to_string()))?;
+            let mut header = [0u8; crypto::HEADER_LEN];
+            std::io::Read::read_exact(&mut file, &mut header)?;
+            Ok(crypto::sealed_layout(&header, file.metadata()?.len())?.0)
+        })
+    }
+
+    /// Bytes `start..=end` of an item, decrypting only the chunks they span.
+    ///
+    /// Media playback asks for ranges on every seek. Decrypting a whole
+    /// three-hour narration for each of them cost hundreds of megabytes of
+    /// work and memory per request.
+    pub fn get_range(&self, id: &str, start: u64, end: u64) -> Result<Vec<u8>, VaultError> {
+        use std::io::{Read, Seek, SeekFrom};
+        Self::validate_id(id)?;
+        self.with_unlocked(|u| {
+            if !u.index.items.iter().any(|item| item.id == id) {
+                return Err(VaultError::NoSuchItem(id.to_string()));
+            }
+            let mut file = std::fs::File::open(self.blob_path(id))
+                .map_err(|_| VaultError::NoSuchItem(id.to_string()))?;
+            let mut header = [0u8; crypto::HEADER_LEN];
+            file.read_exact(&mut header)?;
+            let (plain, chunk, n_chunks) = crypto::sealed_layout(&header, file.metadata()?.len())?;
+            if start > end || end >= plain {
+                return Err(VaultError::Corrupt("range outside the item".into()));
+            }
+            let (first, last) = (start / chunk, end / chunk);
+            let sealed_chunk = chunk + crypto::TAG_LEN as u64;
+            file.seek(SeekFrom::Start(
+                crypto::HEADER_LEN as u64 + first * sealed_chunk,
+            ))?;
+            let mut sealed = Vec::new();
+            file.take((last - first + 1) * sealed_chunk)
+                .read_to_end(&mut sealed)?;
+            let mut opened = crypto::open_chunks(&u.dek, &header, &sealed, first, n_chunks)?;
+            let from = (start - first * chunk) as usize;
+            let bytes = opened[from..from + (end - start + 1) as usize].to_vec();
+            opened.zeroize();
+            Ok(bytes)
         })
     }
 
@@ -1096,6 +1186,40 @@ mod tests {
     }
 
     #[test]
+    fn range_reads_match_the_whole_item_and_still_detect_truncation() {
+        let root = scratch("range");
+        let vault = Vault::new(root.clone());
+        vault.create("a long test passphrase", false).unwrap();
+        let chunk = crypto::CHUNK_SIZE as u64;
+        let data: Vec<u8> = (0..chunk * 3 + 1234)
+            .map(|i| (i * 31 % 251) as u8)
+            .collect();
+        let id = vault.put(&data, an_item("narration.wav")).unwrap();
+        assert_eq!(vault.plain_len(&id).unwrap(), data.len() as u64);
+        let last = data.len() as u64 - 1;
+        for (a, b) in [
+            (0, 1),
+            (0, last),
+            (chunk - 1, chunk),
+            (chunk * 2 + 5, chunk * 3 + 9),
+            (last, last),
+        ] {
+            assert_eq!(
+                vault.get_range(&id, a, b).unwrap(),
+                data[a as usize..=b as usize]
+            );
+        }
+        assert!(vault.get_range(&id, 0, last + 1).is_err());
+        // Cut at a chunk boundary: the new last chunk was not sealed as final.
+        let path = vault.blob_path(&id);
+        let sealed = std::fs::read(&path).unwrap();
+        let cut = crypto::HEADER_LEN + 3 * (chunk as usize + crypto::TAG_LEN);
+        std::fs::write(&path, &sealed[..cut]).unwrap();
+        assert!(vault.get_range(&id, chunk * 2, chunk * 2 + 1).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn rejects_blob_ids_that_are_paths() {
         for id in ["../vault.json", "/tmp/file", "not-a-uuid"] {
             assert!(Vault::validate_id(id).is_err(), "accepted {id}");
@@ -1210,6 +1334,31 @@ mod tests {
         );
         vault.unlock_with_passphrase("a longer new one").unwrap();
         assert_eq!(vault.get(&id).unwrap(), b"still readable");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A crash between moving the live index aside and renaming the new one
+    /// in left no `index.enc`, which used to read back as an empty library.
+    #[test]
+    fn missing_index_is_recovered_from_the_backup() {
+        let root = scratch("index-crash");
+        let vault = Vault::new(root.clone());
+        vault.create("a long test passphrase", false).unwrap();
+        let first = vault.put(b"first", an_item("a.png")).unwrap();
+        let second = vault.put(b"second", an_item("b.png")).unwrap();
+        // Writes keep the live file in place and leave a copy behind.
+        assert!(vault.index_path().exists());
+        assert!(vault.index_backup_path().exists());
+
+        // Simulate the crash window: only the backup survives.
+        std::fs::rename(vault.index_path(), vault.index_backup_path()).unwrap();
+        vault.lock();
+        vault
+            .unlock_with_passphrase("a long test passphrase")
+            .unwrap();
+        let items = vault.list().unwrap();
+        assert!(!items.is_empty(), "the library came back empty");
+        assert!(items.iter().any(|i| i.id == first || i.id == second));
         let _ = std::fs::remove_dir_all(root);
     }
 }

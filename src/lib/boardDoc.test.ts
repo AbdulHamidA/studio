@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   anchorOverflow, artOf, edit, fromArrays, identify, insert, merge, move,
-  prune, remove, setArt, split, staleness, toArrays,
+  prune, remove, replan, setArt, split, staleness, toArrays,
 } from "./boardDoc";
 import type { Panel } from "./types";
 
@@ -286,5 +286,20 @@ describe("an overflow report follows its panel", () => {
     const sent = doc.panels.map((p) => p.id);
     const { doc: after } = remove(doc, doc.panels[1].id);
     expect(anchorOverflow([report(1)], sent, after)).toEqual([]);
+  });
+});
+
+
+describe("replan", () => {
+  const p = (beat: string, caption = ""): Panel => ({ shot: "wide", subject: "", action: "", setting: "",
+    character_in_frame: false, caption, beat_id: beat });
+  it("keeps the picture and note of every unchanged beat's frames and starts new ones empty", () => {
+    let doc = fromArrays([p("b1"), p("b1"), p("stub")], ["img1", "img2", "img3"], [], { 1: "keep" });
+    doc = replan(doc, [p("b1", "new caption"), p("b1"), p("b2"), p("b3")]);
+    const arrays = toArrays(doc);
+    expect(arrays.drawn).toEqual(["img1", "img2", null, null]);
+    expect(arrays.notes[1]).toBe("keep");
+    expect(doc.panels[0].caption).toBe("new caption");
+    expect(new Set(doc.panels.map((x) => x.id)).size).toBe(4);
   });
 });

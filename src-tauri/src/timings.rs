@@ -82,6 +82,11 @@ pub fn get_for(paths: &AppPaths, model_id: &str, has_reference: bool) -> Option<
 /// experiences includes loading the model, so a first run legitimately reads
 /// slower than a warm one. Weighting recent runs more heavily lets the number
 /// settle on the warm case, which is what most runs will be.
+/// Runs needed before a sample can be judged against the average.
+const OUTLIER_MIN_RUNS: u32 = 3;
+/// How many times slower than the average a run may be and still count.
+const OUTLIER_FACTOR: f32 = 5.0;
+
 #[allow(clippy::too_many_arguments)] // one call site; a struct would only add indirection
 pub fn record_for(
     paths: &AppPaths,
@@ -115,6 +120,14 @@ pub fn record_for(
     let denom = (steps.max(1) as f32) * mpx.max(0.01) * (images.max(1) as f32);
     if denom > 0.0 && generate_ms > 0 {
         let observed = generate_ms as f32 / denom;
+        // A run that sat behind a swapping machine, a sleep, or a stalled
+        // download is not a measurement of the model. One such sample at
+        // 16,137,420 ms/step/Mpx against a ~47k average pulled the estimate up
+        // by a third of itself and set the worst case for good. Once there is
+        // an average to compare with, a wildly slower run is left out.
+        if entry.runs >= OUTLIER_MIN_RUNS && observed > entry.ms_per_step_mpx * OUTLIER_FACTOR {
+            return save(paths, &table);
+        }
         entry.runs += 1;
         entry.worst_ms_per_step_mpx = entry.worst_ms_per_step_mpx.max(observed);
         entry.ms_per_step_mpx = if entry.runs == 1 {
@@ -170,6 +183,32 @@ mod tests {
             0,
         )
         .unwrap();
+    }
+
+    /// A single run that stalled for hours used to drag the average up by a
+    /// third and fix the worst case there for good.
+    #[test]
+    fn a_wild_outlier_is_left_out_once_there_is_an_average() {
+        let scratch = Scratch::new();
+        let paths = scratch.paths();
+
+        for _ in 0..3 {
+            run(&paths, false, 10_000); // 1000 ms per step per Mpx
+        }
+        run(&paths, false, 10_000 * 300);
+
+        let rate = get(&paths, "flux1-dev-4bit").unwrap();
+        assert_eq!(rate.runs, 3, "the outlier was counted");
+        assert!(
+            (rate.ms_per_step_mpx - 1000.0).abs() < 1.0,
+            "{}",
+            rate.ms_per_step_mpx
+        );
+        assert!((rate.worst_ms_per_step_mpx - 1000.0).abs() < 1.0);
+
+        // A slower run within reason still counts.
+        run(&paths, false, 30_000);
+        assert_eq!(get(&paths, "flux1-dev-4bit").unwrap().runs, 4);
     }
 
     /// The defect: board panels are conditioned on reference images and cost

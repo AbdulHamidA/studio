@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Model Studio",
-  "version": "0.3.0-preview.2",
+  "version": "0.3.0-preview.3",
   "identifier": "com.melp.modelstudio",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -17,6 +17,7 @@
         "height": 840,
         "minWidth": 960,
         "minHeight": 640,
+        "zoomHotkeysEnabled": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true
       }
@@ -45,7 +46,8 @@
       "../engine/worker.py": "engine/worker.py",
       "../engine/vaultcrypto.py": "engine/vaultcrypto.py",
       "../engine/story.py": "engine/story.py",
-      "../engine/audiobook.py": "engine/audiobook.py"
+      "../engine/audiobook.py": "engine/audiobook.py",
+      "../engine/kokoro-requirements.lock": "engine/kokoro-requirements.lock"
     }
   }
 }

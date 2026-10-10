@@ -145,6 +145,8 @@ export interface VaultItem {
    * unknown provenance rather than membership.
    */
   composition?: string | null;
+  /** Where each scene begins in a narrated chapter. */
+  markers?: { time: number; label: string }[];
 
   /**
    * How this was actually made.

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errText, isCancelled, newJobId, onEngineProgress, vaultUrl } from "../lib/api";
-import { ANALYST_IDS, SPEECH_MODEL_ID, keepBook, type AudioSettings, type StoryLibrary } from "../lib/story";
+import { ANALYST_IDS, KOKORO_MODEL_ID, SPEECH_MODEL_ID, keepBook, unanalysedIn, voiceGroups, voiceLabel, type AudioSettings, type StoryLibrary } from "../lib/story";
 import type { EngineProgress, ModelStatus } from "../lib/types";
 import { JobProgress } from "./shared";
+import { useNowPlaying } from "../lib/nowPlaying";
 
 export default function Audiobook({ library, models, notify, onLibraryChange, onProduced }: {
   library: StoryLibrary | null;
@@ -11,6 +12,7 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
   onLibraryChange: (update: (current: StoryLibrary) => StoryLibrary) => Promise<void>;
   onProduced: () => void;
 }) {
+  const nowPlaying = useNowPlaying();
   const [bookId, setBookId] = useState("");
   const [chapterId, setChapterId] = useState("");
   const [source, setSource] = useState("");
@@ -28,10 +30,18 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
   const book = library?.books.find((b) => b.id === (bookId || library.activeBookId)) ?? library?.books.at(-1);
   const chapter = book?.chapters.find((c) => c.id === chapterId) ?? book?.chapters.at(-1);
   const saved = book && library?.audio?.[book.id];
-  const settings: AudioSettings = saved ?? { narrator: "", voices: {}, rate: 160, outputs: {} };
+  // Edits show at once and are saved shortly after. Bound straight to the
+  // library, every keystroke waited on an encrypted write, so typed letters
+  // were dropped and the pace slider snapped back.
+  const [draft, setDraft] = useState<Partial<AudioSettings>>({});
+  const settings: AudioSettings = { ...(saved ?? { narrator: "", voices: {}, rate: 160, outputs: {} }), ...draft };
   const speechModel = settings.model_id || SPEECH_MODEL_ID;
-  const neural = speechModel !== "macos";
-  const speechReady = !neural || models.some((m) => m.id === speechModel && m.installed && !m.hopeless);
+  // Language, delivery and per-character direction are Qwen3-TTS's; Kokoro
+  // and macOS voices take pace only.
+  const neural = speechModel === SPEECH_MODEL_ID;
+  const speechReady = speechModel === "macos" || models.some((m) => m.id === speechModel && m.installed && !m.hopeless);
+  const voiceOptions = voiceGroups(voices).map(([label, list]) => <optgroup key={label} label={label}>
+    {list.map((v) => <option key={v.id} value={v.id}>{voiceLabel(v.id)}</option>)}</optgroup>);
   useEffect(() => {
     let live = true;
     setVoices([]); setVoiceError("");
@@ -42,17 +52,94 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
   const narrator = voices.some((v) => v.id === settings.narrator) ? settings.narrator : voices[0]?.id || "";
   const assignedVoices = Object.fromEntries(Object.entries(settings.voices).filter(([, voice]) => voices.some((v) => v.id === voice)));
   const outputs = chapter ? settings.outputs[chapter.id] ?? [] : [];
+  const linesBy: Record<string, number> = {};
+  for (const line of chapter?.scenes.flatMap((s) => s.beats.flatMap((b) => b.dialogue)) ?? []) {
+    if (line.speaker_id) linesBy[line.speaker_id] = (linesBy[line.speaker_id] ?? 0) + 1;
+  }
+  // Scene markers are kept on the recording's vault item.
+  const [markerFor, setMarkerFor] = useState<Record<string, { time: number; label: string }[]>>({});
+  const outputKey = outputs.join(",");
+  useEffect(() => {
+    if (!outputKey) return;
+    let live = true;
+    void api.vaultList().then((items) => {
+      if (live) setMarkerFor(Object.fromEntries(items.filter((i) => i.markers?.length).map((i) => [i.id, i.markers!])));
+    }).catch(() => { /* the player still works without markers */ });
+    return () => { live = false; };
+  }, [outputKey]);
   const writerReady = models.some((m) => ANALYST_IDS.includes(m.id) && m.installed && !m.hopeless);
 
+  // Hear a voice before choosing it. The sample is the character's own first
+  // line when there is one, so the choice is made on words from this story.
+  const [previewing, setPreviewing] = useState<string | null>(null);
+  const [sounding, setSounding] = useState<string | null>(null);
+  const stopPreview = () => { player.current?.pause(); setSounding(null); };
+  const player = useRef<HTMLAudioElement | null>(null);
+  useEffect(() => () => { player.current?.pause(); }, []);
+  const sampleFor = (characterId: string | null) => {
+    const lines = chapter?.scenes.flatMap((s) => s.beats.flatMap((b) => b.dialogue)) ?? [];
+    const line = characterId ? lines.find((d) => d.speaker_id === characterId)?.text : null;
+    if (line) return line;
+    const opening = (chapter?.source ?? "").slice(0, 300);
+    return characterId ? "Hello. This is how I will sound in your story."
+      : opening.slice(0, Math.max(opening.lastIndexOf(". ") + 1, 120)) || "This is how I will read your story.";
+  };
+  const preview = async (key: string, voice: string, characterId: string | null) => {
+    setPreviewing(key);
+    try {
+      const { wav_base64 } = await api.audioPreview({ model_id: speechModel, voice, text: sampleFor(characterId),
+        language: settings.language || "auto", delivery: settings.delivery || "",
+        direction: characterId ? (settings.directions?.[characterId]
+          ?? book?.characters.find((c) => c.id === characterId)?.voice ?? "") : "",
+        rate: settings.rate });
+      const bytes = Uint8Array.from(atob(wav_base64), (c) => c.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+      player.current?.pause();
+      const audio = new Audio(url);
+      audio.onended = () => { URL.revokeObjectURL(url); setSounding(null); };
+      setSounding(key);
+      player.current = audio;
+      await audio.play();
+    } catch (e) {
+      notify(`Could not preview ${voice}: ${errText(e)}`, true);
+    } finally {
+      if (mounted.current) setPreviewing(null);
+    }
+  };
+  // One button per voice: play a sample, and stop it while it plays.
+  const PreviewButton = ({ id, voice, character, label }: { id: string; voice: string; character: string | null; label: string }) =>
+    sounding === id
+      ? <button type="button" className="btn small" aria-label={`Stop ${label.replace(/^Preview /, "")} preview`}
+          onClick={stopPreview}>■</button>
+      : <button type="button" className="btn small" aria-label={label} title={`Hear ${voiceLabel(voice)}`}
+          aria-busy={previewing === id} disabled={!!job || !!previewing || !voice || !speechReady}
+          onClick={() => { stopPreview(); void preview(id, voice, character); }}>{previewing === id ? "…" : "▶"}</button>;
+
+  const pending = useRef<{ book: string; patch: Partial<AudioSettings>; timer?: number }>({ book: "", patch: {} });
+  useEffect(() => { setDraft({}); }, [book?.id]);
+  const flush = () => {
+    const { book: id, patch, timer } = pending.current;
+    window.clearTimeout(timer);
+    if (!id || !Object.keys(patch).length) return;
+    pending.current = { book: id, patch: {} };
+    void onLibraryChange((current) => ({ ...current, audio: { ...current.audio,
+      [id]: { ...(current.audio?.[id] ?? settings), ...patch } } }))
+      .catch((e) => notify(`Could not save voice settings: ${errText(e)}`, true));
+  };
+  useEffect(() => flush, []); // eslint-disable-line react-hooks/exhaustive-deps
   const saveSettings = (patch: Partial<AudioSettings> | ((latest: AudioSettings) => Partial<AudioSettings>)) => {
     if (!book) return;
-    const id = book.id;
-    void onLibraryChange((current) => {
-      const latest = current.audio?.[id] ?? settings;
-      return { ...current, audio: { ...current.audio,
-        [id]: { ...latest, ...(typeof patch === "function" ? patch(latest) : patch) },
-      } };
-    }).catch((e) => notify(`Could not save voice settings: ${errText(e)}`, true));
+    const resolved = typeof patch === "function" ? patch(settings) : patch;
+    if (pending.current.book !== book.id) flush();
+    pending.current = { book: book.id, patch: { ...pending.current.patch, ...resolved } };
+    setDraft((d) => ({ ...d, ...resolved }));
+    window.clearTimeout(pending.current.timer);
+    pending.current.timer = window.setTimeout(flush, 400);
+  };
+  // Each engine keeps its own cast; switching back restores it.
+  const switchEngine = (next: string) => {
+    const casts = { ...settings.casts, [speechModel]: { narrator: settings.narrator, voices: settings.voices } };
+    saveSettings({ model_id: next, casts, ...(casts[next] ?? { narrator: "", voices: {} }) });
   };
   const perform = async (action: (id: string) => Promise<void>) => {
     const id = newJobId(); setJob(id); setProgress(null);
@@ -68,10 +155,19 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
     }
   };
   const analyze = () => perform(async (id) => {
-    const result = await api.analyzeStory(id, source, title, append ? book ?? null : null);
+    // Speakers and mood only: the audiobook needs nothing about shots, outfits
+    // or rooms, and describing them for every beat made this take hours.
+    const result = await api.analyzeStory(id, source, title, append ? book ?? null : null, null, "voice");
     await onLibraryChange((current) => keepBook(current, result.book));
     setBookId(result.book.id); setChapterId(result.chapter_id); setSource(""); setAppend(false);
-    notify("Chapter analyzed and saved. Board and Audiobook share its character bible.");
+    notify("Voices cast and saved. Board shares this character bible and adds its scene direction when you draw.");
+  });
+  // Stop keeps the passages already cast; this casts only the rest.
+  const resume = () => perform(async (id) => {
+    if (!book || !chapter) return;
+    const result = await api.resumeStory(id, book, chapter.id);
+    await onLibraryChange((current) => keepBook(current, result.book));
+    notify(result.unanalysed ? `${result.unanalysed} passages still to cast; the rest is saved.` : "Every passage is cast.");
   });
   const narrate = () => perform(async (id) => {
     if (!book || !chapter) return;
@@ -97,8 +193,8 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
 
   return <div className="audiobook-workspace">
     <div className="pane">
-      <h2>Audiobook</h2>
-      <p className="muted">Read the original chapter with local neural voices and character delivery. Characters and dialogue come from the same story analysis as Board.</p>
+      <h2>Narrate a chapter</h2>
+      <p className="muted">Read the original chapter with local neural voices and character delivery. A quick analysis casts who speaks each line; Board shares its characters and adds scene direction when you draw.</p>
       {!library && <div className="notice warn">The encrypted story library is loading.</div>}
       {!!library?.books.length && <>
         <label>Book<select value={book?.id ?? ""} disabled={!!job}
@@ -123,13 +219,19 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
           onClick={() => void analyze()}>Analyze chapter</button>
         {!writerReady && <p className="notice warn">Install a story analyst or the prompt writer in Models to analyze prose.</p>}
       </details>
+      {book && chapter && unanalysedIn(book, chapter.id) > 0 && <div className="notice warn">
+        {unanalysedIn(book, chapter.id)} passages are not cast yet and would be read by the narrator.
+        <button className="btn small" disabled={!!job || !writerReady} onClick={() => void resume()}>Continue analysis</button>
+      </div>}
       {book && chapter && <>
         <label>Speech engine<select value={speechModel} disabled={!!job}
-          onChange={(e) => saveSettings({ model_id: e.target.value, narrator: "", voices: {} })}>
-          <option value={SPEECH_MODEL_ID}>Qwen3-TTS · neural voices</option>
-          <option value="macos">macOS system voices · fallback</option>
+          onChange={(e) => switchEngine(e.target.value)}>
+          <option value={KOKORO_MODEL_ID}>Kokoro · fast, Hindi and Indian English voices</option>
+          <option value={SPEECH_MODEL_ID}>Qwen3-TTS · expressive, slower</option>
+          <option value="macos">macOS system voices · includes Indian voices</option>
         </select></label>
-        {neural && !speechReady && <p className="notice warn">Download Audiobook voices (Qwen3-TTS 1.7B) in Models to use neural narration.</p>}
+        {!speechReady && <p className="notice warn">Download {speechModel === KOKORO_MODEL_ID
+          ? "Fast audiobook voices (Kokoro 82M)" : "Audiobook voices (Qwen3-TTS 1.7B)"} in Models to use it.</p>}
         {neural && <>
           <label>Language<select value={settings.language || "auto"} disabled={!!job}
             onChange={(e) => saveSettings({ language: e.target.value })}>
@@ -139,16 +241,19 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
             placeholder="Warm, intimate storytelling with restrained emotion and natural pauses."
             onChange={(e) => saveSettings({ delivery: e.target.value })} /></label>
         </>}
-        <label>Narrator<select value={narrator} disabled={!!job || !voices.length}
+        <label>Narrator<span className="control-row"><select value={narrator} disabled={!!job || !voices.length}
           onChange={(e) => saveSettings({ narrator: e.target.value })}>
-          {voices.map((v) => <option key={v.id} value={v.id}>{v.id} · {v.language}</option>)}
-        </select></label>
+          {voiceOptions}
+        </select><PreviewButton id="narrator" voice={narrator} character={null} label="Preview narrator voice" /></span></label>
         <label>{neural ? `Reading pace · ${settings.rate} (approximate)` : `Reading speed · ${settings.rate} words/minute`}<input type="range" min={80} max={300}
           value={settings.rate} disabled={!!job} onChange={(e) => saveSettings({ rate: Number(e.target.value) })} /></label>
         <div className="sub-head">Character voices</div>
-        {book.characters.map((c) => <label key={c.id}>{c.name}
-          {c.voice && <small className="muted">{c.voice}</small>}
-          <select aria-label={`${c.name} voice`} value={assignedVoices[c.id] ?? ""} disabled={!!job}
+        {/* Who speaks most in this chapter comes first, with their line count;
+            those silent here follow, so a long bible does not bury the cast. */}
+        {[...book.characters].sort((a, b) => (linesBy[b.id] ?? 0) - (linesBy[a.id] ?? 0)).map((c) => <label key={c.id}>
+          <span>{c.name} <span className="t-meta">· {linesBy[c.id] ? `${linesBy[c.id]} line${linesBy[c.id] === 1 ? "" : "s"}` : "silent in this chapter"}</span></span>
+          {c.voice && <small className="t-help">{c.voice}</small>}
+          <span className="control-row"><select aria-label={`${c.name} voice`} value={assignedVoices[c.id] ?? ""} disabled={!!job}
             onChange={(e) => {
               const value = e.target.value;
               saveSettings((latest) => {
@@ -158,8 +263,9 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
               });
             }}>
             <option value="">Use narrator</option>
-            {voices.map((v) => <option key={v.id} value={v.id}>{v.id} · {v.language}</option>)}
+            {voiceOptions}
           </select>
+          <PreviewButton id={c.id} voice={assignedVoices[c.id] ?? narrator} character={c.id} label={`Preview ${c.name} voice`} /></span>
           {neural && <input aria-label={`${c.name} voice direction`} maxLength={1500}
             value={settings.directions?.[c.id] ?? c.voice} disabled={!!job} placeholder="Quiet, guarded; a slight tremor when afraid"
             onChange={(e) => { const value = e.target.value;
@@ -169,17 +275,29 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
         <button className="btn primary" disabled={!!job || !speechReady || !narrator || !voices.some((v) => v.id === narrator)}
           onClick={() => void narrate()}>Narrate chapter</button>
       </>}
-      {!voices.length && <p className="notice warn">{voiceError || (neural ? "Neural voices are loading." : "Installed macOS speech voices are required for narration. Manage voices in macOS Accessibility → Spoken Content.")}</p>}
+      {!voices.length && <p className="notice warn">{voiceError || (speechModel === "macos"
+        ? "Installed macOS speech voices are required for narration. Manage voices in macOS Accessibility → Spoken Content."
+        : `${speechModel === KOKORO_MODEL_ID ? "Kokoro" : "Qwen3-TTS"} voices are loading.`)}</p>}
       {job && <button className="btn" onClick={() => void api.cancelJob(job).catch((e) => notify(errText(e), true))}>Stop</button>}
       {progress && <JobProgress p={progress} label="Audiobook" />}
     </div>
     <div className="pane">
       <h3>{chapter?.title ?? "Your narrated chapter"}</h3>
-      {outputs.map((id, i) => <div className="audio-result" key={id}>
-        <label>Recording {i + 1}</label><audio controls preload="metadata" src={vaultUrl(id)} />
-        <p className="muted">Export the WAV file from Vault.</p>
-      </div>)}
-      {chapter && <details><summary>Original text · {chapter.scenes.length} analyzed scenes</summary>
+      {/* Recordings play in the app-wide bar, so a chapter keeps playing
+          while you work elsewhere. */}
+      {outputs.map((id, i) => {
+        const title = `${chapter?.title ?? "Chapter"} · recording ${i + 1}`;
+        const current = nowPlaying.track?.src === vaultUrl(id);
+        return <div className="audio-result recording" key={id}>
+          <span>{title}{markerFor[id]?.length ? <span className="t-meta"> · {markerFor[id].length} scenes</span> : null}</span>
+          <button type="button" className={"btn small" + (current ? "" : " primary")} aria-pressed={current}
+            onClick={() => current ? nowPlaying.stop()
+              : nowPlaying.play({ src: vaultUrl(id), title, markers: markerFor[id] ?? [] })}>
+            {current ? "■ Stop" : "▶ Play"}</button>
+        </div>;
+      })}
+      {outputs.length > 0 && <p className="t-help">Recordings are in the Vault too, where they can be exported as WAV.</p>}
+      {chapter && <details><summary>Transcript · {chapter.scenes.length} scene{chapter.scenes.length === 1 ? "" : "s"}</summary>
         <p style={{ whiteSpace: "pre-wrap" }}>{chapter.source}</p></details>}
       {chapter?.scenes.map((scene) => <section key={scene.id} className="notice">
         <h4>{scene.title}</h4><p>{scene.summary}</p>

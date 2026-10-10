@@ -1,19 +1,20 @@
-import { ANALYST_IDS, castFromBook, type CharacterReference, type StoryBook, type StoryLibrary } from "../lib/story";
+import { ANALYST_IDS, castFromBook, unanalysedIn, type CharacterReference, type StoryBook, type StoryLibrary } from "../lib/story";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { api, errText, isCancelled, newJobId, onEngineProgress, vaultUrl,
+import { api, errText, isCancelled, isEngineDeath, newJobId, onEngineProgress, vaultUrl,
          type TextOverflow } from "../lib/api";
 import type { Cast, EngineProgress, ModelStatus, Panel } from "../lib/types";
 import { ImageDrop, JobProgress } from "./shared";
+import Field from "./Field";
 import MaskCanvas from "./MaskCanvas";
 import { loadPref, savePref } from "../lib/prefs";
 import { anchorOverflow, artOf, fromArrays, identify, setArt, toArrays,
          edit as editPanel, insert as insertPanel, merge as mergePanelIn,
          move as movePanelIn, remove as removePanel, split as splitPanelIn,
-         type BoardDoc, type PanelArt } from "../lib/boardDoc";
+         replan, type BoardDoc, type PanelArt } from "../lib/boardDoc";
 import { loadBoardDraft, loadSavedBoard, type BoardDraft, type Coverage }
   from "../lib/boardDraft";
-import { CUSTOM_STYLE, STYLES, isKnownStyle, lockCustomStyle, lockStyle,
-         panelPrompt, panelReferences, panelSeed, placeKey, placePrompt, identityPrompt, storyContinuityReference,
+import { CUSTOM_STYLE, STYLES, drawBatch, isKnownStyle, lockCustomStyle, lockStyle,
+         panelPrompt, panelReferences, storyPanelReferences, panelSeed, placeKey, placePrompt, identityPrompt, storyContinuityReference,
          placeSeed, previousPanel, reviveLock, sheetPrompt, styleHasMoved,
          styleLabel } from "../lib/board";
 import type { StyleLock } from "../lib/board";
@@ -59,6 +60,22 @@ const PANEL_SIZES: [string, number][] = [
 ];
 
 type Stage = "idle" | "dividing" | "enriching" | "casting" | "building" | "drawing";
+
+/**
+ * The five steps of a board, in the order they are done.
+ *
+ * The header used to be five labels with one highlighted, which said where
+ * the board was and offered no way back: returning to the cast or the prose
+ * meant finding the right pane by eye. Each reached step is now a button
+ * that brings its part of the screen forward, without discarding anything.
+ */
+const STEPS = [
+  ["story", "Story"], ["cast", "Cast"], ["panels", "Panels"], ["draw", "Draw"], ["pages", "Pages"],
+] as const;
+type StepName = typeof STEPS[number][0];
+
+/** Seconds a panel takes before one has been timed on this machine; see `estimate`. */
+const GUESS_PER_PANEL_S = (px: number) => (px >= 768 ? 170 : 90);
 
 export default function Storyboard({
   models, notify, onProduced, openProject, onOpened, storyLibrary, onStoryAnalyzed, onCharacterReference,
@@ -188,6 +205,16 @@ export default function Storyboard({
    */
   const drawnRef = useRef<(string | null)[]>([]);
   useEffect(() => { drawnRef.current = drawn; }, [drawn]);
+  /**
+   * The board as it is now, for a batch that started minutes ago.
+   *
+   * Panels waiting in a batch stay editable, so each one is read from here
+   * when its turn comes rather than from the copy the batch began with --
+   * otherwise a corrected brief would be shown on screen and the old one
+   * drawn.
+   */
+  const docRef = useRef<BoardDoc>(doc);
+  useEffect(() => { docRef.current = doc; }, [doc]);
   /** The distinct scenes the panels fall into, in order. */
   const scenes = useMemo(() => {
     const seen: number[] = [];
@@ -368,10 +395,44 @@ export default function Storyboard({
   const [stage, setStage] = useState<Stage>("idle");
   const [prog, setProg] = useState<EngineProgress | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
-  const [done, setDone] = useState(0);
+  /**
+   * The panel being drawn right now, by identity.
+   *
+   * It is the only panel that is locked while a batch runs. Locking the whole
+   * board for twenty minutes meant nobody could read ahead and fix the next
+   * panel's brief while the current one drew -- which is exactly when there
+   * is time to do it.
+   */
+  const [drawingId, setDrawingId] = useState<string | null>(null);
+  /** Where the batch is: panel k of n, and how long a panel has been taking. */
+  const [batchProg, setBatchProg] =
+    useState<{ k: number; n: number; perPanelMs: number; startedAt: number } | null>(null);
+  /** Which room sheet is being drawn, when the rooms are. */
+  const [buildProg, setBuildProg] = useState<{ k: number; n: number } | null>(null);
+  /**
+   * Panel times measured on this machine, by panel size.
+   *
+   * The pre-run figure is a guess from someone else's Mac; once one panel has
+   * been timed here, the time left is said from that instead, and carried to
+   * the next batch rather than starting from the guess again.
+   */
+  const panelTimes = useRef<Record<number, number[]>>({});
+  /**
+   * How the last job ended, in words that stay on screen.
+   *
+   * The toast said it once and was gone in a few seconds, so someone who
+   * looked away during a twenty-minute run came back to a board with no
+   * record of whether it had finished, stopped or failed. Announced politely
+   * (role="status") and kept until the next job starts.
+   */
+  const [outcome, setOutcome] = useState<string | null>(null);
+  /** The run button: the one control that is always there, so focus can rest on it. */
+  const runButton = useRef<HTMLButtonElement>(null);
   /** Set when the user cancels, checked between panels. Cancelling the job in
    *  flight only ever stopped one panel; the loop then started the next. */
   const stop = useRef(false);
+  /** Why the last panel failed, read by the batch loop to decide whether to go on. */
+  const lastFailure = useRef<unknown>(null);
   const [elapsed, setElapsed] = useState(0);
   const [composing, setComposing] = useState(false);
   const [pages, setPages] = useState<string[]>([]);
@@ -752,15 +813,36 @@ export default function Storyboard({
     return seen;
   }, [panels]);
 
+  /**
+   * Run one engine job the way every job on this board is run.
+   *
+   * A job id, a progress listener filtered to it, Stop wired to it, and the
+   * stage put back however it ends. Loading a saved chapter used to skip all
+   * of this -- no id the Stop button could reach and no progress -- so it was
+   * the one job that could not be watched or stopped.
+   */
+  const runJob = async (next: Stage, work: (id: string) => Promise<void>) => {
+    const id = newJobId();
+    stop.current = false;
+    setOutcome(null);
+    setStage(next); setJobId(id);
+    const un = await onEngineProgress((p) => { if (p.job_id === id) setProg(p); });
+    try {
+      await work(id);
+    } catch (e) {
+      notify(errText(e), true);
+      setOutcome(isCancelled(e) ? "Stopped." : `Did not finish: ${errText(e)}`);
+    } finally {
+      un(); setStage("idle"); setProg(null); setJobId(null);
+    }
+  };
+
   /** Step one: divide the prose. Nothing is drawn yet. */
   /** Validate the chapter's story model, save it, then replace the panel plan. */
   const divide = async () => {
     if (!story.trim()) { notify("Write the story first.", true); return; }
-    const id = newJobId();
     if (!storyLibrary) { notify("The story library has not loaded yet.", true); return; }
-    setStage("dividing"); setJobId(id);
-    const un = await onEngineProgress((p) => { if (p.job_id === id) setProg(p); });
-    try {
+    await runJob("dividing", async (id) => {
       const previous = appendChapter
         ? storyLibrary.books.find((b) => b.id === (continuationBookId || storyLibrary.activeBookId)) ?? null
         : null;
@@ -777,13 +859,75 @@ export default function Storyboard({
       const beats = r.book.chapters.at(-1)!.scenes.flatMap((s) => s.beats);
       setCoverage({ covered: beats.length, total: beats.length, percent: 100, missing: [] });
       setAppendChapter(false);
-      notify(`Analyzed ${beats.length} beats and directed ${r.panels.length} panels. The chapter is also available in Audiobook.`);
-    } catch (e) {
-      notify(errText(e), true);
-    } finally {
-      un(); setStage("idle"); setProg(null); setJobId(null);
-    }
+      notify(r.unanalysed
+        ? `${r.stopped ? "Stopped. " : ""}${r.unanalysed} passage${r.unanalysed === 1 ? " is" : "s are"} not analysed yet; `
+          + "the rest is saved. Continue analysis from the Manuscript whenever you like."
+        : `Analyzed ${beats.length} beats and directed ${r.panels.length} panels. The chapter is also available in Audiobook.`);
+      setOutcome(analysisOutcome(r.book, r.chapter_id, r.unanalysed ?? 0, r.stopped, r.panels.length));
+    });
   };
+
+  /** "Stopped — 37 of 93 analysed", or that it finished, for the status line. */
+  const analysisOutcome = (book: StoryBook, chapter: string, left: number,
+                           stopped: boolean | undefined, planned: number) => {
+    const total = book.chapters.find((c) => c.id === chapter)?.scenes.length ?? 0;
+    if (!left) return `Analysis complete — ${planned} panel${planned === 1 ? "" : "s"} planned.`;
+    return `${stopped ? "Stopped — " : ""}${Math.max(0, total - left)} of ${total} passages analysed. `
+      + "Continue from the Manuscript.";
+  };
+
+  /**
+   * Analyse what a stopped or failed run left, with any analyst.
+   *
+   * Finished passages are not sent again, and panels of unchanged beats keep
+   * their pictures and notes. Stopping this keeps what it finished, too.
+   */
+  const continueAnalysis = async () => {
+    if (!storyBook || !chapterId) return;
+    await runJob("dividing", async (id) => {
+      const r = await api.resumeStory(id, storyBook, chapterId, analystId || null);
+      await onStoryAnalyzed(r.book);
+      setStoryBook(r.book); storyBookRef.current = r.book;
+      setCast(castFromBook(r.book));
+      setDoc((d) => replan(d, r.panels));
+      notify(r.unanalysed
+        ? `${r.unanalysed} passage${r.unanalysed === 1 ? " is" : "s are"} still not analysed; the rest is saved.`
+        : `Analysis complete: ${r.panels.length} panels planned. Drawn panels were kept.`);
+      setOutcome(analysisOutcome(r.book, chapterId, r.unanalysed ?? 0, r.stopped, r.panels.length));
+    });
+  };
+
+  /**
+   * Load a chapter the Audiobook (or an earlier board) already analysed.
+   *
+   * The same job as dividing, run through the same wrapper, so it can be
+   * watched and stopped like every other job here.
+   */
+  const openChapter = async (value: string) => {
+    if (!storyLibrary) return;
+    const [bid, cid] = value.split(":");
+    const book = storyLibrary.books.find((b) => b.id === bid);
+    const chapter = book?.chapters.find((c) => c.id === cid);
+    if (!book || !chapter) return;
+    if (chapter.analysis === "voice") {
+      // Cast for the audiobook only: nothing to draw from yet.
+      setStory(chapter.source); setChapterTitle(chapter.title);
+      notify("This chapter was analyzed for voices only. Analyze it here to plan its panels.");
+      return;
+    }
+    await runJob("dividing", async (id) => {
+      const result = await api.directStory(id, book, cid);
+      setStory(chapter.source); setChapterTitle(chapter.title);
+      setStoryBook(book); storyBookRef.current = book; setChapterId(cid);
+      ignoreSavedReferences.current = false; setCast(castFromBook(book));
+      setDoc(fromArrays(result.panels)); setDivided(true); setProjectId(newJobId());
+      setSheet(null); clearCharacterSheets(); setPages([]); setOverflow([]); setPlaceSheets({});
+      setSelected(0); setCoverage(null);
+      setOutcome(`Loaded “${chapter.title}” — ${result.panels.length} panel`
+        + `${result.panels.length === 1 ? "" : "s"} planned.`);
+    });
+  };
+  const unanalysed = unanalysedIn(storyBook, chapterId);
 
   /** Which panels have a picture, and which are still waiting. */
   const drawnCount = useMemo(
@@ -883,7 +1027,7 @@ export default function Storyboard({
 
 
     stop.current = false;
-    setDone(0);
+    setOutcome(null);
     // The two blocks that used to sit here resized `redraws` and `drawn` to
     // the panel count and copied the old values across by position. Art is
     // keyed by panel now, so there is no length to keep in step and nothing
@@ -902,11 +1046,7 @@ export default function Storyboard({
       setSheet(existingSheet ?? null);
       const places = await buildPlaces();
       setStage("drawing");
-      for (const i of nextBatch()) {
-        if (stop.current) { notify("Stopped."); break; }
-        const ok = await drawOne(i, existingSheet ?? null, places);
-        if (!ok && stop.current) break;
-      }
+      await drawPanels(existingSheet ?? null, places);
       if (timer.current) { window.clearInterval(timer.current); timer.current = null; }
       setStage("idle"); setProg(null); setJobId(null);
       return;
@@ -938,6 +1078,8 @@ export default function Storyboard({
       onProduced();
     } catch (e) {
       notify(errText(e), true);
+      setOutcome(isCancelled(e) ? "Stopped before any panel was drawn."
+        : `The cast sheet could not be drawn: ${errText(e)}`);
       if (timer.current) { window.clearInterval(timer.current); timer.current = null; }
       un(); setStage("idle"); setProg(null); setJobId(null);
       return;
@@ -948,13 +1090,54 @@ export default function Storyboard({
     // and a board of six is minutes of work either way.
     const places = await buildPlaces();
     setStage("drawing");
-    for (const i of nextBatch()) {
-      if (stop.current) { notify("Stopped."); break; }
-      const ok = await drawOne(i, sheetId, places);
-      if (!ok && stop.current) break;
-    }
+    await drawPanels(sheetId, places);
     if (timer.current) { window.clearInterval(timer.current); timer.current = null; }
     setStage("idle"); setProg(null); setJobId(null);
+  };
+
+  /** Draw the next batch, stopping early when carrying on cannot help.
+   *
+   *  The toast is a single slot, so the closing message here replaces the
+   *  last panel's failure rather than adding to it: one clear reason the
+   *  batch ended instead of one red toast per remaining panel.
+   */
+  const drawPanels = async (sheetId: string | null, places: Record<string, string>) => {
+    const order = nextBatch();
+    const times = (panelTimes.current[panelPx] ??= []);
+    const perPanel = () => (times.length
+      ? times.reduce((a, b) => a + b, 0) / times.length
+      : GUESS_PER_PANEL_S(panelPx) * 1000);
+    let drew = 0;
+    let failed = 0;
+    const result = await drawBatch(order, async (i) => {
+      lastFailure.current = null;
+      setBatchProg({ k: order.indexOf(i) + 1, n: order.length, perPanelMs: perPanel(),
+                     startedAt: Date.now() });
+      const began = Date.now();
+      const ok = await drawOne(i, sheetId, places);
+      // Only a finished panel is a measurement; a failure or a Stop is not.
+      if (ok) { times.push(Date.now() - began); drew++; } else failed++;
+      return ok ? { ok: true } : { ok: false, error: lastFailure.current };
+    }, () => stop.current, isEngineDeath);
+    setBatchProg(null);
+    const board = docRef.current.panels.length;
+    const have = drawnRef.current.filter(Boolean).length;
+    const tally = `${have} of ${board} drawn`;
+    const lost = failed ? ` ${failed} panel${failed === 1 ? "" : "s"} failed.` : "";
+    if (result.end === "stopped" || result.end === "cancelled") {
+      notify("Stopped.");
+      setOutcome(`Stopped — ${tally}.${lost}`);
+    } else if (result.end === "engine") {
+      notify(`${errText(result.error)} The rest of this batch was not drawn.`, true);
+      setOutcome(`The engine stopped, so the rest of this batch was not drawn — ${tally}.`);
+    } else if (result.end === "repeated") {
+      notify(`Two panels in a row failed, so the batch stopped: ${errText(result.error)}`, true);
+      setOutcome(`Two panels in a row failed, so the batch stopped — ${tally}.`);
+    } else {
+      setOutcome(failed
+        ? `${failed} panel${failed === 1 ? "" : "s"} failed, ${drew} drawn — ${tally}.`
+        : `Drew ${drew} panel${drew === 1 ? "" : "s"} — ${tally}.`);
+    }
   };
 
   /** Draw each scene's room once, empty, for its panels to be set inside.
@@ -976,8 +1159,10 @@ export default function Storyboard({
 
     setStage("building");
     const made: Record<string, string> = { ...placeSheets };
+    let k = 0;
     for (const [key, place] of wanted) {
       if (stop.current) break;
+      setBuildProg({ k: ++k, n: wanted.size });
       const id = newJobId();
       setJobId(id);
       const un = await onEngineProgress((e) => { if (e.job_id === id) setProg(e); });
@@ -1007,6 +1192,7 @@ export default function Storyboard({
         un();
       }
     }
+    setBuildProg(null);
     setPlaceSheets(made);
     return made;
   };
@@ -1061,6 +1247,14 @@ export default function Storyboard({
                          places: Record<string, string> = placeSheets,
                          redrawCount = redraws[i] ?? 0): Promise<boolean> => {
     if (!model || !panels) return false;
+    // The board as it is now: a panel waiting in this batch may have been
+    // corrected since the batch began. Structural edits are held while a run
+    // is going, so position i is still this panel.
+    const board = docRef.current.panels;
+    const panel = board[i];
+    if (!panel) return false;
+    const note = artOf(docRef.current, panel.id).note;
+    setDrawingId(panel.id);
     const id = newJobId();
     setJobId(id);
     const un = await onEngineProgress((p) => { if (p.job_id === id) setProg(p); });
@@ -1070,9 +1264,14 @@ export default function Storyboard({
     // clothes reset between one panel and the next inside a single scene.
     try {
       let identity = sheetId;
-      if (panels[i].cast !== undefined) {
-        const actors = panels[i].cast!;
+      if (panel.cast !== undefined) {
+        const actors = panel.cast!;
         const ids: string[] = [];
+        // A sheet deleted in the Vault was reused anyway and failed every panel
+        // with that character until "recast"; a missing one is drawn again.
+        let present: Set<string> | null = null;
+        const exists = async (id: string) =>
+          (present ??= new Set((await api.vaultList()).map((item) => item.id))).has(id);
         for (const actor of actors) {
           if (stop.current) return false;
           const person = cast?.people.find((p) => p.id === actor.character_id);
@@ -1086,6 +1285,7 @@ export default function Storyboard({
             ref = saved.image;
           }
           if (person === lead && ownSheet[0]) ref = ownSheet[0];
+          if (ref && !(await exists(ref))) ref = undefined;
           if (!ref) {
             const generated = await api.generate({
               job_id: id, model_id: model.id,
@@ -1122,18 +1322,19 @@ export default function Storyboard({
         }
       }
       if (stop.current) return false;
-      const continuation = panels[i].cast !== undefined
-        ? storyContinuityReference(i, panels, drawnRef.current) : null;
-      const refs = panelReferences(
-        panels[i], continuation ?? identity, places[placeKey(panels[i])] ?? null,
-        panels[i].cast !== undefined ? null : previousPanel(i, panels, drawnRef.current),
-        model.max_edit_images || 1);
+      const continuation = panel.cast !== undefined
+        ? storyContinuityReference(i, board, drawnRef.current) : null;
+      const refs = panel.cast !== undefined
+        ? storyPanelReferences(panel, identity, continuation,
+            places[placeKey(panel)] ?? null, model.max_edit_images || 1)
+        : panelReferences(panel, identity, places[placeKey(panel)] ?? null,
+            previousPanel(i, board, drawnRef.current), model.max_edit_images || 1);
       const params = {
         job_id: id, model_id: model.id,
-        prompt: panelPrompt({ ...panels[i], cast: panels[i].cast?.map((actor) => ({
+        prompt: panelPrompt({ ...panel, cast: panel.cast?.map((actor) => ({
           ...actor, visual: (cast?.people.find((p) => p.id === actor.character_id) === lead && character.trim())
             || cast?.people.find((p) => p.id === actor.character_id)?.description || actor.visual,
-        })) }, style, panelWho(panels[i]), notes[i]),
+        })) }, style, panelWho(panel), note),
         negative_prompt: null,
         width: panelPx, height: panelPx,
         steps: model.steps_default || 4,
@@ -1179,16 +1380,17 @@ export default function Storyboard({
       // kept the old pages on screen, still showing the frame that had just
       // been replaced -- and those are the two pictures the whole board is for.
       setPages([]); setOverflow([]);
-      setDone((v) => Math.max(v, i + 1));
       onProduced();
       return true;
     } catch (e) {
       const msg = errText(e);
       notify(`Panel ${i + 1}: ${msg}`, true);
       if (isCancelled(e)) stop.current = true;
+      lastFailure.current = e;
       return false;
     } finally {
       un();
+      setDrawingId(null);
     }
   };
 
@@ -1200,10 +1402,7 @@ export default function Storyboard({
    */
   const enrich = async () => {
     if (!panels) return;
-    const id = newJobId();
-    setStage("enriching"); setJobId(id);
-    const un = await onEngineProgress((p) => { if (p.job_id === id) setProg(p); });
-    try {
+    await runJob("enriching", async (id) => {
       const r = await api.enrichPanels(id, panels, style.words, cast?.places ?? []);
       // The same panels, worked up. The engine returns them in order and does
       // not carry ids, so the ids are put back by position -- which is safe
@@ -1218,11 +1417,10 @@ export default function Storyboard({
       notify(filled === r.panels.length
         ? "Every panel worked up. Read them before drawing."
         : `${filled} of ${r.panels.length} worked up; the rest stay as written.`);
-    } catch (e) {
-      notify(errText(e), true);
-    } finally {
-      un(); setStage("idle"); setProg(null); setJobId(null);
-    }
+      setOutcome(filled === r.panels.length
+        ? `Briefs prepared for all ${filled} panels.`
+        : `Briefs prepared for ${filled} of ${r.panels.length} panels; the rest stay as written.`);
+    });
   };
 
   /**
@@ -1348,6 +1546,8 @@ export default function Storyboard({
     if (!maskBytes) { notify("Paint over the part to redraw first.", true); return; }
     const id = newJobId();
     stop.current = false;
+    setOutcome(null);
+    setDrawingId(doc.panels[i]?.id ?? null);
     setStage("drawing"); setJobId(id);
     const un = await onEngineProgress((p) => { if (p.job_id === id) setProg(p); });
     const nextRedraw = (redraws[i] ?? 0) + 1;
@@ -1391,17 +1591,19 @@ export default function Storyboard({
       onProduced();
       notify(`Panel ${i + 1} repaired. The picture it replaces is kept — `
              + "put it back from the panel's history if this is worse.");
+      setOutcome(`Panel ${i + 1} repaired.`);
     } catch (e) {
       // A model that cannot mask says so here rather than being asked to
       // guess. Refusing is better than silently redrawing the whole frame,
       // which is what an unmasked fallback would do behind the user's back.
       notify(isCancelled(e) ? "Cancelled." : `Panel ${i + 1}: ${errText(e)}`,
              !isCancelled(e));
+      setOutcome(isCancelled(e) ? "Stopped." : `Panel ${i + 1} could not be repaired.`);
     } finally {
       if (maskId) {
         try { await api.vaultDelete(maskId); } catch { /* lock/cleanup race */ }
       }
-      un(); setStage("idle"); setProg(null); setJobId(null);
+      un(); setStage("idle"); setProg(null); setJobId(null); setDrawingId(null);
     }
   };
 
@@ -1411,9 +1613,12 @@ export default function Storyboard({
     stop.current = false;
     const nextRedraw = (redraws[i] ?? 0) + 1;
     putArt(i, { redraws: nextRedraw });
+    setOutcome(null);
     setStage("drawing");
-    await drawOne(i, sheet, placeSheets, nextRedraw);
+    const ok = await drawOne(i, sheet, placeSheets, nextRedraw);
     setStage("idle"); setProg(null); setJobId(null);
+    setOutcome(ok ? `Panel ${i + 1} redrawn.` : stop.current ? "Stopped."
+      : `Panel ${i + 1} could not be redrawn.`);
   };
 
   /** Stack the drawn panels into one page, captions underneath.
@@ -1456,6 +1661,9 @@ export default function Storyboard({
       const lost = anchorOverflow(made.overflow, sentIds, doc);
       setOverflow(lost);
       onProduced();
+      setOutcome(`Composed ${made.pages.length} page${made.pages.length === 1 ? "" : "s"} `
+        + `from ${pairs.length} panel${pairs.length === 1 ? "" : "s"}`
+        + (lost.length ? ` — ${lost.length} lost text; see the pages.` : "."));
       notify(made.pages.length === 1
         ? `Composed one page from ${pairs.length} panels. It is in the Vault.`
         : `Composed ${made.pages.length} pages from ${pairs.length} panels, `
@@ -1472,6 +1680,40 @@ export default function Storyboard({
       setComposing(false);
     }
   };
+
+  /**
+   * Which step the person went back to, if they did. Null follows the work.
+   *
+   * Going back is looking, not undoing: the step's part of the screen comes
+   * forward and nothing is discarded. The next job moves it on again.
+   */
+  const [viewStep, setViewStep] = useState<StepName | null>(null);
+  useEffect(() => { setViewStep(null); }, [workflow]);
+  /**
+   * Whether the manuscript drawer is open, on a window too narrow for three
+   * panes. Ignored when it is wide enough, where the manuscript is always
+   * shown.
+   */
+  const [msOpen, setMsOpen] = useState(false);
+  const msPane = useRef<HTMLDivElement>(null);
+  const msToggle = useRef<HTMLButtonElement>(null);
+  const castShelf = useRef<HTMLDivElement>(null);
+  const pagesHead = useRef<HTMLDivElement>(null);
+  const boardPane = useRef<HTMLDivElement>(null);
+  /** Each cast member's pill, so closing their editor puts focus back on it. */
+  const pillRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  /** Set while the cast editor closes itself, so its blur does not save twice. */
+  const castClosing = useRef(false);
+
+  // Starting a job disables most of the screen, and a disabled control that
+  // had focus drops it to the page -- a keyboard user pressed Redraw and
+  // landed nowhere (WCAG 2.4.3). Focus goes to the run button, which is
+  // Stop for as long as the job runs.
+  useEffect(() => {
+    if (!busy) return;
+    const at = document.activeElement as HTMLButtonElement | null;
+    if (!at || at === document.body || at.disabled) runButton.current?.focus();
+  }, [busy]);
 
   const cancel = async () => {
     stop.current = true;
@@ -1501,30 +1743,276 @@ export default function Storyboard({
     return <div className="empty-state">Opening your encrypted Board draft…</div>;
   }
 
+  const drawStage = stage === "drawing" || stage === "casting" || stage === "building";
+  /**
+   * Whether the panel on show is locked. While panels are being drawn only
+   * the one being drawn is; any other job -- an analysis, the briefs --
+   * rewrites every panel when it lands, so they all wait for it.
+   */
+  const selLocked = busy && (!drawStage || (!!sel && sel.id === drawingId));
+
+  const workflowStep: StepName = workflow === "read" ? "story"
+    : workflow === "plan" || workflow === "prepare" ? "panels"
+      : workflow === "draw" ? "draw" : "pages";
+  const currentStep = viewStep ?? workflowStep;
+  const described = cast?.people.filter((p) => p.description.trim()).length ?? 0;
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const stepState: Record<StepName, { reached: boolean; done: boolean; detail: string }> = {
+    story: { reached: true, done: !!panels,
+             detail: panels ? "analysed" : story.trim() ? "ready to analyse" : "not started" },
+    cast: { reached: !!cast, done: !!cast && cast.people.length > 0 && described === cast.people.length,
+            detail: !cast ? "not yet" : cast.people.length
+              ? `${described} of ${cast.people.length} described` : "nobody named" },
+    panels: { reached: !!panels, done: !!panels && unpreparedRemaining === 0,
+              detail: !panels ? "not yet" : unpreparedRemaining === 0 ? `${panels.length} ready`
+                : `${preparedCount} of ${panels.length} prepared` },
+    draw: { reached: !!panels && (unpreparedRemaining === 0 || drawnCount > 0),
+            done: !!panels && panels.length > 0 && remaining === 0,
+            detail: panels ? `${drawnCount} of ${panels.length} drawn` : "not yet" },
+    pages: { reached: drawnCount > 0, done: pages.length > 0,
+             detail: pages.length ? plural(pages.length, "page") : "not yet" },
+  };
+
+  /** Bring a step's part of the screen forward, and put focus there. */
+  const goToStep = (name: StepName) => {
+    setViewStep(name);
+    if (name === "story") setMsOpen(true);
+    if (name === "cast") setRailTab("board");
+    if (name === "panels") setRailTab("panel");
+    // After the render that shows it: the drawer is not displayed until then,
+    // and an element that is not displayed cannot take focus.
+    window.setTimeout(() => {
+      const target = name === "story" ? msPane.current
+        : name === "cast" ? castShelf.current
+          : name === "panels" ? boardPane.current?.querySelector<HTMLElement>(".board-card[aria-current='true']")
+            : name === "pages" ? pagesHead.current ?? runButton.current
+              : runButton.current;
+      target?.focus();
+      target?.scrollIntoView?.({ block: "nearest" });
+    }, 0);
+  };
+
+  /**
+   * The one run button, and what it does now.
+   *
+   * There used to be a different button per stage, each disabled while a job
+   * ran and replaced when it ended, so the button just pressed vanished from
+   * under the keyboard and a separate Cancel appeared somewhere else. This is
+   * one element in one place: the next step when idle, Stop while running.
+   * A step that cannot run yet says why instead of going grey (aria-disabled
+   * stays focusable and readable; disabled does neither).
+   */
+  const primary: { label: string; go: () => void; blocked?: string } = !panels
+    ? { label: "Analyze story and plan panels", go: () => void divide(),
+        blocked: !writerReady ? "Install a story analyst or prompt writer from Models."
+          : !storyLibrary ? "The story library is still loading."
+            : !story.trim() ? "Write or paste the story first." : undefined }
+    : unpreparedRemaining > 0
+      ? { label: preparedCount === 0 ? "Prepare drawing briefs"
+            : `Prepare ${unpreparedRemaining} remaining brief${unpreparedRemaining === 1 ? "" : "s"}`,
+          go: () => void enrich() }
+      : remaining > 0
+        ? { label: drawnCount === 0
+              ? `Draw ${Math.min(batch, remaining)} of ${panels.length} · about ${estimate.low}–${estimate.high} min`
+              : `Draw next ${Math.min(batch, remaining)}`,
+            go: () => void draw() }
+        : { label: composing ? "Composing…" : "Make a page", go: () => void compose(),
+            blocked: composing ? "The pages are being composed." : undefined };
+  const running = stage === "dividing" ? "the analysis" : stage === "enriching" ? "preparing briefs"
+    : "drawing";
+
+  /** What the progress line says, stage by stage. */
+  const progLabel = (() => {
+    if (stage === "dividing") return "Analysing the story";
+    if (stage === "enriching") return "Preparing drawing briefs";
+    if (stage === "casting") return "Drawing the cast sheet";
+    if (stage === "building") {
+      return buildProg ? `Drawing room ${buildProg.k} of ${buildProg.n}` : "Drawing the rooms";
+    }
+    if (batchProg) {
+      // From what panels have actually taken here once one has been timed;
+      // the time already spent on this panel comes off, so it counts down.
+      const left = Math.max(0,
+        (batchProg.n - batchProg.k + 1) * batchProg.perPanelMs - (Date.now() - batchProg.startedAt));
+      const mins = Math.ceil(left / 60000);
+      return `Panel ${batchProg.k} of ${batchProg.n} · `
+        + (left < 60000 ? "under a minute left" : `about ${mins} min left`);
+    }
+    const at = doc.panels.findIndex((x) => x.id === drawingId);
+    return at >= 0 ? `Drawing panel ${at + 1}` : "Drawing";
+  })();
+
   return (
     <div style={{ padding: 14 }}>
-      <div className="board-flow" aria-label="Board workflow">
-        {["read", "plan", "prepare", "draw", "compose"].map((name) => (
-          <span key={name} className={name === workflow ? "current" : ""}>
-            {name === "read" ? "Read story" : name === "plan" ? "Plan panels"
-              : name === "prepare" ? "Prepare briefs" : name === "draw" ? "Draw"
-                : "Compose"}
-          </span>
-        ))}
+      <div className="board-top">
+        <ol className="board-steps" aria-label="Board steps">
+          {STEPS.map(([name, label], n) => {
+            const st = stepState[name];
+            const here = name === currentStep;
+            const inner = (
+              <>
+                <span className="step-n" aria-hidden="true">{st.done ? "✓" : n + 1}</span>
+                <span className="step-label">{label}</span>
+                <span className="step-detail">
+                  {st.done && <span className="visually-hidden">done, </span>}
+                  {st.detail}
+                </span>
+              </>
+            );
+            return (
+              <li key={name} className={[here ? "current" : "", st.done ? "done" : "",
+                                         st.reached ? "" : "ahead"].filter(Boolean).join(" ")}>
+                {st.reached ? (
+                  <button type="button" aria-current={here ? "step" : undefined}
+                          onClick={() => goToStep(name)}>
+                    {inner}
+                  </button>
+                ) : (
+                  <span aria-current={here ? "step" : undefined}>{inner}</span>
+                )}
+              </li>
+            );
+          })}
+        </ol>
         <span className="board-save">
           {unsaved ? "Not being saved" : "Encrypted draft saved automatically"}
         </span>
       </div>
+
+      {/* ---- the run bar: what it costs, said before you commit ---- */}
+      <div className="board-run" role="group" aria-label="Run">
+        <button
+          ref={runButton}
+          type="button"
+          className={"btn small" + (busy ? " danger" : " primary")}
+          aria-disabled={!busy && primary.blocked ? true : undefined}
+          aria-describedby={!busy && primary.blocked ? "board-run-why" : undefined}
+          aria-label={busy ? `Stop ${running}` : undefined}
+          onClick={() => {
+            if (busy) void cancel();
+            else if (!primary.blocked) primary.go();
+          }}
+        >
+          {busy ? "Stop" : primary.label}
+        </button>
+        {!busy && primary.blocked && (
+          <span id="board-run-why" className="t-help">{primary.blocked}</span>
+        )}
+        {panels && (
+          <>
+            <span style={{ fontSize: 12, color: "var(--text-dim)",
+                           fontVariantNumeric: "tabular-nums" }}>
+              <b style={{ color: "var(--text)" }}>{drawnCount}</b> of {panels.length} drawn
+            </span>
+            {remaining > 0 && preparedCount > 0 && !busy && (
+              <span className="stepper" role="group" aria-label="Panels per press">
+                <button type="button" aria-label="Fewer panels per press"
+                        onClick={() => setBatch((n) => Math.max(1, n - 1))}>
+                  &minus;
+                </button>
+                <span aria-live="polite">{Math.min(batch, remaining)} at a time</span>
+                <button type="button" aria-label="More panels per press"
+                        onClick={() => setBatch((n) => Math.min(24, n + 1))}>
+                  +
+                </button>
+              </span>
+            )}
+            {remaining > 0 && !busy && (
+              <select
+                value={panelPx}
+                aria-label="Panel size"
+                onChange={(e) => setPanelPx(Number(e.target.value))}
+                title="How large each panel is drawn"
+                style={{ width: "auto", fontSize: 11, padding: "3px 6px" }}
+              >
+                {PANEL_SIZES.map(([label, px]) => (
+                  <option key={px} value={px}>{label}</option>
+                ))}
+              </select>
+            )}
+            {remaining === 0 && !busy && (
+              <span style={{ fontSize: 11, color: "var(--good)" }}>
+                All {panels.length} drawn
+              </span>
+            )}
+            {!busy && preparedCount > 0 && drawnCount === 0 && (
+              <button className="btn small" onClick={() => void enrich()}>
+                Prepare again
+              </button>
+            )}
+            {/* Available from the first drawn panel, not the last.
+                `compose` has always worked on whatever is drawn -- it filters
+                to the panels that have a picture -- and this gate was the only
+                thing insisting on a finished board. A board is twenty minutes
+                to an hour, and seeing the first page laid out is how you find
+                out the style is wrong while it still costs two panels to fix
+                rather than twelve. */}
+            {!busy && drawn.some(Boolean) && (
+              <>
+                <select value={layout} aria-label="Page layout"
+                        style={{ width: "auto", fontSize: 11, padding: "2px 6px" }}
+                        onChange={(e) => setLayout(e.target.value)}>
+                  <option value="page">Page</option>
+                  <option value="strip">Scrolling strip</option>
+                </select>
+                {remaining > 0 && (
+                  <button className="btn small" disabled={composing}
+                          onClick={() => void compose()}>
+                    {composing ? "Composing…" : `Page from the ${drawnCount} drawn`}
+                  </button>
+                )}
+              </>
+            )}
+          </>
+        )}
+        <div style={{ flex: 1 }} />
+        {!busy && (story || panels) && (
+          <button
+            className={"btn small" + (confirmReset === "new" ? " danger" : "")}
+            onClick={() => {
+              if (atRisk.length && confirmReset !== "new") {
+                setConfirmReset("new"); return;
+              }
+              setConfirmReset(null);
+              setStory(""); setCast(null); setProjectId(null);
+              setCharacter(""); setSheet(null); clearCharacterSheets(); setStoryBook(null); setChapterId(null);
+              setDoc({ panels: [], art: {} }); setDivided(false);
+              setPages([]); setOverflow([]); setOwnSheet([]); setPlaceSheets({});
+              setCoverage(null);
+              setSelected(0); setOutcome(null);
+            }}>
+            {confirmReset === "new"
+              ? `Start over, discarding ${atRisk.join(", ")}?`
+              : "New board"}
+          </button>
+        )}
+        {elapsed > 0 && busy && (
+          <span style={{ fontSize: 12, color: "var(--text-faint)",
+                         fontVariantNumeric: "tabular-nums" }}>
+            {Math.floor(elapsed / 60)}m {elapsed % 60}s
+          </span>
+        )}
+      </div>
+
+      {busy && (
+        <div className="board-progress">
+          {prog && <div className="board-progress-line">{progLabel}</div>}
+          <JobProgress p={prog} label={progLabel} />
+        </div>
+      )}
+      {/* Present from the start, empty, so the first outcome is announced:
+          a live region added together with its text often is not. */}
+      <p className="board-outcome" role="status">{outcome ?? ""}</p>
 
       {unsaved && (
         // Stays until a save succeeds. The board is still usable and still
         // holds everything; what it is not doing is writing any of it down.
         <div className="notice warn" style={{ margin: "10px 0" }}>
           <strong>This board is not being saved</strong>
-          <div style={{ fontSize: 11.5, lineHeight: 1.6, marginTop: 4 }}>
+          <div style={{ fontSize: 12, lineHeight: 1.6, marginTop: 4 }}>
             {unsaved}
           </div>
-          <div style={{ fontSize: 11.5, lineHeight: 1.6, marginTop: 4 }}>
+          <div style={{ fontSize: 12, lineHeight: 1.6, marginTop: 4 }}>
             Everything on screen is still here. Nothing since the last
             successful save has been written to the vault, so copy the
             manuscript out before closing the app if this does not clear.
@@ -1537,7 +2025,7 @@ export default function Storyboard({
         // right one is not a question this can answer.
         <div className="notice warn" style={{ margin: "10px 0" }}>
           <strong>This board opened empty, and an earlier version of it exists</strong>
-          <div style={{ fontSize: 11.5, lineHeight: 1.6, marginTop: 4 }}>
+          <div style={{ fontSize: 12, lineHeight: 1.6, marginTop: 4 }}>
             {previous.story?.trim()
               ? `It begins "${previous.story.trim().slice(0, 90)}…"`
               : "It has a division but no manuscript."}
@@ -1557,42 +2045,38 @@ export default function Storyboard({
         </div>
       )}
 
-      <div className="board-work">
+      {/* Below 1080px three panes do not fit side by side, and stacking them
+          gave three short scrolling boxes with the board and its editor a
+          screen apart. The manuscript becomes a drawer there instead, and the
+          board and the panel editor stay next to each other. */}
+      <div className={"board-work" + (msOpen ? " ms-open" : "")}>
 
         {/* ---- the manuscript: your prose, never rewritten ---- */}
-        <div className="board-pane">
+        <div className="board-pane board-ms" id="board-ms" ref={msPane} tabIndex={-1}
+             role="region" aria-label="Manuscript"
+             onKeyDown={(e) => {
+               if (e.key === "Escape" && msOpen) {
+                 setMsOpen(false); msToggle.current?.focus();
+               }
+             }}>
           <div className="board-pane-head">
             Manuscript
             <span className="n">
               {story.trim() ? `${story.trim().split(/\s+/).length} words` : "empty"}
             </span>
+            <button type="button" className="btn small board-ms-close"
+                    onClick={() => { setMsOpen(false); msToggle.current?.focus(); }}>
+              Close
+            </button>
           </div>
           <div className="inner">
             {!panels ? (
               <>
                 {!!storyLibrary?.books.length && <label>Use an analyzed chapter<select
-                  value="" disabled={busy} onChange={(e) => {
-                    const [bid, cid] = e.target.value.split(":");
-                    const book = storyLibrary.books.find((b) => b.id === bid);
-                    const chapter = book?.chapters.find((c) => c.id === cid);
-                    if (!book || !chapter) return;
-                    void (async () => {
-                      setStage("dividing");
-                      try {
-                        const result = await api.directStory(newJobId(), book, cid);
-                        setStory(chapter.source); setChapterTitle(chapter.title);
-                        setStoryBook(book); storyBookRef.current = book; setChapterId(cid);
-                        ignoreSavedReferences.current = false; setCast(castFromBook(book));
-                        setDoc(fromArrays(result.panels)); setDivided(true); setProjectId(newJobId());
-                        setSheet(null); clearCharacterSheets(); setPages([]); setOverflow([]); setPlaceSheets({});
-                        setSelected(0); setCoverage(null);
-                      } catch (error) { notify(errText(error), true); }
-                      finally { setStage("idle"); }
-                    })();
-                  }}>
+                  value="" disabled={busy} onChange={(e) => void openChapter(e.target.value)}>
                   <option value="">Choose a saved chapter…</option>
                   {storyLibrary.books.flatMap((book) => book.chapters.map((chapter) =>
-                    <option key={chapter.id} value={`${book.id}:${chapter.id}`}>{book.chapters[0]?.title} · {chapter.title}</option>))}
+                    <option key={chapter.id} value={`${book.id}:${chapter.id}`}>{book.chapters[0]?.title} · {chapter.title}{chapter.analysis === "voice" ? " (voices only)" : ""}</option>))}
                 </select></label>}
                 <label>Chapter title<input value={chapterTitle} disabled={busy}
                   onChange={(e) => setChapterTitle(e.target.value)} /></label>
@@ -1618,12 +2102,16 @@ export default function Storyboard({
                   value={story}
                   rows={14}
                   disabled={busy}
+                  // The pane's heading says "Manuscript", but a heading is not
+                  // a label: the box itself had no name at all.
+                  aria-label="Manuscript prose"
+                  aria-describedby="board-ms-hint"
                   onChange={(e) => changeStory(e.target.value)}
                   placeholder={"Mira comes home and finds the door already open. "
                     + "Nothing is taken, but every photograph has been turned to "
                     + "face the wall."}
                 />
-                <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 6,
+                <div id="board-ms-hint" style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 6,
                               lineHeight: 1.55 }}>
                   Prose, not prompts. It is divided into panels for you, and
                   review its interpretation before drawing.
@@ -1644,6 +2132,23 @@ export default function Storyboard({
                       || p.caption || `Panel ${i + 1}`}
                   </span>
                 ))}
+                {unanalysed > 0 && (
+                  <div className="notice warn" style={{ marginTop: 10 }}>
+                    <strong>{unanalysed} passage{unanalysed === 1 ? "" : "s"} not analysed yet</strong>
+                    <div style={{ fontSize: 11, marginTop: 4 }}>
+                      Their text is on the board without cast or direction. Continue with
+                      any analyst; finished passages and drawn panels are kept.
+                    </div>
+                    <label>Story analyst<select value={analystId} disabled={busy}
+                      onChange={(e) => setAnalystId(e.target.value)}>
+                      <option value="">Best installed model for this Mac</option>
+                      {models.filter((m) => ANALYST_IDS.includes(m.id) && m.installed && !m.hopeless)
+                        .map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                    </select></label>
+                    <button className="btn small primary" disabled={busy}
+                      onClick={() => void continueAnalysis()}>Continue analysis</button>
+                  </div>
+                )}
                 {coverage && coverage.total > 0 && (() => {
                   // The engine caps the listed passages at twenty. Counting
                   // the list meant the worst-covered boards reported the
@@ -1690,9 +2195,14 @@ export default function Storyboard({
         </div>
 
         {/* ---- the board: the only place panels exist ---- */}
-        <div className="board-pane">
+        <div className="board-pane" ref={boardPane}>
           <div className="board-pane-head">
             Board
+            <button type="button" ref={msToggle} className="btn small board-ms-toggle"
+                    aria-expanded={msOpen} aria-controls="board-ms"
+                    onClick={() => setMsOpen((v) => !v)}>
+              Manuscript
+            </button>
             <span className="n">
               {panels ? `${drawnCount}/${panels.length} drawn · ${scenes.length} scenes`
                       : "nothing yet"}
@@ -1723,7 +2233,7 @@ export default function Storyboard({
                       <span className="shot">
                         {drawn[i]
                           ? <img src={vaultUrl(drawn[i]!)} alt={`Panel ${i + 1}`} />
-                          : stage === "drawing" && done === i ? "drawing…" : "—"}
+                          : drawingId === p.id ? "drawing…" : "—"}
                         <span className="n">{String(i + 1).padStart(2, "0")}</span>
                       </span>
                       <span className="cap">
@@ -1755,8 +2265,8 @@ export default function Storyboard({
               <div style={{ marginTop: 18 }}>
                 <div className="sub-head">Character sheet</div>
                 <img src={vaultUrl(sheet)} alt="Character sheet"
-                     style={{ width: "100%", maxWidth: 260, borderRadius: 6 }} />
-                <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5,
+                     style={{ width: "100%", maxWidth: 260, borderRadius: 7 }} />
+                <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 5,
                               lineHeight: 1.5 }}>
                   Panels share this cast reference, so recurring people keep the
                   same appearance from one shot to the next.
@@ -1766,7 +2276,7 @@ export default function Storyboard({
 
             {pages.length > 0 && (
               <div style={{ marginTop: 18 }}>
-                <div className="sub-head">
+                <div className="sub-head" ref={pagesHead} tabIndex={-1}>
                   {pages.length === 1 ? "The page" : `${pages.length} pages`}
                 </div>
                 {overflowNow.length > 0 && (
@@ -1809,8 +2319,8 @@ export default function Storyboard({
                   </div>
                 )}
                 {pages.map((id, i) => (
-                  <img key={id} src={vaultUrl(id)} alt={`Page ${i + 1}`}
-                       style={{ width: "100%", borderRadius: 6, marginBottom: 10 }} />
+                  <img key={id} src={vaultUrl(id)} alt={`Page ${i + 1} of ${pages.length}`}
+                       style={{ width: "100%", borderRadius: 7, marginBottom: 10 }} />
                 ))}
               </div>
             )}
@@ -1822,15 +2332,19 @@ export default function Storyboard({
           <div className="board-pane-head">
             Notes
             {panels ? (
-              <span className="n" style={{ display: "flex", gap: 4 }}>
-                <button className={"pill" + (railTab === "panel" ? " installed" : "")}
-                        style={{ cursor: "pointer" }}
+              // Which half is showing was said by colour alone (WCAG 1.4.1,
+              // 4.1.2): it is a pressed state now, with a tick to see it by.
+              <span className="n board-rail-toggle" role="group" aria-label="Show settings for">
+                <button type="button" className={"pill" + (railTab === "panel" ? " installed" : "")}
+                        aria-pressed={railTab === "panel"}
                         onClick={() => setRailTab("panel")}>
+                  {railTab === "panel" && <span aria-hidden="true">✓ </span>}
                   Panel {selIndex + 1}
                 </button>
-                <button className={"pill" + (railTab === "board" ? " installed" : "")}
-                        style={{ cursor: "pointer" }}
+                <button type="button" className={"pill" + (railTab === "board" ? " installed" : "")}
+                        aria-pressed={railTab === "board"}
                         onClick={() => setRailTab("board")}>
+                  {railTab === "board" && <span aria-hidden="true">✓ </span>}
                   Board
                 </button>
               </span>
@@ -1839,8 +2353,7 @@ export default function Storyboard({
           <div className="inner">
             {!panels || !sel || railTab === "board" ? (
               <>
-                <div className="field">
-                  <label>Lead appearance override <em>optional</em></label>
+                <Field label={<>Lead appearance override <em>optional</em></>}>
                   <textarea
                     value={character}
                     rows={3}
@@ -1848,12 +2361,12 @@ export default function Storyboard({
                     onChange={(e) => { setCharacter(e.target.value); clearCharacterSheets(); setPages([]); setOverflow([]); }}
                     placeholder="short black hair, red scarf, narrow face"
                   />
-                </div>
+                </Field>
                 <div className="field">
                   <label>Or bring a picture of them</label>
                   <ImageDrop images={ownSheet} onChange={(images) => { setOwnSheet(images); clearCharacterSheets(); setPages([]); setOverflow([]); }} max={1}
                              onError={(m) => notify(m, true)} />
-                  <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5,
+                  <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 5,
                                 lineHeight: 1.5 }}>
                     {ownSheet.length > 0
                       ? "This picture anchors the lead character. Other visible characters keep their individual references."
@@ -1861,25 +2374,35 @@ export default function Storyboard({
                   </div>
                 </div>
                 <div className="field">
-                  <label>Style</label>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                  <label id="board-style-label">Style</label>
+                  {/* The chosen look was a tint and nothing else. It is a
+                      pressed button now, with a tick that does not depend on
+                      telling two blues apart. */}
+                  <div role="group" aria-labelledby="board-style-label"
+                       style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
                     {STYLES.map(({ id, label, words }) => (
-                      <button key={id}
+                      <button key={id} type="button"
                               className={"pill" + (style.id === id ? " installed" : "")
                                 + (confirmStyle === id ? " danger" : "")}
+                              aria-pressed={style.id === id}
                               // What the pill will actually ask for. The only
                               // thing the tool ever said about a style used to
                               // appear after the board was drawn.
                               title={words}
                               style={{ cursor: "pointer" }} disabled={busy}
                               onClick={() => changeStyle(id)}>
+                        {style.id === id && <span aria-hidden="true">✓ </span>}
                         {confirmStyle === id ? `Restyle? ${label}` : label}
                       </button>
                     ))}
-                    <button className={"pill" + (style.id === CUSTOM_STYLE ? " installed" : "")}
+                    <button type="button"
+                            className={"pill" + (style.id === CUSTOM_STYLE ? " installed" : "")}
+                            aria-pressed={style.id === CUSTOM_STYLE}
+                            aria-expanded={customOpen || style.id === CUSTOM_STYLE}
                             title="Describe a look in your own words"
                             style={{ cursor: "pointer" }} disabled={busy}
                             onClick={() => setCustomOpen((v) => !v)}>
+                      {style.id === CUSTOM_STYLE && <span aria-hidden="true">✓ </span>}
                       Describe it…
                     </button>
                   </div>
@@ -1887,6 +2410,7 @@ export default function Storyboard({
                     <div style={{ marginTop: 7 }}>
                       <textarea
                         rows={2} disabled={busy}
+                        aria-label="Your own look"
                         value={customWords}
                         onChange={(e) => setCustomWords(e.target.value)}
                         placeholder="1950s newspaper strip, coarse halftone, three colours"
@@ -1900,7 +2424,7 @@ export default function Storyboard({
                             ? "Press again to restyle"
                             : "Use this look"}
                         </button>
-                        <span style={{ fontSize: 10.5, color: "var(--text-faint)",
+                        <span style={{ fontSize: 12, color: "var(--text-faint)",
                                        lineHeight: 1.5 }}>
                           These words lead every panel prompt. The four presets
                           are a starting point, not the range.
@@ -1909,7 +2433,7 @@ export default function Storyboard({
                     </div>
                   )}
                   {confirmStyle && (
-                    <div style={{ fontSize: 10.5, color: "var(--bad)", marginTop: 5,
+                    <div style={{ fontSize: 12, color: "var(--bad)", marginTop: 5,
                                   lineHeight: 1.5 }}>
                       Press again to restyle. The {drawnCount} drawn panel
                       {drawnCount === 1 ? "" : "s"}, the cast sheet and the rooms
@@ -1919,7 +2443,7 @@ export default function Storyboard({
                     </div>
                   )}
                   {styleHasMoved(style) && (
-                    <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5,
+                    <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 5,
                                   lineHeight: 1.5 }}>
                       This board keeps the {styleLabel(style.id)} it was started in.
                       The preset has changed since, so a new board will look
@@ -1944,7 +2468,7 @@ export default function Storyboard({
                         </button>
                       ))}
                     </div>
-                    <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5,
+                    <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 5,
                                   lineHeight: 1.5 }}>
                       A reference is drawn once and every panel that needs it is
                       drawn against the same one -- which is what keeps a face and
@@ -1954,29 +2478,34 @@ export default function Storyboard({
                     </div>
                   </div>
                 )}
-                <div className="field">
-                  <label>Model</label>
+                <Field label="Model">
                   <select value={model?.id ?? ""} disabled={busy}
                           onChange={(e) => setModelId(e.target.value)}>
                     {usable.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                   </select>
-                </div>
+                </Field>
               </>
             ) : (
               <>
-                <div className="field">
-                  <label>Shot</label>
-                  <select value={sel.shot} disabled={busy}
+                {selLocked && drawStage && (
+                  <div className="t-help board-locked" role="note">
+                    This panel is being drawn, so it is locked until it finishes.
+                    The other panels can still be edited, and a change to one
+                    still waiting is what gets drawn.
+                  </div>
+                )}
+                <Field label="Shot">
+                  <select value={sel.shot} disabled={selLocked}
                           onChange={(e) => edit(selIndex, { shot: e.target.value as Panel["shot"] })}>
                     <option value="wide">wide</option>
                     <option value="medium">medium</option>
                     <option value="close-up">close-up</option>
                   </select>
-                </div>
+                </Field>
                 <div className="field">
                   <label>Story source <em>coverage anchor</em></label>
                   <div style={{ fontSize: 11, lineHeight: 1.55, color: "var(--text-dim)",
-                                background: "var(--bg-sunk)", borderRadius: 5,
+                                background: "var(--bg-sunk)", borderRadius: 4,
                                 padding: "6px 8px" }}>
                     {sel.source || "No exact source quote was returned. Review this panel against the manuscript."}
                   </div>
@@ -1984,66 +2513,65 @@ export default function Storyboard({
                 <div className="field">
                   <label style={{ display: "flex", alignItems: "center", gap: 6,
                                   cursor: "pointer" }}>
-                    <input type="checkbox" checked={sel.character_in_frame} disabled={busy}
+                    <input type="checkbox" checked={sel.character_in_frame} disabled={selLocked}
                            style={{ width: "auto", margin: 0 }}
                            onChange={(e) => edit(selIndex, { character_in_frame: e.target.checked })} />
                     the one we follow is in this frame
                   </label>
                 </div>
-                <div className="field">
-                  <label>People in frame <em>names from the story</em></label>
-                  <input type="text" value={(sel.characters ?? []).join(", ")} disabled={busy}
+                <Field label={<>People in frame <em>names from the story, comma separated</em></>}>
+                  <input type="text" value={(sel.characters ?? []).join(", ")} disabled={selLocked}
                          onChange={(e) => edit(selIndex, {
                            characters: e.target.value.split(",").map((v) => v.trim()).filter(Boolean),
                            character_in_frame: Boolean(e.target.value.trim()),
                          })} />
-                </div>
-                <div className="field">
-                  <label>Subject</label>
-                  <input type="text" value={sel.subject} disabled={busy}
+                </Field>
+                <Field label="Subject">
+                  <input type="text" value={sel.subject} disabled={selLocked}
                          onChange={(e) => edit(selIndex, { subject: e.target.value })} />
-                </div>
-                <div className="field">
-                  <label>Action</label>
-                  <input type="text" value={sel.action} disabled={busy}
+                </Field>
+                <Field label="Action">
+                  <input type="text" value={sel.action} disabled={selLocked}
                          onChange={(e) => edit(selIndex, { action: e.target.value })} />
-                </div>
-                <div className="field">
-                  <label>Setting</label>
-                  <input type="text" value={sel.setting} disabled={busy}
+                </Field>
+                <Field label="Setting">
+                  <input type="text" value={sel.setting} disabled={selLocked}
                          onChange={(e) => edit(selIndex, { setting: e.target.value })} />
-                </div>
+                </Field>
                 {sel.cast !== undefined && <>
-                  <div className="field"><label>Mood</label><input value={sel.mood ?? ""} disabled={busy}
-                    onChange={(e) => edit(selIndex, { mood: e.target.value })} /></div>
-                  <div className="field"><label>Current location state</label><input value={sel.location_state ?? ""} disabled={busy}
-                    onChange={(e) => edit(selIndex, { location_state: e.target.value })} /></div>
-                  {sel.cast.map((actor, index) => <div className="field" key={actor.character_id}>
-                    <label>{actor.name} · expression and body language</label>
-                    <input aria-label={`${actor.name} expression`} value={actor.expression} disabled={busy}
+                  <Field label="Mood">
+                    <input value={sel.mood ?? ""} disabled={selLocked}
+                           onChange={(e) => edit(selIndex, { mood: e.target.value })} />
+                  </Field>
+                  <Field label="Current location state">
+                    <input value={sel.location_state ?? ""} disabled={selLocked}
+                           onChange={(e) => edit(selIndex, { location_state: e.target.value })} />
+                  </Field>
+                  {sel.cast.map((actor, index) => <div className="field" key={actor.character_id}
+                      role="group" aria-labelledby={`board-actor-${index}`}>
+                    <label id={`board-actor-${index}`}>{actor.name} · expression and body language</label>
+                    <input aria-label={`${actor.name} expression`} value={actor.expression} disabled={selLocked}
                       onChange={(e) => edit(selIndex, { cast: sel.cast!.map((a, at) => at === index
                         ? { ...a, expression: e.target.value } : a) })} />
                     <input aria-label={`${actor.name} current outfit and condition`} placeholder="Current outfit and condition (replaces earlier appearance)"
-                      value={actor.appearance ?? ""} disabled={busy}
+                      value={actor.appearance ?? ""} disabled={selLocked}
                       onChange={(e) => edit(selIndex, { cast: sel.cast!.map((a, at) => at === index
                         ? { ...a, appearance: e.target.value } : a) })} />
-                    <input aria-label={`${actor.name} body language`} value={actor.body_language} disabled={busy}
+                    <input aria-label={`${actor.name} body language`} value={actor.body_language} disabled={selLocked}
                       onChange={(e) => edit(selIndex, { cast: sel.cast!.map((a, at) => at === index
                         ? { ...a, body_language: e.target.value } : a) })} />
                   </div>)}
                 </>}
-                <div className="field">
-                  <label>Caption <em>what the picture cannot say</em></label>
-                  <input type="text" value={sel.caption} disabled={busy}
+                <Field label="Caption" hint="What the picture cannot say.">
+                  <input type="text" value={sel.caption} disabled={selLocked}
                          onChange={(e) => edit(selIndex, { caption: e.target.value })} />
-                </div>
-                <div className="field">
-                  <label>Dialogue <em>spoken aloud in this frame</em></label>
+                </Field>
+                <Field label="Dialogue" hint="Spoken aloud in this frame, as Name: line / Name: line.">
                   <input
                     type="text"
                     value={(sel.dialogue ?? []).map(
                       (d) => (d.speaker ? `${d.speaker}: ` : "") + d.text).join(" / ")}
-                    disabled={busy}
+                    disabled={selLocked}
                     placeholder="Name: what they say / Name: what they say"
                     onChange={(e) => edit(selIndex, {
                       // "Name: line / Name: line" is quicker to correct than a
@@ -2057,22 +2585,21 @@ export default function Storyboard({
                       }).filter((d) => d.text),
                     })}
                   />
-                </div>
+                </Field>
                 {(sel.description ?? "").trim() && (
-                  <div className="field">
-                    <label>The worked-up scene <em>replaces the terse fields</em></label>
+                  <Field label={<>The worked-up scene <em>replaces the terse fields</em></>}>
                     <textarea
-                      value={sel.description} disabled={busy} rows={3}
-                      style={{ fontSize: 11.5, color: "var(--text-dim)" }}
+                      value={sel.description} disabled={selLocked} rows={3}
+                      style={{ fontSize: 12, color: "var(--text-dim)" }}
                       onChange={(e) => edit(selIndex, { description: e.target.value })}
                     />
-                  </div>
+                  </Field>
                 )}
                 {(sel.place ?? "").trim() && (
                   <div className="field">
                     <label>This scene's place <em>every panel here shares it</em></label>
                     <div style={{ fontSize: 11, lineHeight: 1.55, color: "var(--text-dim)",
-                                  background: "var(--bg-sunk)", borderRadius: 5,
+                                  background: "var(--bg-sunk)", borderRadius: 4,
                                   padding: "6px 8px" }}>
                       {sel.place}
                     </div>
@@ -2128,23 +2655,24 @@ export default function Storyboard({
                 <div className="field">
                   <label>The brief <em>the exact words asked for</em></label>
                   <div style={{ fontSize: 11, lineHeight: 1.6, color: "var(--text-dim)",
-                                background: "var(--bg-sunk)", borderRadius: 5,
+                                background: "var(--bg-sunk)", borderRadius: 4,
                                 padding: "7px 9px", userSelect: "text" }}>
                     {panelPrompt(sel, style, panelWho(sel), notes[selIndex])}
                   </div>
                 </div>
                 {drawn[selIndex] && (
                   <div className="field">
-                    <label>Your note <em>redraws just this frame</em></label>
-                    <input
-                      type="text"
-                      value={notes[selIndex] ?? ""}
-                      disabled={busy}
-                      placeholder="older, grey at the temples"
-                      style={{ borderStyle: notes[selIndex]?.trim() ? "solid" : "dashed" }}
-                      onChange={(e) =>
-                        putArt(selIndex, { note: e.target.value })}
-                    />
+                    <Field className="" label={<>Your note <em>redraws just this frame</em></>}>
+                      <input
+                        type="text"
+                        value={notes[selIndex] ?? ""}
+                        disabled={selLocked}
+                        placeholder="older, grey at the temples"
+                        style={{ borderStyle: notes[selIndex]?.trim() ? "solid" : "dashed" }}
+                        onChange={(e) =>
+                          putArt(selIndex, { note: e.target.value })}
+                      />
+                    </Field>
                     <button className="btn small full" style={{ marginTop: 6 }}
                             disabled={busy} onClick={() => void redraw(selIndex)}>
                       {notes[selIndex]?.trim() ? "Redraw with note" : "Redraw this panel"}
@@ -2165,7 +2693,7 @@ export default function Storyboard({
                     </button>
                     {repairing === selIndex && (
                       <div style={{ marginTop: 8 }}>
-                        <div style={{ fontSize: 10.5, color: "var(--text-faint)",
+                        <div style={{ fontSize: 12, color: "var(--text-faint)",
                                       lineHeight: 1.55, marginBottom: 6 }}>
                           Paint over what is wrong. Only the painted part is
                           drawn again; the rest of the panel is kept exactly as
@@ -2206,7 +2734,7 @@ export default function Storyboard({
                         </button>
                       ))}
                     </div>
-                    <div style={{ fontSize: 10.5, color: "var(--text-faint)",
+                    <div style={{ fontSize: 12, color: "var(--text-faint)",
                                   marginTop: 5, lineHeight: 1.55 }}>
                       Click one to put it back. The current picture takes its
                       place here, so nothing is lost either way.
@@ -2228,20 +2756,21 @@ export default function Storyboard({
       {cast?.first_person && !cast.people.some((p) => p.tier === 1) && (
         <div className="notice warn" style={{ margin: "10px 0" }}>
           <strong>This story is told by someone it never names.</strong>
-          <div style={{ fontSize: 11.5, lineHeight: 1.6, marginTop: 4 }}>
+          <div style={{ fontSize: 12, lineHeight: 1.6, marginTop: 4 }}>
             Give them a name and, if you like, a description. Without one there
             is no cast sheet, and a face drawn from nothing is a different face
             in every panel.
           </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
-            <input value={narratorName} disabled={busy}
-                   style={{ maxWidth: 160 }}
-                   onChange={(e) => setNarratorName(e.target.value)}
-                   placeholder="Name" />
-            <input value={narratorLook} disabled={busy}
-                   style={{ flex: 1, minWidth: 180 }}
-                   onChange={(e) => setNarratorLook(e.target.value)}
-                   placeholder="short black hair, red scarf (optional)" />
+          <div className="board-narrator">
+            <Field className="board-narrator-name" label="Their name">
+              <input value={narratorName} disabled={busy}
+                     onChange={(e) => setNarratorName(e.target.value)} />
+            </Field>
+            <Field className="board-narrator-look" label={<>What they look like <em>optional</em></>}>
+              <input value={narratorLook} disabled={busy}
+                     onChange={(e) => setNarratorLook(e.target.value)}
+                     placeholder="short black hair, red scarf" />
+            </Field>
             <button className="btn small primary"
                     disabled={busy || !narratorName.trim()}
                     onClick={() => addPerson(narratorName, narratorLook, true)}>
@@ -2252,54 +2781,68 @@ export default function Storyboard({
       )}
 
       {cast && (cast.people.length > 0 || cast.places.length > 0) && (
-        <div className="board-shelf">
-          <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".13em",
+        <div className="board-shelf" ref={castShelf} tabIndex={-1} role="region" aria-label="Cast">
+          <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".13em",
                          textTransform: "uppercase", color: "var(--text-faint)" }}>
             Cast
           </span>
-          {cast.people.map((p) => (
-            <span key={p.name} className="pill" style={{
-                     opacity: p.tier === 1 ? 1 : p.tier === 2 ? 0.8 : 0.62,
-                     cursor: "pointer" }}
-                    title={(p.description || "The story never says what they look like.")
-                           + ` · ${p.mentions} mentions · click to describe`}
-                    onClick={() => setEditingPerson(
-                      editingPerson === p.name ? null : p.name)}>
-              {p.name}
-            </span>
-          ))}
+          {/* Each person is a button that opens their appearance. They were
+              spans with a click handler, so a keyboard could not reach them,
+              and how much of the story they carry was said by fading the
+              minor ones out -- which also put their names below readable
+              contrast. The tier is a word now. */}
+          {cast.people.map((p) => {
+            const open = editingPerson === p.name;
+            const tier = p.tier === 1 ? "Lead" : p.tier === 2 ? "Major" : "Minor";
+            return (
+              <button key={p.name} type="button"
+                      ref={(el) => { pillRefs.current[p.name] = el; }}
+                      className="pill board-cast-pill"
+                      aria-expanded={open}
+                      aria-controls={open ? "board-cast-editor" : undefined}
+                      title={(p.description || "The story never says what they look like.")
+                             + ` · ${p.mentions} mentions`}
+                      onClick={() => setEditingPerson(open ? null : p.name)}>
+                {p.name}{" "}<span className="tier">{tier}</span>
+              </button>
+            );
+          })}
           {editingPerson && (() => {
             const p = cast.people.find((q) => q.name === editingPerson);
             if (!p) return null;
+            /** Close the editor, saving `look` when given, and go back to the pill. */
+            const close = (look?: string) => {
+              castClosing.current = true;
+              if (look !== undefined && look !== p.description) describePerson(p.name, look);
+              setEditingPerson(null);
+              pillRefs.current[p.name]?.focus();
+              castClosing.current = false;
+            };
             return (
-              <span style={{ display: "flex", gap: 6, alignItems: "center",
-                             flexBasis: "100%", marginTop: 6 }}>
-                <input
-                  autoFocus defaultValue={p.description} disabled={busy}
-                  style={{ flex: 1, minWidth: 200 }}
-                  placeholder={`What does ${p.name} look like? The story does not say.`}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      describePerson(p.name, (e.target as HTMLInputElement).value);
+              <div id="board-cast-editor" className="board-cast-editor">
+                <Field label={`What ${p.name} looks like`}
+                       hint="Appearance only — it leads every panel they are in. Enter saves, Escape cancels.">
+                  <input
+                    autoFocus defaultValue={p.description} disabled={busy}
+                    placeholder="The story does not say."
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") close((e.target as HTMLInputElement).value);
+                      if (e.key === "Escape") close();
+                    }}
+                    onBlur={(e) => {
+                      if (castClosing.current) return;
+                      if (e.target.value !== p.description) {
+                        describePerson(p.name, e.target.value);
+                      }
                       setEditingPerson(null);
-                    }
-                    if (e.key === "Escape") setEditingPerson(null);
-                  }}
-                  onBlur={(e) => {
-                    if (e.target.value !== p.description) {
-                      describePerson(p.name, e.target.value);
-                    }
-                    setEditingPerson(null);
-                  }} />
-                <span style={{ fontSize: 10, color: "var(--text-faint)" }}>
-                  appearance only &mdash; it leads every panel she is in
-                </span>
-              </span>
+                    }} />
+                </Field>
+              </div>
             );
           })()}
           {cast.places.length > 0 && <span className="divider" />}
           {cast.places.map((pl) => (
-            <span key={pl.name} className="pill" style={{ opacity: 0.62 }}
+            <span key={pl.name} className="pill"
                   title={pl.description || "The story never describes it."}>
               {pl.name}
             </span>
@@ -2307,147 +2850,6 @@ export default function Storyboard({
         </div>
       )}
 
-      {/* ---- the run bar: what it costs, said before you commit ---- */}
-      <div className="board-run">
-        {!panels ? (
-          <>
-            <button className="btn primary small"
-              disabled={busy || !story.trim() || !writerReady || !storyLibrary}
-              onClick={() => void divide()}>
-              {stage === "dividing" ? "Understanding and directing…" : "Analyze story and plan panels"}
-            </button>
-            {!writerReady && (
-              // Reading and dividing are both the writer's work. Saying so here
-              // beats a failure after the press.
-              <span style={{ fontSize: 10.5, color: "var(--warn)" }}>
-                Install a story analyst or prompt writer from Models.
-              </span>
-            )}
-          </>
-        ) : (
-          <>
-            <span style={{ fontSize: 11.5, color: "var(--text-dim)",
-                           fontVariantNumeric: "tabular-nums" }}>
-              <b style={{ color: "var(--text)" }}>{drawnCount}</b> of {panels.length} drawn
-            </span>
-            {remaining > 0 && preparedCount > 0 && !busy && (
-              <span className="stepper" title="Panels per press">
-                <button type="button" onClick={() => setBatch((n) => Math.max(1, n - 1))}>
-                  &minus;
-                </button>
-                <span>{Math.min(batch, remaining)} at a time</span>
-                <button type="button" onClick={() => setBatch((n) => Math.min(24, n + 1))}>
-                  +
-                </button>
-              </span>
-            )}
-            {remaining > 0 && !busy && (
-              <select
-                value={panelPx}
-                onChange={(e) => setPanelPx(Number(e.target.value))}
-                title="How large each panel is drawn"
-                style={{ width: "auto", fontSize: 11, padding: "3px 6px" }}
-              >
-                {PANEL_SIZES.map(([label, px]) => (
-                  <option key={px} value={px}>{label}</option>
-                ))}
-              </select>
-            )}
-            {/* Gated on the panels still waiting for a picture, which is what
-                `unpreparedRemaining` was written for. `preparedCount > 0` let
-                one prepared panel unlock drawing all of them, and the rest went
-                down the terse-field path -- a minute of drawing each to find
-                out. Preparing comes first, as the stage order promises. */}
-            {unpreparedRemaining > 0 && (
-              <button className="btn primary small" disabled={busy}
-                      onClick={() => void enrich()}>
-                {stage === "enriching" ? "Preparing briefs…"
-                  : preparedCount === 0 ? "Prepare drawing briefs"
-                  : `Prepare ${unpreparedRemaining} remaining brief${unpreparedRemaining === 1 ? "" : "s"}`}
-              </button>
-            )}
-            {remaining > 0 && unpreparedRemaining === 0 && (
-              <button className="btn primary small" disabled={busy} onClick={draw}>
-                {stage === "drawing" ? `Drawing ${done}/${panels.length}…`
-                  : stage === "building" ? "Building the rooms…"
-                  : stage === "casting" ? "Casting…"
-                  : drawnCount === 0
-                    ? `Draw ${Math.min(batch, remaining)} of ${panels.length} · about ${estimate.low}–${estimate.high} min`
-                    : `Draw next ${Math.min(batch, remaining)}`}
-              </button>
-            )}
-            {remaining === 0 && !busy && (
-              <span style={{ fontSize: 11, color: "var(--good)" }}>
-                All {panels.length} drawn
-              </span>
-            )}
-            {!busy && preparedCount > 0 && drawnCount === 0 && (
-              <button className="btn small" disabled={busy} onClick={() => void enrich()}>
-                Prepare again
-              </button>
-            )}
-            {busy && <button className="btn small" onClick={cancel}>Cancel</button>}
-            {/* Available from the first drawn panel, not the last.
-                `compose` has always worked on whatever is drawn -- it filters
-                to the panels that have a picture -- and this gate was the only
-                thing insisting on a finished board. A board is twenty minutes
-                to an hour, and seeing the first page laid out is how you find
-                out the style is wrong while it still costs two panels to fix
-                rather than twelve. */}
-            {!busy && drawn.some(Boolean) && (
-              <>
-                <select value={layout} style={{ width: "auto", fontSize: 11, padding: "2px 6px" }}
-                        onChange={(e) => setLayout(e.target.value)}>
-                  <option value="page">Page</option>
-                  <option value="strip">Scrolling strip</option>
-                </select>
-                <button className="btn small" disabled={composing}
-                        onClick={() => void compose()}>
-                  {composing ? "Composing…"
-                    : remaining === 0 ? "Make a page"
-                    : `Page from the ${drawnCount} drawn`}
-                </button>
-              </>
-            )}
-          </>
-        )}
-        <div style={{ flex: 1 }} />
-        {!busy && (story || panels) && (
-          <button
-            className={"btn small" + (confirmReset === "new" ? " danger" : "")}
-            onClick={() => {
-              if (atRisk.length && confirmReset !== "new") {
-                setConfirmReset("new"); return;
-              }
-              setConfirmReset(null);
-              setStory(""); setCast(null); setProjectId(null);
-              setCharacter(""); setSheet(null); clearCharacterSheets(); setStoryBook(null); setChapterId(null);
-              setDoc({ panels: [], art: {} }); setDivided(false);
-              setPages([]); setOverflow([]); setOwnSheet([]); setPlaceSheets({});
-              setCoverage(null);
-              setSelected(0);
-            }}>
-            {confirmReset === "new"
-              ? `Start over, discarding ${atRisk.join(", ")}?`
-              : "New board"}
-          </button>
-        )}
-        {elapsed > 0 && busy && (
-          <span style={{ fontSize: 10.5, color: "var(--text-faint)",
-                         fontVariantNumeric: "tabular-nums" }}>
-            {Math.floor(elapsed / 60)}m {elapsed % 60}s
-          </span>
-        )}
-      </div>
-
-      {prog && (
-        <div style={{ marginTop: 8 }}>
-          <JobProgress p={prog} label={
-            stage === "dividing" ? "Dividing the story"
-              : stage === "casting" ? "Casting the character"
-              : `Panel ${done + 1} of ${panels?.length ?? 0}`} />
-        </div>
-      )}
     </div>
   );
 }

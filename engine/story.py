@@ -11,33 +11,57 @@ import json
 import re
 import uuid
 
-SCENE_SYSTEM = """You are a story editor and director. Return only the requested JSON.
-Read this scene for causality, dramatic turns and emotion, not equal coverage.
-Use the supplied numbered source units, each exactly once, in order. Group
-adjacent units into beats. Importance is 1 (context), 2 (quiet action), 3
-(meaningful change), 4 (turn), 5 (climax/reveal). Preserve the ending.
-Every visible.character_id and dialogue.speaker_id must EXACTLY match an id in
-the character bible or in this reply's characters array. For a new character,
-declare a unique short local id (c1, c2, c3), then reuse that exact ID in beats.
-Never use an undeclared ID or the schema placeholder as a character reference.
-Canonical characters have stable IDs. Reuse them for aliases; never create a
-second person for a narrator already named. New characters must have a name
-or noun phrase literally in this scene; never invent appearance or aliases.
-Keep a speaking character offscreen when only heard. Attribute every quoted
-utterance; use null speaker_id when uncertain rather than guessing. Dialogue
-text must be an exact substring of the source. Do not paraphrase it.
-Beats describe visible action, location, tension, mood, and each visible
-character's expression and body language. Do not invent events. Distinguish
-what happens from how the frame conveys its emotional meaning.
-Character visual describes lasting identity only (face, hair, build, distinguishing
-features), never clothing, accessories, injury or wetness. Those belong in each
-visible actor's appearance: the COMPLETE current outfit and temporary condition,
-not a delta. Carry it forward until the source changes it; a changed dress REPLACES
-the old dress, never layers over it. Do not invent unspecified details.
-location_id is a stable descriptive key for the actual room/place; reuse on return.
-location_state describes current layout, important objects, lighting and weather.
-Carry unchanged facts forward, but replace facts changed by the story.
+VOICE_SYSTEM = """You cast an audiobook. Return only the requested JSON, compact on one line.
+Quoted speech in the passage is numbered like [3]“...”. For every number give the
+speaker's character id, or null when the text does not make the speaker clear.
+Use ids from the character bible. Declare only people new to the bible in
+characters, with a short local id (c1, c2) and the name exactly as the source
+gives it, then use that id. Never use a pronoun, a group, or a phrase describing
+someone as a name. For unnamed first-person narration the name Narrator is
+allowed. mood is the passage's emotional tone in a few words. voice is a short
+direction for how a new person sounds.
 """
+
+
+def voice_instruction(group, characters):
+    """The passage with its quotes numbered, for speaker attribution only."""
+    text, cursor, numbered = ''.join(u["text"] for u in group), 0, []
+    for n, (at, quoted) in enumerate(quotes(text), 1):
+        open_at = at - 1 if at and text[at - 1] in '“"「' else at
+        numbered.append(text[cursor:open_at] + f"[{n}]")
+        cursor = open_at
+    numbered.append(text[cursor:])
+    bible = [{k: c[k] for k in ("id", "name", "aliases", "voice")} for c in characters]
+    schema = {"mood": "emotional tone", "characters": [{"id": "c1", "name": "literal source name",
+              "aliases": [], "voice": "voice direction"}], "speakers": [{"quote": 1, "speaker_id": "c1"}]}
+    return ("Character bible:\n" + json.dumps(bible, ensure_ascii=False)
+            + "\nReturn this schema:\n" + json.dumps(schema, ensure_ascii=False)
+            + "\nPassage:\n" + ''.join(numbered))
+
+
+def voice_scene_reply(raw, group, number, bible=()):
+    """A voice reply restated as a scene reply, so `parse_scene` applies every
+    identity and source rule to it unchanged. One beat per passage: the
+    audiobook needs who speaks and the mood, not shots or appearances."""
+    reply = _loads(raw)
+    if not isinstance(reply, dict):
+        raise ValueError("reply must be an object")
+    _tidy_reply(reply, group, bible)
+    said = {}
+    for line in _array(reply.get("speakers", []), "speakers"):
+        if isinstance(line, dict) and type(line.get("quote")) is int:
+            who = line.get("speaker_id")
+            said[line["quote"]] = who if isinstance(who, str) and who.strip() else None
+    text = ''.join(u["text"] for u in group)
+    characters = [{**c, "visual": ""} for c in _array(reply.get("characters", []), "characters")
+                  if isinstance(c, dict)]
+    mood = reply.get("mood") if isinstance(reply.get("mood"), str) else ""
+    return json.dumps({
+        "title": f"Passage {number}", "summary": "Voice casting", "characters": characters,
+        "beats": [{"units": [u["id"] for u in group], "importance": 2, "tension": 2,
+                   "action": "Narrated passage", "setting": "", "mood": mood[:200], "visible": [],
+                   "dialogue": [{"speaker_id": said.get(n), "text": quoted, "offscreen": False}
+                                for n, (_, quoted) in enumerate(quotes(text), 1)]}]})
 
 
 def units(source):
@@ -89,11 +113,11 @@ def passages(source, max_words=450, max_units=8):
                 groups.append([{"start": start, "end": end, "text": source[start:end]}])
                 start = end
             continue
+        # Paragraph breaks do not end a call. Dialogue puts nearly every line
+        # in its own paragraph, so a 300-word exchange cost eleven writer
+        # calls, each re-sending the whole instruction to analyse one line.
         group.append(unit)
         words += n
-        if "\n\n" in unit["text"]:
-            groups.append(group)
-            group, words = [], 0
     if group:
         groups.append(group)
     for group in groups:
@@ -102,33 +126,266 @@ def passages(source, max_words=450, max_units=8):
     return groups
 
 
-def instruction(group, characters, continuity=None):
-    schema = {
-        "title": "scene title", "summary": "causal/emotional meaning",
-        "characters": [{"id": "c1", "name": "literal source name",
-                        "aliases": [], "visual": "lasting face/hair/build only, no outfit",
-                        "voice": "voice direction"}],
-        "beats": [{"units": [0], "importance": 3, "action": "visible action",
-                   "setting": "location", "location_id": "stable room/place key",
-                   "location_state": "current layout, objects, light and weather", "mood": "emotional tone", "tension": 3,
-                   "visible": [{"character_id": "c1", "expression": "expression",
-                                "body_language": "pose", "appearance": "complete current outfit and temporary condition"}],
-                   "dialogue": [{"speaker_id": None, "text": "exact quoted words",
-                                 "offscreen": True}]}],
-    }
-    return ("For unnamed first-person narration only, canonical name Narrator is allowed. "
-            "Never use Narrator when a known character already narrates. "
-            "Do not group multiple people by shared third-person pronouns.\nCharacter bible:\n" + json.dumps(characters, ensure_ascii=False)
-            + "\nPrior continuity state (apply only unchanged facts):\n" + json.dumps(continuity or {}, ensure_ascii=False)
-            + "\nReturn this schema with one beat per meaningful moment:\n"
-            + json.dumps(schema, ensure_ascii=False)
-            + "\nNumbered source units:\n" + json.dumps(group, ensure_ascii=False))
+# The Board's analysis in as few written tokens as the drawing needs. The old
+# reply restated every quote, and every visible person's expression, pose and
+# full outfit in every beat: about 22 output tokens per word of story, which on
+# a laptop-sized writer is an hour for a long chapter before a panel is drawn.
+# Here quotes are numbered and attributed by number, outfits and rooms are
+# stated once per passage, and the reply is restated into the scene format so
+# `parse_scene` still applies every identity and source rule.
+COMPACT_SYSTEM = """You are a story editor and director. Return only the requested JSON,
+compact on one line with no indentation.
+Read the numbered source units for causality, dramatic turns and emotion. Group
+adjacent units into beats; use every unit exactly once, in order. importance is
+1 (context), 2 (quiet action), 3 (meaningful change), 4 (turn), 5 (climax/reveal).
+Quoted speech is numbered like [3]“...”. In speakers give, for each number, the
+speaker's id, or null when the text does not make the speaker clear.
+Use ids from the character bible. Declare in characters only people new to the
+bible (short local id c1, c2, with the name exactly as the source gives it), or
+a known person with a new literal alias. Never use a pronoun, a group, or a
+phrase describing someone as a name. For unnamed first-person narration the
+name Narrator is allowed; never when a known character already narrates.
+visual is lasting identity only (face, hair, build), never clothing.
+cast lists who is visible in a beat; keep someone only heard out of it. feel is
+their expression and pose in a few words.
+looks gives, once for this passage, each visible person's COMPLETE current outfit
+and condition; a change REPLACES the old outfit. Omit people whose look has not
+changed from the continuity state. places gives each place's layout, objects,
+light and weather once; place is a short stable name, reused when the story
+returns there. Do not invent events, appearance or details the source lacks.
+Never copy quotation marks into any field; describe speech, do not quote it.
+"""
+
+
+def compact_instruction(group, characters, continuity=None):
+    """Units with their quotes numbered, and only the continuity that matters."""
+    text = ''.join(u["text"] for u in group)
+    marks = {}
+    for n, (at, _) in enumerate(quotes(text), 1):
+        marks[at - 1 if at and text[at - 1] in '“"「' else at] = n
+    numbered, offset = [], 0
+    for u in group:
+        body = u["text"]
+        for at in sorted((a - offset for a in marks if offset <= a < offset + len(body)), reverse=True):
+            body = body[:at] + f"[{marks[at + offset]}]" + body[at:]
+        numbered.append({"id": u["id"], "text": body})
+        offset += len(u["text"])
+    continuity = continuity or {}
+    known = {c["id"] for c in characters}
+    state = {"looks": {k: v for k, v in continuity.get("characters", {}).items() if k in known},
+             "places": dict(list(continuity.get("locations", {}).items())[-6:])}
+    bible = [{**c, "visual": c["visual"][:VISUAL_LIMIT]} for c in characters]
+    schema = {"title": "scene title",
+              "characters": [{"id": "c1", "name": "literal source name", "aliases": [],
+                              "visual": "face, hair, build", "voice": "voice direction"}],
+              "looks": [{"id": "c1", "appearance": "complete current outfit and condition"}],
+              "places": [{"place": "kitchen", "state": "layout, objects, light, weather"}],
+              "beats": [{"units": [0, 1], "importance": 3, "action": "visible action", "place": "kitchen",
+                         "mood": "emotional tone", "cast": [{"id": "c1", "feel": "expression and pose"}]}],
+              "speakers": [{"quote": 1, "id": "c1"}]}
+    return ("Character bible:\n" + json.dumps(bible, ensure_ascii=False)
+            + "\nContinuity state:\n" + json.dumps(state, ensure_ascii=False)
+            + "\nReturn this schema:\n" + json.dumps(schema, ensure_ascii=False)
+            + "\nNumbered source units:\n" + json.dumps(numbered, ensure_ascii=False))
+
+
+def _place_key(place):
+    return re.sub(r'[^\w]+', '-', place.casefold()).strip('-')
+
+
+def _loads(raw):
+    """Parse a writer's JSON, repairing only mechanical slips.
+
+    Small writers copy the story's curly quotes into a field and then close
+    the field with one -- `"...too.’”, "place"` -- which made the whole
+    passage unreadable. Only when parsing fails: a curly closing quote just
+    before the failure, followed by a delimiter, gets the straight quote it
+    was meant to be followed by; trailing commas are dropped. Nothing is
+    guessed beyond that."""
+    raw = raw.strip()
+    if raw.startswith('```'):
+        raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw)
+    for _ in range(8):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            fixed = re.sub(r',(\s*[}\]])', r'\1', raw)
+            if fixed == raw:
+                window = raw[max(0, exc.pos - 200):exc.pos + 1]
+                slip = None
+                for m in re.finditer(r'[”’」』](?=\s*[,}\]])', window):
+                    slip = max(0, exc.pos - 200) + m.end()
+                if slip is not None:
+                    fixed = raw[:slip] + '"' + raw[slip:]
+                else:
+                    # A straight quote left unescaped inside a field ends the
+                    # string early: the last one before the failure that is not
+                    # followed by a delimiter is the stray, so escape it.
+                    stray = None
+                    for m in re.finditer(r'(?<!\\)"(?!\s*[,:}\]])', raw[:exc.pos]):
+                        stray = m.start()
+                    if stray is None:
+                        raise
+                    fixed = raw[:stray] + '\\"' + raw[stray + 1:]
+            raw = fixed
+    return json.loads(raw)
+
+
+def _tidy_reply(reply, group, bible):
+    """Repairs a small writer's slips that need no judgement, in place.
+
+    A declared person whose name is nowhere in the passage, or beats that skip
+    or repeat a unit, used to reject the whole passage -- and after a retry
+    leave it unanalysed, losing everyone in it. The person is dropped (lines
+    they were given stay unattributed) and the units are regrouped in order;
+    no source text is touched either way."""
+    text = ''.join(u["text"] for u in group)
+    known = {c["id"] for c in bible}
+    keep, dropped = [], set()
+    for person in reply.get("characters") or []:
+        if not isinstance(person, dict):
+            continue
+        names = [person.get("name"), *(person.get("aliases") or [])]
+        literal = any(isinstance(n, str) and n.strip() and re.search(
+            r'(?<!\w)' + re.escape(n.strip()) + r'(?!\w)', text, re.I) for n in names)
+        narrator = isinstance(person.get("name"), str) and re.fullmatch(
+            r'(?:the\s+)?narrator', person["name"].strip(), re.I)
+        if literal or narrator or person.get("id") in known:
+            keep.append(person)
+        else:
+            dropped.add(person.get("id"))
+    reply["characters"] = keep
+    beats = [b for b in reply.get("beats") or [] if isinstance(b, dict)]
+    for beat in beats:
+        beat["cast"] = [a for a in beat.get("cast") or [] if isinstance(a, dict) and a.get("id") not in dropped]
+    for line in reply.get("speakers") or []:
+        if isinstance(line, dict) and line.get("id", line.get("speaker_id")) in dropped:
+            line["id"] = line["speaker_id"] = None
+    # Walk the units in order. A unit starts a new run when it is claimed by
+    # a beat not used yet; otherwise (unclaimed, repeated, or claimed out of
+    # order) it joins the current run. Every beat is a contiguous run, in order.
+    claim = {}
+    for b, beat in enumerate(beats):
+        for n in beat.get("units") or []:
+            if type(n) is int and 0 <= n < len(group):
+                claim.setdefault(n, b)
+    if beats:
+        runs, used = [], set()
+        for n in range(len(group)):
+            b = claim.get(n)
+            if not runs or (b is not None and b not in used):
+                b = b if b is not None and b not in used else next(
+                    (i for i in range(len(beats)) if i not in used), None)
+                if b is None:
+                    runs[-1][1].append(n)
+                    continue
+                used.add(b)
+                runs.append((b, [n]))
+            else:
+                runs[-1][1].append(n)
+        reply["beats"] = [{**beats[b], "units": ids} for b, ids in runs]
+    return reply
+
+
+def compact_scene_reply(raw, group, continuity=None, bible=()):
+    """A compact reply restated as a scene reply. A reply already in the scene
+    format (a larger writer may keep it) is passed through unchanged."""
+    reply = _loads(raw)
+    if not isinstance(reply, dict):
+        raise ValueError("scene must be an object")
+    beats = _array(reply.get("beats"), "beats")
+    if "summary" in reply or any(isinstance(b, dict) and ("visible" in b or "setting" in b) for b in beats):
+        return json.dumps(reply)
+    beats = _tidy_reply(reply, group, bible)["beats"]
+    continuity = continuity or {}
+    looks = {l.get("id"): l.get("appearance") for l in _array(reply.get("looks", []), "looks")
+             if isinstance(l, dict) and isinstance(l.get("appearance"), str)}
+    places = {l.get("place"): l.get("state") for l in _array(reply.get("places", []), "places")
+              if isinstance(l, dict) and isinstance(l.get("state"), str)}
+    said = {}
+    for line in _array(reply.get("speakers", []), "speakers"):
+        if isinstance(line, dict) and type(line.get("quote")) is int:
+            who = line.get("id", line.get("speaker_id"))
+            said[line["quote"]] = who if isinstance(who, str) and who.strip() else None
+    text = ''.join(u["text"] for u in group)
+    spoken = [(at, quoted, said.get(n)) for n, (at, quoted) in enumerate(quotes(text), 1)]
+    starts = [sum(len(g["text"]) for g in group[:i]) for i in range(len(group) + 1)]
+    out = []
+    for beat in beats:
+        if not isinstance(beat, dict):
+            raise ValueError("each beat must be an object")
+        ids = _array(beat.get("units"), "units")
+        if not ids or any(type(n) is not int or n < 0 or n >= len(group) for n in ids):
+            raise ValueError("beat units must be valid source-unit numbers")
+        lo, hi = starts[ids[0]], starts[ids[-1] + 1]
+        place = beat.get("place") if isinstance(beat.get("place"), str) else ""
+        cast = [a for a in _array(beat.get("cast", []), "cast") if isinstance(a, dict)]
+        present = {a.get("id") for a in cast}
+        visible = [{"character_id": a.get("id"), "expression": str(a.get("feel") or "")[:300],
+                    "body_language": "",
+                    "appearance": looks.get(a.get("id")) or continuity.get("characters", {}).get(a.get("id"), "")}
+                   for a in cast]
+        importance = beat.get("importance")
+        out.append({"units": ids, "importance": importance, "tension": importance,
+                    "action": beat.get("action"), "setting": place, "location_id": _place_key(place),
+                    "location_state": places.get(place) or continuity.get("locations", {}).get(_place_key(place), ""),
+                    "mood": beat.get("mood") if isinstance(beat.get("mood"), str) else "",
+                    "visible": visible,
+                    "dialogue": [{"speaker_id": who, "text": quoted, "offscreen": who not in present}
+                                 for at, quoted, who in spoken if lo <= at < hi]})
+    title = reply.get("title") if isinstance(reply.get("title"), str) and reply["title"].strip() else "Scene"
+    return json.dumps({"title": title, "summary": title, "characters": reply.get("characters", []),
+                       "beats": out})
 
 
 def _text(value, field, empty=True):
     if not isinstance(value, str) or len(value) > 4000 or (not empty and not value.strip()):
         raise ValueError(f"{field} must be a {'nonempty ' if not empty else ''}string")
     return value.strip()
+
+
+# Curly, straight and Japanese quotes. A quote never crosses a line break, so
+# a paragraph left open by the continued-speech convention cannot swallow the
+# narration that follows it.
+# An opening quote that ends its paragraph unclosed, with the next paragraph
+# reopening, is continued speech and still a complete utterance.
+QUOTE = re.compile(r'[“"]([^”"\n]+)(?:[”"]|(?=\n[ \t]*\n\s*[“"]))|「([^」\n]+)」')
+
+
+def quotes(text):
+    """(offset, utterance) for each complete quoted utterance, outer space trimmed."""
+    result = []
+    for m in QUOTE.finditer(text):
+        group = 1 if m.group(1) is not None else 2
+        inner = m.group(group)
+        if inner.strip():
+            result.append((m.start(group) + len(inner) - len(inner.lstrip()), inner.strip()))
+    return result
+
+
+VISUAL_LIMIT = 600
+
+
+def _merge_visual(known, new):
+    """Add only facts not already known; identity text stays bounded.
+
+    Every scene re-describes the cast. Appending each description grew the
+    text without limit until the book failed validation and every panel
+    prompt carried the whole history."""
+    merged = known.strip()
+    for fact in re.split(r'(?<=[.;])\s+|\s*;\s*', new.strip()):
+        fact = fact.strip().rstrip('.;').strip()
+        if not fact or _plain(fact) in _plain(merged):
+            continue
+        candidate = f"{merged}; {fact}" if merged else fact
+        if len(candidate) > VISUAL_LIMIT:
+            break
+        merged = candidate
+    return merged[:VISUAL_LIMIT]
+
+
+def _plain(text):
+    return re.sub(r'[\W_]+', ' ', text).strip().casefold()
 
 
 def _array(value, field):
@@ -150,13 +407,29 @@ def parse_scene(raw, group, bible, scene_id):
     characters = copy.deepcopy(bible)
     lookup = {c["id"]: c["id"] for c in characters}
     source = ''.join(u["text"] for u in group)
-    local_ids = set()
+    local_ids, dropped = set(), set()
+    narrative = QUOTE.sub("", source)
+    first_person = bool(re.search(r'\b(?:I|me|my|myself|we|us|our)\b', narrative, re.I))
     for person in _array(reply.get("characters"), "characters"):
         name = _text(person.get("name"), "name", False)
         local_id = _text(person.get("id"), "character id", False)
         if local_id in local_ids:
             raise ValueError("each local character ID must be unique")
         local_ids.add(local_id)
+        if re.fullmatch(r'(?:the\s+)?narrator', name, re.I):
+            name = "Narrator"
+            known = [c for c in characters if c["name"] == "Narrator"
+                     or set(c["aliases"]).intersection({"I", "my", "me"})]
+            if len(known) == 1:
+                # Models re-declare the narrator per passage; bind to the known one.
+                lookup[local_id] = known[0]["id"]
+                continue
+            if len(known) > 1:
+                raise ValueError("ambiguous narrator; use the narrator's exact character ID")
+            if not first_person:
+                # A third-person narrating voice is not a person in the scene.
+                dropped.add(local_id)
+                continue
         aliases = [_text(a, "alias", False) for a in _array(person.get("aliases", []), "aliases")]
         aliases = [a for a in aliases if a.casefold() not in {"he", "she", "they", "him", "her", "his", "their", "we", "you"}]
         identity = {name.casefold(), *(a.casefold() for a in aliases)}
@@ -167,10 +440,7 @@ def parse_scene(raw, group, bible, scene_id):
         existing = matches[0] if matches else None
         # Only literal aliases can be added to the persistent bible.
         aliases = [a for a in aliases if re.search(r'(?<!\w)' + re.escape(a) + r'(?!\w)', source, re.I)]
-        narrative = re.sub(r'[“"]([^”"]+)[”"]|「([^」]+)」', "", source)
-        anonymous_narrator = name == "Narrator" and bool(re.search(r'\b(?:I|my|me)\b', narrative, re.I))
-        if anonymous_narrator and any(set(c["aliases"]).intersection({"I", "my", "me"}) for c in characters):
-            raise ValueError("reuse the known narrator instead of adding another")
+        anonymous_narrator = name == "Narrator"
         if not existing and not anonymous_narrator and not re.search(r'(?<!\w)' + re.escape(name) + r'(?!\w)', source, re.I):
             raise ValueError(f"character {name} is not in this scene")
         if name.casefold() in {"i", "me", "my", "he", "she", "they", "him", "her", "we", "you"}:
@@ -180,13 +450,12 @@ def parse_scene(raw, group, bible, scene_id):
         if existing:
             existing["aliases"] = list(dict.fromkeys([*existing["aliases"], *aliases, name]))
             # First chapter's identity stays stable; later facts are additive.
-            if visual and visual not in existing["visual"]:
-                existing["visual"] = ' '.join(filter(None, [existing["visual"], visual]))
+            existing["visual"] = _merge_visual(existing["visual"], visual)
             if not existing["voice"]:
                 existing["voice"] = voice
         else:
             existing = {"id": str(uuid.uuid4()), "name": name, "aliases": aliases,
-                        "visual": visual, "voice": voice}
+                        "visual": _merge_visual("", visual), "voice": voice}
             characters.append(existing)
         lookup[local_id] = existing["id"]
     # The model may use a canonical name or alias instead of the requested ID.
@@ -202,6 +471,8 @@ def parse_scene(raw, group, bible, scene_id):
         if not isinstance(reference, str) or not reference.strip():
             raise ValueError(f"{field} must name a declared character ID")
         reference = reference.strip()
+        if reference in dropped:
+            return None
         if reference in lookup:
             return lookup[reference]
         matches = names.get(reference.casefold(), set())
@@ -209,6 +480,8 @@ def parse_scene(raw, group, bible, scene_id):
             return next(iter(matches))
         if len(matches) > 1:
             raise ValueError(f"{field} is ambiguous: {reference!r}; use its exact character ID")
+        if re.fullmatch(r'(?:the\s+)?narrator', reference, re.I):
+            return None
         valid = ', '.join(f"{local}={next(c['name'] for c in characters if c['id'] == cid)}"
                           for local, cid in lookup.items())
         raise ValueError(f"{field} {reference!r} is not declared. Valid IDs: {valid or '(none)'}. "
@@ -230,30 +503,40 @@ def parse_scene(raw, group, bible, scene_id):
         visible = []
         for actor in _array(beat.get("visible"), "visible"):
             cid = resolve(actor.get("character_id"), "visible character")
+            if cid is None:
+                continue
             if cid in [a["character_id"] for a in visible]:
                 raise ValueError("duplicate visible character")
             visible.append({"character_id": cid,
                             "expression": _text(actor.get("expression"), "expression"),
                             "body_language": _text(actor.get("body_language"), "body language"),
                             "appearance": _text(actor.get("appearance", ""), "appearance")})
-        dialogue = []
-        # The second alternative is Japanese dialogue.
-        quoted = [(m.group(1) or m.group(2)).strip() for m in re.finditer(r'[“"]([^”"]+)[”"]|「([^」]+)」', excerpt)]
-        local_end = 0
+        # The source, not the reply, decides what was said and where: every
+        # quoted utterance becomes a line with its exact span. Model lines only
+        # attribute speakers, so a retyped, trimmed, merged or skipped quote
+        # cannot drop or alter the author's words.
+        dialogue = [{"speaker_id": None, "text": text, "offscreen": True,
+                     "start": start + a, "end": start + a + len(text)} for a, text in quotes(excerpt)]
+        cursor = 0
         for line in _array(beat.get("dialogue"), "dialogue"):
-            text = _text(line.get("text"), "dialogue text", False)
-            at = excerpt.find(text, local_end)
-            if at < 0:
-                raise ValueError("dialogue must quote this beat exactly and in order")
-            cid = resolve(line.get("speaker_id"), "dialogue speaker") if line.get("speaker_id") is not None else None
-            offscreen = line.get("offscreen")
-            if type(offscreen) is not bool:
-                raise ValueError("offscreen must be boolean")
-            dialogue.append({"speaker_id": cid, "text": text, "offscreen": offscreen,
-                             "start": start + at, "end": start + at + len(text)})
-            local_end = at + len(text)
-        if [line["text"] for line in dialogue] != quoted:
-            raise ValueError("dialogue must include every complete quoted utterance in source order")
+            if not isinstance(line, dict) or not isinstance(line.get("text"), str):
+                continue
+            said = _plain(line["text"])
+            at = next((n for n in range(cursor, len(dialogue)) if said and (
+                said == _plain(dialogue[n]["text"]) or said in _plain(dialogue[n]["text"])
+                or _plain(dialogue[n]["text"]) in said)), None)
+            if at is None:
+                continue
+            # One reply line may join an utterance the narration interrupts.
+            last = at
+            while last + 1 < len(dialogue) and _plain(dialogue[last + 1]["text"]) in said:
+                last += 1
+            for n in range(at, last + 1):
+                if line.get("speaker_id") is not None:
+                    dialogue[n]["speaker_id"] = resolve(line["speaker_id"], "dialogue speaker")
+                if type(line.get("offscreen")) is bool:
+                    dialogue[n]["offscreen"] = line["offscreen"]
+            cursor = last + 1
         beats.append({"id": f"{scene_id}-b{i + 1}", "start": start, "end": end,
                       "source": excerpt, "importance": importance, "tension": tension,
                       "action": _text(beat.get("action"), "action", False),
@@ -264,8 +547,120 @@ def parse_scene(raw, group, bible, scene_id):
                       "visible": visible, "dialogue": dialogue})
     if consumed != list(range(len(group))):
         raise ValueError("beats must cover every source unit exactly once, in order")
+    _attribute_by_tags(beats, source, group[0]["start"], characters)
     return {"id": scene_id, "title": title, "summary": summary,
             "start": group[0]["start"], "end": group[-1]["end"], "beats": beats}, characters
+
+
+SPEECH_VERBS = (r'said|says|asked|asks|replied|replies|answered|called|calls|shouted|yelled|cried|'
+                r'whispered|muttered|murmured|added|snapped|laughed|sighed|told|continued|insisted|warned|began')
+
+
+def _ensure_narrator(characters, source):
+    """A first-person story whose prose tags its own lines ('I said') gets a
+    Narrator, so those lines have someone to belong to."""
+    if any(c["name"] == "Narrator" or set(c["aliases"]).intersection({"I", "me", "my"}) for c in characters):
+        return characters
+    narrative = QUOTE.sub(" ", source)
+    if not re.search(r'\b(?:I|me|my)\b', narrative) or not re.search(
+            r'[”"」]\s*,?\s*I\s+(?:' + SPEECH_VERBS + r')\b', source):
+        return characters
+    return [*characters, {"id": str(uuid.uuid4()), "name": "Narrator", "aliases": [], "visual": "", "voice": ""}]
+
+
+def _attribute_by_tags(beats, text, base, characters):
+    """Give an unattributed line the speaker its speech tag names.
+
+    The writer leaves many lines unattributed even when the prose says who
+    spoke -- `"...," I said`, `Agnes said, "..."` -- and the audiobook then
+    reads them in the narrator's voice. Only an explicit tag next to the quote
+    counts: a character's name or alias, or "I" for a first-person narrator,
+    beside a speech verb. A bare "she said" is left alone; guessing it is how
+    lines end up in the wrong mouth. The second half of an utterance the tag
+    interrupts takes the speaker of the first."""
+    names = []
+    for c in characters:
+        for name in [c["name"], *c["aliases"]]:
+            if name.casefold() in {"i", "me", "my"}:
+                continue
+            if name.strip():
+                names.append((name.strip(), c["id"]))
+    narrator = [c["id"] for c in characters if c["name"] == "Narrator"
+                or set(c["aliases"]).intersection({"I", "me", "my"})]
+    lines = [d for b in beats for d in b["dialogue"]]
+
+    def who(tag):
+        found = set()
+        for name, cid in names:
+            word = r'(?<!\w)' + re.escape(name) + r'(?!\w)'
+            if re.search(word + r'\s+(?:' + SPEECH_VERBS + r')\b', tag) or \
+                    re.search(r'\b(?:' + SPEECH_VERBS + r')\s+' + word, tag):
+                found.add(cid)
+        if len(narrator) == 1 and re.search(r'\bI\s+(?:' + SPEECH_VERBS + r')\b|\b(?:' + SPEECH_VERBS + r')\s+I\b', tag):
+            found.add(narrator[0])
+        return found.pop() if len(found) == 1 else None
+
+    tagged = set()
+    for n, line in enumerate(lines):
+        a, b = line["start"] - base, line["end"] - base
+        # The tag runs from the quote to the sentence end or the next quote.
+        after = re.split(r'[“"「]|(?<=[.!?])\s', text[b + 1:b + 120], maxsplit=1)[0]
+        # `"Closed." She said, "..."`: a full stop then a capital starts a new
+        # sentence, whose tag is for the next quote, not this one.
+        if line["text"].rstrip().endswith(".") and re.match(r'\s*[A-Z]', after) \
+                and not re.match(r'\s*I\b', after):
+            after = ""
+        before = re.split(r'[”"」]|[.!?]\s', text[max(0, a - 120):max(0, a - 1)])[-1]
+        # A tag that names the speaker settles it, even over the writer: a
+        # small writer gave '"I'm not late," I said' to the woman being
+        # answered. Pronoun tags below only fill gaps.
+        named = who(after) or who(before)
+        if named:
+            line["speaker_id"] = named
+            tagged.add(n)
+            continue
+        if line["speaker_id"] is not None:
+            continue
+        if re.search(
+                r'\b(?:he|she)\s+(?:' + SPEECH_VERBS + r')\b|\b(?:' + SPEECH_VERBS + r')\s+(?:he|she)\b',
+                after or before, re.I):
+            # "she said": the person the narration last named, if any. Quoted
+            # words are skipped -- a name inside speech is not who is speaking.
+            narration = QUOTE.sub(" ", text[max(0, a - 400):max(0, a - 1)])
+            last = None
+            for name, cid in names:
+                if cid in narrator:
+                    continue
+                for m in re.finditer(r'(?<!\w)' + re.escape(name) + r'(?!\w)', narration):
+                    if last is None or m.end() > last[0]:
+                        last = (m.end(), cid)
+            line["speaker_id"] = last[1] if last else None
+    for n, line in enumerate(lines):
+        # A line's own tag stands. A line that continues the previous
+        # speaker past their tag ('"...," I said. "..."') takes that speaker
+        # even over the writer; otherwise this only fills gaps.
+        if n in tagged:
+            continue
+        for other in (lines[n - 1] if n else None, lines[n + 1] if n + 1 < len(lines) else None):
+            if other is None or other["speaker_id"] is None:
+                continue
+            if line["speaker_id"] is not None and other is not (lines[n - 1] if n else None):
+                continue
+            gap = text[min(line["end"], other["end"]) - base + 1:max(line["start"], other["start"]) - base - 1]
+            # Only a tag between them: `"...," she said, "..."` or `"...," I said. "..."`.
+            # The tag must belong to the first quote: it ended on a comma, or the
+            # tag starts lowercase (`"Hi!" she said. "Bye."`). `"Closed." She
+            # said, "Go home."` is a tag for the second quote only.
+            first = lines[n - 1] if other is lines[n - 1] else line
+            tag = len(gap) < 50 and re.search(r'\b(?:' + SPEECH_VERBS + r')\b', gap) \
+                and not re.search(r'[.!?]\s+\S', gap.strip()) \
+                and (first["text"].rstrip().endswith((",", "，", "、")) or re.match(r'\s*(?:[a-z]|I\b)', gap))
+            # Or the first quote was left open at a paragraph break: speech
+            # continued into the next paragraph, which reopens without a tag.
+            left_open = text[first["end"] - base:first["end"] - base + 1] not in ('”', '"', '」')
+            if tag or (gap.strip() == "" and "\n" in gap and left_open):
+                line["speaker_id"] = other["speaker_id"]
+                break
 
 
 def _remember_state(state, beat):
@@ -277,8 +672,72 @@ def _remember_state(state, beat):
         state["locations"][key] = beat["location_state"]
 
 
+def _unanalysed_scene(group, scene_id, number):
+    """Exact source and quotes for a passage the writer could not analyse.
+
+    One stubborn passage used to discard every scene already analysed. The
+    passage keeps its words, its quoted speech (unattributed) and the board
+    still gets a frame for it; nothing about who or where is guessed."""
+    beats = []
+    for i, unit in enumerate(group):
+        beats.append({"id": f"{scene_id}-b{i + 1}", "start": unit["start"], "end": unit["end"],
+                      "source": unit["text"], "importance": 2, "tension": 2,
+                      "action": unit["text"].strip()[:300], "setting": "", "location_id": "",
+                      "location_state": "", "mood": "", "visible": [],
+                      "dialogue": [{"speaker_id": None, "text": text, "offscreen": True,
+                                    "start": unit["start"] + a, "end": unit["start"] + a + len(text)}
+                                   for a, text in quotes(unit["text"])]})
+    return {"id": scene_id, "title": f"Passage {number} (not analysed)", "summary": "",
+            "start": group[0]["start"], "end": group[-1]["end"], "beats": beats, "unanalysed": True}
+
+
+class Stop(Exception):
+    """Raised by a writer or progress callback to end analysis early.
+
+    Stopping used to throw away every finished passage, so an hour of
+    analysis was all or nothing. The finished passages are kept and the rest
+    are left unanalysed, for `resume` to pick up."""
+
+
+def _analyze_passage(group, number, scene_id, characters, continuity, write, mode, warn, may_refuse):
+    voice = mode == "voice"
+    prompt = (voice_instruction(group, characters) if voice
+              else compact_instruction(group, characters, continuity))
+    for attempt in range(2):
+        raw = write(VOICE_SYSTEM if voice else COMPACT_SYSTEM, prompt)
+        try:
+            reply = (voice_scene_reply(raw, group, number, characters) if voice
+                     else compact_scene_reply(raw, group, continuity, characters))
+            return parse_scene(reply, group, characters, scene_id)
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            if attempt:
+                # A writer that cannot produce any valid scene is broken or
+                # unsuitable; refuse rather than return a chapter of stubs.
+                if may_refuse:
+                    raise ValueError(f"Scene {number} could not be validated: {exc}") from exc
+                warn(f"Scene {number} could not be validated ({exc}); kept its text unanalysed")
+                return _unanalysed_scene(group, scene_id, number), characters
+            prompt += (f"\nYour previous reply failed validation: {exc}."
+                       "\nPrevious reply to repair:\n" + raw[:20000]
+                       + "\nReturn corrected complete JSON, preserving the full source coverage. "
+                       "Every visible character and speaker must refer to an ID declared in "
+                       "the character bible or your characters array. Use null for uncertain speakers.")
+
+
+def _continuity(chapters, scenes=()):
+    state = {"characters": {}, "locations": {}}
+    for scene in [s for c in chapters for s in c["scenes"]] + list(scenes):
+        for beat in scene["beats"]:
+            _remember_state(state, beat)
+    return state
+
+
 def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: None,
-            passage_words=450, passage_units=8):
+            passage_words=450, passage_units=8, warn=lambda _: None, mode="full"):
+    """`mode="voice"` asks only who speaks each quote and the mood: enough for
+    the audiobook at a fraction of the writing, but nothing to draw from."""
+    if mode not in ("full", "voice"):
+        raise ValueError("unknown analysis mode")
     if not isinstance(source, str) or not source.strip():
         raise ValueError("paste a chapter first")
     if len(source) > 200000:
@@ -289,35 +748,80 @@ def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: N
     chapter_id = str(uuid.uuid4())
     groups = passages(source, max_words=passage_words, max_units=passage_units)
     scenes = []
-    continuity = {"characters": {}, "locations": {}}
-    for old_chapter in book["chapters"]:
-        for old_scene in old_chapter["scenes"]:
-            for old_beat in old_scene["beats"]:
-                _remember_state(continuity, old_beat)
+    continuity = _continuity(book["chapters"])
     for i, group in enumerate(groups):
-        progress(i, len(groups))
-        prompt = instruction(group, book["characters"], continuity)
-        for attempt in range(2):
-            raw = write(SCENE_SYSTEM, prompt)
-            try:
-                scene, characters = parse_scene(raw, group, book["characters"], f"{chapter_id}-s{i + 1}")
-                break
-            except (ValueError, TypeError, KeyError, AttributeError) as exc:
-                if attempt:
-                    raise ValueError(f"Scene {i + 1} could not be validated: {exc}") from exc
-                prompt += (f"\nYour previous reply failed validation: {exc}."
-                           "\nPrevious reply to repair:\n" + raw[:20000]
-                           + "\nReturn corrected complete JSON, preserving the full source coverage. "
-                           "Every visible character and speaker must refer to an ID declared in "
-                           "the character bible or your characters array. Use null for uncertain speakers.")
+        try:
+            progress(i, len(groups))
+            refuse = not any(not s.get("unanalysed") for s in scenes) and i >= min(2, len(groups) - 1)
+            scene, book["characters"] = _analyze_passage(
+                group, i + 1, f"{chapter_id}-s{i + 1}", book["characters"], continuity,
+                write, mode, warn, refuse)
+        except Stop:
+            scenes.extend(_unanalysed_scene(g, f"{chapter_id}-s{j + 1}", j + 1)
+                          for j, g in enumerate(groups[i:], i))
+            break
         scenes.append(scene)
         for beat in scene["beats"]:
             _remember_state(continuity, beat)
-        book["characters"] = characters
+    # Once more over the whole chapter: a tag's name can sit in the passage
+    # before, and unanalysed passages have no attribution of their own.
+    book["characters"] = _ensure_narrator(book["characters"], source)
+    _attribute_by_tags([b for s in scenes for b in s["beats"]], source, 0, book["characters"])
     chapter = {"id": chapter_id, "title": title.strip() or "Chapter",
                "source": source, "source_hash": hashlib.sha256(source.encode()).hexdigest(),
-               "scenes": scenes}
+               "scenes": scenes, **({"analysis": "voice"} if mode == "voice" else {})}
     book["chapters"].append(chapter)
+    validate_book(book)
+    return book
+
+
+def resume(book, chapter_id, write, progress=lambda *_: None, passage_words=450,
+           passage_units=8, warn=lambda _: None):
+    """Analyse only the passages a stopped or failed run left unanalysed.
+
+    Each is re-divided and analysed with the bible and continuity of
+    everything before it; finished passages are never sent again."""
+    book = copy.deepcopy(book)
+    validate_book(book)
+    chapter = next((c for c in book["chapters"] if c["id"] == chapter_id), None)
+    if not chapter:
+        raise ValueError("choose an analyzed chapter")
+    mode = chapter.get("analysis") or "full"
+    before = book["chapters"][:book["chapters"].index(chapter)]
+    plan = []
+    for k, scene in enumerate(chapter["scenes"]):
+        if scene.get("unanalysed"):
+            groups = passages(chapter["source"][scene["start"]:scene["end"]],
+                              max_words=passage_words, max_units=passage_units)
+            for group in groups:
+                for unit in group:
+                    unit["start"] += scene["start"]
+                    unit["end"] += scene["start"]
+            plan.append((k, groups))
+    total, done, stopped, rebuilt = sum(len(g) for _, g in plan), 0, False, []
+    replaced = dict((k, []) for k, _ in plan)
+    for k, groups in plan:
+        for group in groups:
+            scene_id = f"{chapter_id}-s{uuid.uuid4().hex[:8]}"
+            if not stopped:
+                try:
+                    progress(done, total)
+                    earlier = [done_scene for j, old in enumerate(chapter["scenes"][:k])
+                               for done_scene in replaced.get(j, [old])]
+                    scene, book["characters"] = _analyze_passage(
+                        group, k + 1, scene_id, book["characters"],
+                        _continuity(before, earlier + replaced[k]), write, mode, warn, False)
+                except Stop:
+                    stopped = True
+            if stopped:
+                scene = _unanalysed_scene(group, scene_id, k + 1)
+            replaced[k].append(scene)
+            done += 1
+    for k, scene in enumerate(chapter["scenes"]):
+        rebuilt.extend(replaced.get(k, [scene]))
+    chapter["scenes"] = rebuilt
+    book["characters"] = _ensure_narrator(book["characters"], chapter["source"])
+    _attribute_by_tags([b for s in rebuilt for b in s["beats"]], chapter["source"], 0, book["characters"])
     validate_book(book)
     return book
 
@@ -335,7 +839,10 @@ def validate_book(book):
         known.add(cid)
         _text(c.get("name"), "name", False)
         _array(c.get("aliases"), "aliases")
-        _text(c.get("visual"), "visual")
+        # Books saved before visuals were bounded may hold longer text; it is
+        # trimmed where it is used, so it must not make a saved book unreadable.
+        if not isinstance(c.get("visual"), str):
+            raise ValueError("visual must be a string")
         _text(c.get("voice"), "voice")
     for chapter in _array(book.get("chapters"), "chapters"):
         source = chapter.get("source")
@@ -370,21 +877,34 @@ def validate_book(book):
     return book
 
 
+def _with_tags(book, chapter):
+    """The chapter with speech tags applied, for books analysed before them."""
+    chapter = copy.deepcopy(chapter)
+    _attribute_by_tags([b for s in chapter["scenes"] for b in s["beats"]], chapter["source"], 0, book["characters"])
+    return chapter
+
+
 def narration_segments(book, chapter_id):
     validate_book(book)
     chapter = next((c for c in book["chapters"] if c["id"] == chapter_id), None)
     if not chapter:
         raise ValueError("choose an analyzed chapter")
-    source, cursor, segments = chapter["source"], 0, []
+    chapter = _with_tags(book, chapter)
+    # Narration is split at beats so it carries the beat's mood like dialogue
+    # does; it is most of a chapter and was always read without one.
+    # Each segment names its scene, so narration can mark where scenes begin.
+    source, segments = chapter["source"], []
     for scene in chapter["scenes"]:
+        tag = {"scene": scene["title"]}
         for beat in scene["beats"]:
+            cursor = beat["start"]
             for line in beat["dialogue"]:
                 if line["start"] > cursor:
-                    segments.append({"speaker_id": None, "text": source[cursor:line["start"]]})
-                segments.append({"speaker_id": line["speaker_id"], "text": line["text"], "mood": beat["mood"]})
+                    segments.append({"speaker_id": None, "text": source[cursor:line["start"]], "mood": beat["mood"], **tag})
+                segments.append({"speaker_id": line["speaker_id"], "text": line["text"], "mood": beat["mood"], **tag})
                 cursor = line["end"]
-    if cursor < len(source):
-        segments.append({"speaker_id": None, "text": source[cursor:]})
+            if beat["end"] > cursor:
+                segments.append({"speaker_id": None, "text": source[cursor:beat["end"]], "mood": beat["mood"], **tag})
     return segments
 
 
@@ -400,6 +920,7 @@ def direct(book, chapter_id):
     chapter = next((c for c in book["chapters"] if c["id"] == chapter_id), None)
     if not chapter:
         raise ValueError("choose an analyzed chapter")
+    chapter = _with_tags(book, chapter)
     people = {c["id"]: c for c in book["characters"]}
     panels = []
     for scene_no, scene in enumerate(chapter["scenes"], 1):
@@ -412,12 +933,12 @@ def direct(book, chapter_id):
             narration.append(beat["source"][cursor:])
             narrative = re.sub(r'[“"]\s*[”"]|「\s*」', '', ''.join(narration))
             captions = _chunks(narrative)
-            dialogue = [{"speaker": people[d["speaker_id"]]["name"] if d["speaker_id"] else "Unknown speaker",
+            dialogue = [{"speaker": people[d["speaker_id"]]["name"] if d["speaker_id"] else "",
                          "speaker_id": d["speaker_id"], "text": text, "offscreen": d["offscreen"]}
                         for d in beat["dialogue"] for text in _chunks(d["text"], 28)]
             frames = max(len(captions), len(dialogue), 3 if beat["importance"] == 5 else 2 if beat["importance"] == 4 else 1)
             actors = [{**a, "name": people[a["character_id"]]["name"],
-                       "visual": people[a["character_id"]]["visual"]} for a in beat["visible"]]
+                       "visual": people[a["character_id"]]["visual"][:VISUAL_LIMIT]} for a in beat["visible"]]
             for frame in range(frames):
                 reaction = frame > 0 and frame == frames - 1 and bool(actors) and beat["importance"] >= 4
                 panels.append({"beat_id": beat["id"], "chapter_id": chapter_id,

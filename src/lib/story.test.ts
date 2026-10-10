@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { castFromBook, keepBook, type StoryBook, type StoryLibrary } from "./story";
-import { lockStyle, panelPrompt, identityPrompt, storyContinuityReference } from "./board";
+import { castFromBook, EMPTY_LIBRARY, keepBook, voiceGroups, voiceLabel, voiceLanguage, type StoryBook, type StoryLibrary } from "./story";
+import { CHAIN_LIMIT, lockStyle, panelPrompt, identityPrompt, storyContinuityReference, storyPanelReferences } from "./board";
 import { staleness } from "./boardDoc";
 import type { Panel } from "./types";
 
@@ -15,6 +15,25 @@ describe("shared story model", () => {
     expect(result.books.map((b) => b.id)).toEqual(["other", "book"]);
     expect(result.audio).toEqual(library.audio);
     expect(library.activeBookId).toBe("other");
+  });
+  it("replaces a book when the same text is divided again, and keeps books with other chapters", () => {
+    const chapter = (hash: string) => ({ id: hash, title: hash, source: hash, source_hash: hash, scenes: [] });
+    const first: StoryBook = { ...book, id: "first", chapters: [chapter("h1")] };
+    const longer: StoryBook = { ...book, id: "longer", chapters: [chapter("h3"), chapter("h1")] };
+    let library = keepBook(keepBook(EMPTY_LIBRARY, longer), first);
+    library = { ...library, audio: { first: { narrator: "ryan", voices: {}, rate: 160, outputs: {} } } };
+    const retry = keepBook(library, { ...book, id: "retry", chapters: [chapter("h1")] });
+    expect(retry.books.map((b) => b.id)).toEqual(["longer", "retry"]);
+    expect(retry.audio).toEqual({});
+  });
+  it("never lets a voice-only analysis replace a full one, or replace a narrated book", () => {
+    const chapter = (hash: string, analysis?: "voice") => ({ id: hash, title: hash, source: hash, source_hash: hash, scenes: [], analysis });
+    const full: StoryBook = { ...book, id: "full", chapters: [chapter("h1")] };
+    const quick = keepBook(keepBook(EMPTY_LIBRARY, full), { ...book, id: "quick", chapters: [chapter("h1", "voice")] });
+    expect(quick.books.map((b) => b.id)).toEqual(["full", "quick"]);
+    const narrated = { ...quick, audio: { quick: { narrator: "ryan", voices: {}, rate: 160, outputs: { h1: ["audio"] } } } };
+    const redone = keepBook(narrated, { ...book, id: "board", chapters: [chapter("h1")] });
+    expect(redone.books.map((b) => b.id)).toEqual(["quick", "board"]);
   });
   it("carries canonical IDs and aliases into the editable Board cast", () => {
     expect(castFromBook(book).people[0]).toMatchObject({ id: "mira", aliases: ["Mi"], description: "red coat" });
@@ -57,11 +76,42 @@ describe("story appearance continuity", () => {
     expect(storyContinuityReference(1, [before, panel("red dress", "wet floor; night")], ["frame", null])).toBeNull();
     expect(storyContinuityReference(1, [before, { ...panel("red dress"), cast: [] }], ["frame", null])).toBeNull();
   });
+  it("re-anchors to the sheet instead of chaining copies through a whole scene", () => {
+    const run = Array.from({ length: 2 * CHAIN_LIMIT + 1 }, () => panel("red dress"));
+    const drawn = run.map((_, i) => `frame${i}`);
+    expect(storyContinuityReference(CHAIN_LIMIT, run, drawn)).toBeNull();
+    expect(storyContinuityReference(CHAIN_LIMIT + 1, run, drawn)).toBe(`frame${CHAIN_LIMIT}`);
+    const gap = [panel("red dress"), ...Array.from({ length: CHAIN_LIMIT }, () => panel("blue dress")), panel("red dress")];
+    expect(storyContinuityReference(CHAIN_LIMIT + 1, gap, gap.map((_, i) => `f${i}`))).toBeNull();
+  });
+  it("keeps the identity sheet beside the previous frame when the model takes both", () => {
+    expect(storyPanelReferences(panel("red dress"), "sheet", "frame", null, 3)).toEqual(["sheet", "frame"]);
+    expect(storyPanelReferences(panel("red dress"), "sheet", "frame", null, 1)).toEqual(["frame"]);
+    expect(storyPanelReferences(panel("red dress"), "sheet", null, null, 1)).toEqual(["sheet"]);
+  });
   it("uses story clothing as a replacement and separates the identity reference", () => {
     const prompt = panelPrompt(panel("blue dress"), lockStyle("ink"), "");
     expect(prompt).toContain("replaces earlier clothing");
     expect(prompt).toContain("blue dress");
     expect(prompt).toContain("Current location state: dry floor; dawn");
     expect(identityPrompt(lockStyle("ink"), "Mira: curly black hair")).toContain("No full-body outfit");
+  });
+});
+
+describe("voice choice", () => {
+  it("names system voice languages and lists Indian voices first", () => {
+    expect(voiceLanguage("en_IN")).toBe("English (India)");
+    const groups = voiceGroups([{ id: "Samantha", language: "en_US" }, { id: "Rishi", language: "en_IN" },
+      { id: "Lekha", language: "hi_IN" }, { id: "hm_omega", language: "Hindi / Indian English" }]);
+    expect(groups.map(([label]) => label)).toEqual(["English (India)", "Hindi (India)", "Hindi / Indian English", "American English"]);
+  });
+});
+
+describe("voice labels", () => {
+  it("names engine voices by person, accent and gender", () => {
+    expect(voiceLabel("hm_omega")).toBe("Omega · Hindi, male");
+    expect(voiceLabel("bf_isabella")).toBe("Isabella · UK, female");
+    expect(voiceLabel("uncle_fu")).toBe("Uncle Fu · male");
+    expect(voiceLabel("Rishi")).toBe("Rishi");
   });
 });

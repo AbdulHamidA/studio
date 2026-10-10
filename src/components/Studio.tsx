@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { api, errDetail, errText, isCancelled, fmtDuration, newJobId, onEnginePreview, onEngineProgress, vaultUrl } from "../lib/api";
 import type { AssistResult, EngineProgress, ModelStatus, Recipe } from "../lib/types";
 import { autoPick, estimateSeconds, humanDuration, QUALITY_LABEL, SHAPES, stepsFor, type Quality } from "../lib/presets";
@@ -10,6 +10,8 @@ import PromptProposal from "./PromptProposal";
 import Loras from "./Loras";
 import Adjust from "./Adjust";
 import { loadPref, savePref } from "../lib/prefs";
+import Field from "./Field";
+import { Choice, LiveStatus, ResultStrip, RunError, useRunShortcut, useStatus, type Made } from "./creation";
 
 export type Mode = "generate" | "edit";
 
@@ -84,6 +86,8 @@ export default function Studio({
   const i2iMode: "edit" | "latent" = editKind === "latent" ? "latent" : "edit";
 
   const [loras, setLoras] = useState<[string, number][]>([]);
+  // "Memory saver" on screen. The engine and the saved recipes still call it
+  // low_ram, which is not a name anyone choosing it should have to learn.
   const [lowRam, setLowRam] = useState(false);
   const [capCache, setCapCache] = useState(false);
   const [cacheLimit, setCacheLimit] = useState(1);
@@ -92,14 +96,27 @@ export default function Studio({
   const [assisting, setAssisting] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [prog, setProg] = useState<EngineProgress | null>(null);
-  const [outputs, setOutputs] = useState<string[]>([]);
-  const [selected, setSelected] = useState(0);
-  const [took, setTook] = useState<number | null>(null);
+  /**
+   * Everything made in this screen this session, newest first.
+   *
+   * Each run used to replace the last, so comparing two seeds meant leaving
+   * for the library. The strip grows instead, and each entry keeps the prompt
+   * and seed that made it so either can be taken back.
+   */
+  const [made, setMade] = useState<(Made & { took?: number; batch: number })[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** Why the last run failed, shown on the canvas until the next one. */
+  const [failure, setFailure] = useState<string | null>(null);
+  /** A run refused before it started, shown beside the field at fault. */
+  const [invalid, setInvalid] = useState<{ field: "prompt" | "images" | "mask" | "pad"; msg: string } | null>(null);
   const [undoPrompt, setUndoPrompt] = useState<string | null>(null);
   /** What the enhancer suggests, pending your decision. */
   const [proposal, setProposal] = useState<AssistResult | null>(null);
   /** The prompt as it is being written, shown while you wait for it. */
   const [draft, setDraft] = useState("");
+  const [status, setStatus] = useStatus(prog);
+  const promptRef = useRef<HTMLTextAreaElement>(null);
+  const advancedId = useId();
   const [elapsed, setElapsed] = useState(0);
   // Which model the engine currently holds, so a warm run is not quoted the
   // cold-start penalty.
@@ -198,7 +215,11 @@ export default function Studio({
   );
 
   const improve = async () => {
-    if (!prompt.trim()) { notify("Write a rough idea first.", true); return; }
+    if (!prompt.trim()) {
+      setInvalid({ field: "prompt", msg: "Write a rough idea first." });
+      promptRef.current?.focus();
+      return;
+    }
     const id = newJobId();
     setAssisting(true);
     setDraft("");
@@ -220,6 +241,8 @@ export default function Studio({
       const r = await api.assistPrompt(
         id, prompt, mode, mode === "edit" ? images : []);
       setProposal(r);
+      // Said once, at the end. The draft above is silent on purpose.
+      setStatus("Suggestion ready, below the prompt.");
     } catch (e) {
       notify(errText(e), true);
     } finally {
@@ -227,30 +250,46 @@ export default function Studio({
     }
   };
 
-  const run = async () => {
-    if (!model) return;
-    if (!prompt.trim()) { notify("Describe what you want first.", true); return; }
+  /** Refuse a run that cannot work, next to the field that is wrong. */
+  const validate = (): boolean => {
+    if (!prompt.trim()) {
+      setInvalid({ field: "prompt", msg: "Describe what you want first." });
+      promptRef.current?.focus();
+      return false;
+    }
     if (mode === "edit" && images.length === 0) {
-      notify("Add an image to edit.", true); return;
+      setInvalid({ field: "images", msg: "Add a picture to edit." }); return false;
     }
     if (mode === "edit" && editKind === "mask" && !maskBytes) {
-      notify("Paint over the part you want changed first.", true); return;
+      setInvalid({ field: "mask", msg: "Paint over the part you want changed first." });
+      return false;
     }
     if (mode === "edit" && editKind === "expand"
         && pad.top + pad.right + pad.bottom + pad.left === 0) {
-      notify("Choose at least one side to extend.", true); return;
+      setInvalid({ field: "pad", msg: "Choose at least one side to extend." }); return false;
     }
+    setInvalid(null);
+    return true;
+  };
+
+  // A retry with Memory saver forced on has to use it now, not after the
+  // state update lands, so the override is passed in rather than read back.
+  const run = async (opts: { lowRam?: boolean } = {}) => {
+    if (!model || running) return;
+    if (!validate()) return;
+    const lr = opts.lowRam ?? lowRam;
 
     const id = newJobId();
     const effectiveSeed = randomSeed ? Math.floor(Math.random() * 2_000_000_000) : seed;
-    setRunning(true); setJobId(id); setProg(null); setTook(null);
+    const runCount = lr ? 1 : count;
+    setRunning(true); setJobId(id); setProg(null); setFailure(null);
+    setStatus("Starting");
 
     setPreview(null);
-    // The previous result goes now, not when the new one lands. It used to sit
-    // in front of the live preview for the whole run, so a second generation
-    // looked like nothing was happening.
-    setOutputs([]);
-    setSelected(0);
+    // The previous result stays, dimmed, until the new one lands. Clearing it
+    // at the start meant a failed run left nothing at all on screen; the live
+    // preview still takes precedence over it, so a second run does not look
+    // like nothing is happening.
     const un = await onEngineProgress((p) => { if (p.job_id === id) setProg(p); });
     // If this throws, the progress listener above would never be released.
     // Failing to get a preview is not worth leaking one.
@@ -283,34 +322,40 @@ export default function Studio({
         steps,
         guidance: Math.min(guidance, model.guidance_max),
         seed: effectiveSeed,
-        count: effectiveCount,
+        count: runCount,
         images: mode === "edit" ? images : [],
         image_strength: mode === "edit" && i2iMode === "latent" ? strength : null,
         i2i_mode: mode === "edit" ? i2iMode : null,
         loras,
-        low_ram: lowRam,
+        low_ram: lr,
         preview: showPreview,
         cache_limit_gb: capCache ? cacheLimit : null,
-        allow_over_budget: model.low_ram_may_help,
+        allow_over_budget: lr && model.low_ram_may_help,
         mask: maskId,
         outpaint_padding: padding,
         outpaint_fill: editKind === "expand" ? fill : null,
       };
       const res = mode === "edit" ? await api.editImage(args) : await api.generate(args);
       setResidentModel(model.name);
-      setOutputs(res);
-      setSelected(0);
-      setTook(performance.now() - t0);
+      const took = performance.now() - t0;
+      // The engine gives image i of a batch the seed base + i, so each one can
+      // be reproduced on its own.
+      const fresh = res.map((rid, i) => ({
+        id: rid, prompt, seed: effectiveSeed + i, took, batch: res.length,
+      }));
+      setMade((m) => [...fresh, ...m]);
+      if (fresh.length > 0) setSelectedId(fresh[0].id);
       setSeed(effectiveSeed);
       onProduced();
-      if (res.length === 0) notify("The engine returned no output.", true);
+      if (res.length === 0) setFailure("The engine finished but returned no picture.");
+      else setStatus(`Done, ${res.length} image${res.length === 1 ? "" : "s"}.`);
     } catch (e) {
-      const msg = errText(e);
       const detail = errDetail(e);
-      // Keep the engine's own wording where it differs; the toast is short by
+      // Keep the engine's own wording where it differs; the card is short by
       // design and the original is what a diagnosis needs.
       if (detail) console.error("engine:", detail);
-      notify(isCancelled(e) ? "Cancelled." : msg, !isCancelled(e));
+      if (isCancelled(e)) { setStatus("Cancelled."); notify("Cancelled."); }
+      else { setStatus(""); setFailure(errText(e)); }
     } finally {
       // Masks are private working material, not library items. The engine has
       // finished reading it at this point, regardless of success or failure.
@@ -327,10 +372,13 @@ export default function Studio({
     if (jobId) { try { await api.cancelJob(jobId); } catch { /* already gone */ } }
   };
 
+  const runnable = !(mode === "edit" && editKind === "adjust");
+  const shortcut = useRunShortcut(() => { void run(); }, runnable && !running && usable.length > 0);
+
   if (usable.length === 0) {
     return (
       <div className="empty-state">
-        <span className="big">◍</span>
+        <span className="big" aria-hidden="true">◍</span>
         Nothing installed yet that can {mode === "edit" ? "edit images" : "make images"}.
         <div style={{ marginTop: 10, fontSize: 12 }}>
           Open <b>Models</b> and install one. For this Mac, FLUX.2 Klein 4B is
@@ -340,69 +388,80 @@ export default function Studio({
     );
   }
 
+  const current = made.find((m) => m.id === selectedId) ?? made[0] ?? null;
+  const currentIndex = current ? made.indexOf(current) : -1;
+  const resultAlt = current
+    ? `Result ${currentIndex + 1} of ${made.length}: ${current.prompt}` : "";
+  const errorFor = (f: NonNullable<typeof invalid>["field"]) =>
+    invalid?.field === f ? invalid.msg : undefined;
+
   return (
-    <div className="content split" style={{ padding: 0 }}>
-      <div>
+    <div className="content split creation" style={{ padding: 0 }}
+         ref={shortcut.ref} onKeyDown={shortcut.onKeyDown}>
+      <LiveStatus text={status} />
+      <div className="creation-params">
         <div className="panel">
           <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
             <h2 style={{ margin: 0 }}>{mode === "edit" ? "Edit a picture" : "Make a picture"}</h2>
+            {/* One label whichever way it is set. "Simple"/"Advanced"
+                swapped names with state, so the button said where it would
+                go rather than what it was; the expanded state says that. */}
             <button
               className="btn small"
               style={{ marginLeft: "auto" }}
+              aria-expanded={advanced}
+              aria-controls={advancedId}
               onClick={() => setAdvanced(!advanced)}
             >
-              {advanced ? "Simple" : "Advanced"}
+              <span aria-hidden="true">{advanced ? "▾ " : "▸ "}</span>Advanced settings
             </button>
           </div>
 
           {mode === "edit" && (
-            <div className="field">
-              <label>What kind of edit?</label>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 4 }}>
-                {([
-                  ["instruct", "Change something"],
-                  ["mask", "Paint a region"],
-                  ["expand", "Extend the picture"],
-                  ["latent", "Reinterpret"],
-                  ["adjust", "Crop & rotate"],
-                ] as [EditKind, string][]).map(([k, label]) => (
-                  <button
-                    key={k}
-                    className={"btn small" + (editKind === k ? " primary" : "")}
-                    onClick={() => setEditKind(k)}
-                  >{label}</button>
-                ))}
-              </div>
-              <div style={{ fontSize: 10.5, color: "var(--text-faint)", lineHeight: 1.55 }}>
-                {editKind === "instruct" && "Describe one change; the rest is kept."}
-                {editKind === "mask" && "Paint over an area and only that area is regenerated."}
-                {editKind === "expand" && "Grow the canvas; the model invents what was outside the frame."}
-                {editKind === "latent" && "Reinterpret the whole picture, keeping its composition."}
-                {editKind === "adjust" && "Crop, rotate or straighten. Instant, and no model involved."}
-              </div>
-            </div>
+            <Choice
+              label="What kind of edit?"
+              value={editKind}
+              onChange={(k) => { setEditKind(k); setInvalid(null); }}
+              options={[
+                ["instruct", "Change something"],
+                ["mask", "Paint a region"],
+                ["expand", "Extend the picture"],
+                ["latent", "Reinterpret"],
+                ["adjust", "Crop & rotate"],
+              ] as const}
+              hint={
+                editKind === "instruct" ? "Describe one change; the rest is kept."
+                : editKind === "mask" ? "Paint over an area and only that area is regenerated."
+                : editKind === "expand" ? "Grow the canvas; the model invents what was outside the frame."
+                : editKind === "latent" ? "Reinterpret the whole picture, keeping its composition."
+                : "Crop, rotate or straighten. Instant, and no model involved."
+              }
+            />
           )}
 
           {mode === "edit" && (
-            <div className="field">
-              <label>Your picture</label>
+            <div className="field" role="group" aria-labelledby={`${advancedId}-pic`}>
+              <div className="choice-label" id={`${advancedId}-pic`}>Your picture</div>
               <ImageDrop
                 images={images}
-                onChange={setImages}
+                onChange={(ids) => { setImages(ids); setInvalid(null); }}
                 max={model?.max_edit_images ?? 1}
                 onError={(m) => notify(m, true)}
               />
               {(model?.max_edit_images ?? 1) === 1 && editKind === "instruct" && (
-                <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5 }}>
+                <div className="t-help" style={{ marginTop: 5 }}>
                   {model?.name} edits one picture at a time.
                 </div>
+              )}
+              {errorFor("images") && (
+                <div className="field-error" role="alert">{errorFor("images")}</div>
               )}
             </div>
           )}
 
           {mode === "edit" && editKind === "adjust" && images.length > 0 && (
             <div className="field">
-              <label>Adjust the frame</label>
+              <div className="choice-label">Adjust the frame</div>
               <Adjust
                 sourceId={images[0]}
                 onSaved={(id) => { setImages([id]); onProduced(); }}
@@ -413,197 +472,200 @@ export default function Studio({
 
           {mode === "edit" && editKind === "mask" && images.length > 0 && (
             <div className="field">
-              <label>Paint what should change</label>
+              <div className="choice-label">Paint what should change</div>
               <MaskCanvas
                 sourceId={images[0]}
-                onMaskChange={setMaskBytes}
+                onMaskChange={(b) => { setMaskBytes(b); if (b) setInvalid(null); }}
                 disabled={running}
               />
+              {errorFor("mask") && (
+                <div className="field-error" role="alert">{errorFor("mask")}</div>
+              )}
             </div>
           )}
 
           {mode === "edit" && editKind === "expand" && (
-            <div className="field">
-              <label>How much to add <em>percent of the original</em></label>
+            <div className="field" role="group" aria-labelledby={`${advancedId}-pad`}>
+              <div className="choice-label" id={`${advancedId}-pad`}>
+                How much to add <em>percent of the original</em>
+              </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                 {(["top", "right", "bottom", "left"] as const).map((side) => (
-                  <div key={side}>
-                    <label style={{ marginBottom: 3 }}>
-                      <span style={{ textTransform: "capitalize" }}>{side}</span>
-                      <em>{pad[side]}%</em>
-                    </label>
+                  <Field key={side} className="field tight"
+                    label={<><span style={{ textTransform: "capitalize" }}>{side}</span>
+                      <em aria-hidden="true">{pad[side]}%</em></>}>
                     <input
                       type="range" min={0} max={100} step={5} value={pad[side]}
-                      onChange={(e) => setPad({ ...pad, [side]: +e.target.value })}
+                      aria-valuetext={`${pad[side]} percent`}
+                      aria-invalid={invalid?.field === "pad" || undefined}
+                      onChange={(e) => { setPad({ ...pad, [side]: +e.target.value }); setInvalid(null); }}
                     />
-                  </div>
+                  </Field>
                 ))}
               </div>
-              <div className="field" style={{ marginTop: 8 }}>
-                <label>How the new area starts out</label>
-                {/* Options come from the same list that decides whether a
-                    restored fill is still offered; two copies would drift and
-                    the drift would show up as an empty dropdown. */}
-                <select value={fill} onChange={(e) => setFill(e.target.value)}>
+              {errorFor("pad") && (
+                <div className="field-error" role="alert">{errorFor("pad")}</div>
+              )}
+              {/* Options come from the same list that decides whether a
+                  restored fill is still offered; two copies would drift and
+                  the drift would show up as an empty dropdown. */}
+              <Field label="How the new area starts out" className="field" >
+                <select value={fill} onChange={(e) => setFill(e.target.value)} style={{ marginTop: 0 }}>
                   {OUTPAINT_FILLS.map((f) => (
                     <option key={f.id} value={f.id}>{f.label}</option>
                   ))}
                 </select>
-              </div>
+              </Field>
             </div>
           )}
 
-          <div className="field" style={{ display: editKind === "adjust" && mode === "edit" ? "none" : undefined }}>
-            <label>
-              {mode === "edit" ? "What should change?" : "What do you want to see?"}
+          {runnable && (
+            <div className="field">
+              <Field
+                className="prompt-field"
+                label={mode === "edit" ? "What should change?" : "What do you want to see?"}
+                error={errorFor("prompt")}
+              >
+                <textarea
+                  ref={promptRef}
+                  value={prompt}
+                  onChange={(e) => {
+                    setPrompt(e.target.value); setUndoPrompt(null);
+                    setProposal(null);
+                    if (invalid?.field === "prompt") setInvalid(null);
+                  }}
+                  placeholder={mode === "edit"
+                    ? "make the jacket red"
+                    : "a ceramic teapot on a linen cloth by a window"}
+                />
+              </Field>
+              {/* Out of the label, where it was: a button inside a label
+                  became part of the text box's name. */}
               {undoPrompt !== null && (
                 <button
                   className="btn small"
-                  style={{ padding: "1px 7px", fontSize: 10.5 }}
+                  style={{ marginTop: 6 }}
                   onClick={() => { setPrompt(undoPrompt); setUndoPrompt(null); }}
                 >
-                  Undo
+                  Undo the rewrite
                 </button>
               )}
-            </label>
-            <textarea
-              value={prompt}
-              onChange={(e) => {
-                setPrompt(e.target.value); setUndoPrompt(null);
-                setProposal(null);
-              }}
-              placeholder={mode === "edit"
-                ? "make the jacket red"
-                : "a ceramic teapot on a linen cloth by a window"}
-            />
-            <button
-              className="btn small full"
-              style={{ marginTop: 7 }}
-              disabled={assisting || running || !prompt.trim()}
-              onClick={improve}
-              title={assistantReady
-                ? "Makes your request precise. Adds no objects you did not ask for"
-                : "Needs the prompt writer from the Models tab"}
-            >
-              {assisting
-                ? "Thinking…"
-                : mode === "edit" && images.length > 0
-                  ? "Make this precise using my picture"
-                  : "Make my prompt precise"}
-            </button>
-            {assisting && draft && (
-              <div className="proposal plain" aria-live="polite">
-                <b>Writing…</b>
-                <div className="text">{draft}</div>
-              </div>
-            )}
-            {proposal && (
-              <PromptProposal
-                result={proposal}
-                busy={assisting}
-                onAccept={(text) => {
-                  setUndoPrompt(prompt);
-                  setPrompt(text);
-                  setProposal(null);
-                  notify("Prompt updated. Undo is next to the box.");
-                }}
-                onDismiss={() => setProposal(null)}
-              />
-            )}
-            {!assistantReady && (
-              <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5 }}>
-                Needs the prompt writer — a 2.1 GB download in the Models tab.
-                It runs on this Mac; nothing is sent anywhere.
-              </div>
-            )}
-          </div>
+              <button
+                className="btn small full"
+                style={{ marginTop: 7 }}
+                disabled={assisting || running || !prompt.trim()}
+                onClick={improve}
+                title={assistantReady
+                  ? "Makes your request precise. Adds no objects you did not ask for"
+                  : "Needs the prompt writer from the Models tab"}
+              >
+                {assisting
+                  ? "Thinking…"
+                  : mode === "edit" && images.length > 0
+                    ? "Make this precise using my picture"
+                    : "Make my prompt precise"}
+              </button>
+              {assisting && draft && (
+                // Silent on purpose: read aloud, every token would interrupt
+                // the last. Completion is announced once instead.
+                <div className="proposal plain" aria-live="off">
+                  <b>Writing…</b>
+                  <div className="text">{draft}</div>
+                </div>
+              )}
+              {proposal && (
+                <PromptProposal
+                  result={proposal}
+                  busy={assisting}
+                  onAccept={(text) => {
+                    setUndoPrompt(prompt);
+                    setPrompt(text);
+                    setProposal(null);
+                    notify("Prompt updated. Undo is below the box.");
+                  }}
+                  onDismiss={() => setProposal(null)}
+                />
+              )}
+              {!assistantReady && (
+                <div className="t-help" style={{ marginTop: 5 }}>
+                  Needs the prompt writer — a 2.1 GB download in the Models tab.
+                  It runs on this Mac; nothing is sent anywhere.
+                </div>
+              )}
+            </div>
+          )}
 
           {(mode === "generate" || i2iMode === "latent") && (
-            <div className="field">
-              <label>Shape</label>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {SHAPES.map((s, i) => (
-                  <button
-                    key={s.key}
-                    className={"btn small" + (i === shape ? " primary" : "")}
-                    onClick={() => setShape(i)}
-                  >
-                    {s.label}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <Choice
+              label="Shape"
+              value={shape}
+              onChange={setShape}
+              options={SHAPES.map((s, i) => [i, s.label] as const)}
+            />
           )}
 
-          {!advanced && (
-            <div className="field">
-              <label>
-                Effort
-                <em>{humanDuration(eta.seconds)}{eta.measured ? "" : " (rough)"}</em>
-              </label>
-              <div style={{ display: "flex", gap: 6 }}>
-                {(["fast", "balanced", "best"] as Quality[]).map((q) => (
-                  <button
-                    key={q}
-                    className={"btn small" + (q === quality ? " primary" : "")}
-                    onClick={() => setQuality(q)}
-                  >
-                    {QUALITY_LABEL[q]}
-                  </button>
-                ))}
-              </div>
-            </div>
+          {!advanced && runnable && (
+            <Choice
+              label={<>Effort <em>{humanDuration(eta.seconds)}{eta.measured ? "" : " (rough)"}</em></>}
+              value={quality}
+              onChange={setQuality}
+              options={(["fast", "balanced", "best"] as Quality[]).map((q) => [q, QUALITY_LABEL[q]] as const)}
+            />
           )}
 
-          <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 4 }}>
+          <div className="t-note" style={{ marginTop: 4 }}>
             Using <b>{model?.name}</b>
             {autoModel && usable.length > 1 && (
               <button
                 className="btn small"
-                style={{ padding: "1px 7px", fontSize: 10, marginLeft: 7 }}
+                style={{ marginLeft: 7 }}
+                aria-label={`Change model, now ${model?.name}`}
                 onClick={() => { setAutoModel(false); setModelId(model?.id ?? ""); setAdvanced(true); }}
               >
                 change
               </button>
             )}
           </div>
-
-          {editKind === "adjust" && mode === "edit" ? null : running ? (
-            <>
-              <JobProgress p={prog} label="Working" />
-              <div style={{
-                display: "flex", justifyContent: "space-between",
-                fontSize: 11, color: "var(--text-faint)", marginTop: 6,
-              }}>
-                <span>{elapsed}s elapsed</span>
-                <span>
-                  {elapsed > eta.seconds * 1.4
-                    ? "longer than expected"
-                    : `${humanDuration(eta.seconds)} in total`}
-                </span>
-              </div>
-              <button className="btn danger full" style={{ marginTop: 10 }} onClick={cancel}>
-                Cancel
-              </button>
-            </>
-          ) : (
-            <>
-              <button className="btn primary full" style={{ marginTop: 12 }} onClick={run}>
-                {mode === "edit" ? "Apply the change" : "Make it"}
-              </button>
-              <div style={{
-                fontSize: 10.5, color: "var(--text-faint)",
-                marginTop: 6, textAlign: "center",
-              }}>
-                Takes {humanDuration(eta.seconds)}
-                {eta.measured
-                  ? ` — measured over ${model?.measured_runs} run${model?.measured_runs === 1 ? "" : "s"} on this Mac`
-                  : " — a rough guess until the first run"}
-                {eta.loadSeconds > 0 && `, including ~${eta.loadSeconds}s to load the model`}
-              </div>
-            </>
-          )}
         </div>
+
+        {/* The run button sits right under the settings it runs, before the
+            optional adapters and Advanced panels, so it neither drifts out of
+            view nor floats over panels further down. */}
+        {runnable && (
+          <div className="run-footer">
+            {running ? (
+              <>
+                <JobProgress p={prog} label="Working" />
+                <div className="t-note run-footer-times">
+                  <span>{elapsed}s elapsed</span>
+                  <span>
+                    {elapsed > eta.seconds * 1.4
+                      ? "longer than expected"
+                      : `${humanDuration(eta.seconds)} in total`}
+                  </span>
+                </div>
+                <button className="btn danger full" style={{ marginTop: 8 }} onClick={cancel}>
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <>
+                <button className="btn primary full" onClick={() => void run()}
+                  aria-keyshortcuts="Meta+Enter">
+                  {mode === "edit" ? "Apply the change" : "Make it"}
+                  <span className="kbd" aria-hidden="true">⌘↵</span>
+                </button>
+                <div className="t-note" style={{ marginTop: 6, textAlign: "center" }}>
+                  Takes {humanDuration(eta.seconds)}
+                  {eta.measured
+                    ? ` — measured over ${model?.measured_runs} run${model?.measured_runs === 1 ? "" : "s"} on this Mac`
+                    : " — a rough guess until the first run"}
+                  {eta.loadSeconds > 0 && `, including ~${eta.loadSeconds}s to load the model`}
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {/* Style is what a picture board is made of, so the adapters that
             carry it are not an advanced setting. This used to sit inside the
@@ -611,12 +673,12 @@ export default function Studio({
             found at all without knowing they were there. */}
         <Loras selected={loras} onSelectedChange={setLoras} notify={notify} />
 
+        <div id={advancedId}>
         {advanced && (
           <>
             <div className="panel">
               <h2>Model and parameters</h2>
-              <div className="field">
-                <label>Model</label>
+              <Field label="Model">
                 <select
                   value={autoModel ? "__auto" : (model?.id ?? "")}
                   onChange={(e) => {
@@ -631,76 +693,63 @@ export default function Studio({
                     </option>
                   ))}
                 </select>
-              </div>
+              </Field>
 
-              {mode === "edit" && (
-                <>
-                  {editKind === "latent" && (
-                    <div className="field">
-                      <label>How far from the original <em>{strength.toFixed(2)}</em></label>
-                      <input type="range" min={0.1} max={0.95} step={0.05} value={strength}
-                        onChange={(e) => setStrength(+e.target.value)} />
-                    </div>
-                  )}
-                </>
+              {mode === "edit" && editKind === "latent" && (
+                <Field label={<>How far from the original <em aria-hidden="true">{strength.toFixed(2)}</em></>}
+                  hint="Low keeps close to your picture; high reinvents more of it.">
+                  <input type="range" min={0.1} max={0.95} step={0.05} value={strength}
+                    aria-valuetext={`strength ${strength.toFixed(2)}`}
+                    onChange={(e) => setStrength(+e.target.value)} />
+                </Field>
               )}
 
               {!fixedGuidance && (
-                <div className="field">
-                  <label>Negative prompt <em>optional</em></label>
+                <Field label={<>Negative prompt <em>optional</em></>}>
                   <input type="text" value={negative} onChange={(e) => setNegative(e.target.value)}
                     placeholder="blurry, low quality" />
-                </div>
+                </Field>
               )}
 
               <div className="row">
-                <div className="field">
-                  <label>Steps <em>{steps}</em></label>
+                <Field label={<>Steps <em aria-hidden="true">{steps}</em></>}>
                   <input type="range" min={2} max={50} value={steps}
+                    aria-valuetext={`${steps} steps`}
                     onChange={(e) => setSteps(+e.target.value)} />
-                </div>
-                <div className="field">
-                  <label>
-                    Guidance
-                    <em>{fixedGuidance ? "not adjustable" : guidance.toFixed(1)}</em>
-                  </label>
+                </Field>
+                <Field
+                  label={<>Guidance <em aria-hidden="true">{fixedGuidance ? "not adjustable" : guidance.toFixed(1)}</em></>}
+                  hint={fixedGuidance ? "This model is tuned to work without it." : undefined}
+                >
                   <input
                     type="range" min={0} max={model?.guidance_max ?? 1} step={0.5}
                     value={guidance} disabled={fixedGuidance}
+                    aria-valuetext={fixedGuidance ? "not adjustable" : `guidance ${guidance.toFixed(1)}`}
                     onChange={(e) => setGuidance(+e.target.value)}
                   />
-                  {fixedGuidance && (
-                    <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5 }}>
-                      Distilled checkpoint — trained without classifier-free guidance.
-                    </div>
-                  )}
-                </div>
+                </Field>
               </div>
 
               <div className="row">
-                <div className="field">
-                  <label>Seed</label>
-                  <input type="number" value={seed} disabled={randomSeed}
-                    onChange={(e) => setSeed(+e.target.value)} />
-                  <label style={{ marginTop: 6, cursor: "pointer" }}>
-                    <span>
-                      <input type="checkbox" checked={randomSeed}
-                        style={{ width: "auto", marginRight: 6 }}
-                        onChange={(e) => setRandomSeed(e.target.checked)} />
-                      Different every time
-                    </span>
+                <div>
+                  <Field label="Seed" className="field tight">
+                    <input type="number" value={seed} disabled={randomSeed}
+                      onChange={(e) => setSeed(+e.target.value)} />
+                  </Field>
+                  <label className="check">
+                    <input type="checkbox" checked={randomSeed}
+                      onChange={(e) => setRandomSeed(e.target.checked)} />
+                    Different every time
                   </label>
                 </div>
-                <div className="field">
-                  <label>How many <em>{effectiveCount}</em></label>
+                <Field
+                  label={<>How many <em aria-hidden="true">{effectiveCount}</em></>}
+                  hint={lowRam && count > 1 ? "Memory saver makes one at a time." : undefined}
+                >
                   <input type="range" min={1} max={4} value={count}
+                    aria-valuetext={`${effectiveCount} picture${effectiveCount === 1 ? "" : "s"}`}
                     onChange={(e) => setCount(+e.target.value)} />
-                  {lowRam && count > 1 && (
-                    <div style={{ fontSize: 10.5, color: "var(--warn)", marginTop: 5 }}>
-                      Reduced-memory mode makes one at a time.
-                    </div>
-                  )}
-                </div>
+                </Field>
               </div>
             </div>
 
@@ -709,84 +758,100 @@ export default function Studio({
               {model?.low_ram_may_help && (
                 <div className="notice warn" style={{ marginBottom: 12 }}>
                   <strong>Above this Mac&rsquo;s memory ceiling</strong>
-                  {model.fit_reason} Reduced-memory mode has been switched on for you.
+                  {model.fit_reason} Memory saver has been switched on for you.
                 </div>
               )}
               <div className="field">
-                <label style={{ cursor: "pointer" }}>
-                  <span>
-                    <input type="checkbox" checked={lowRam} style={{ width: "auto", marginRight: 6 }}
-                      onChange={(e) => setLowRam(e.target.checked)} />
-                    Reduced-memory mode
-                  </span>
-                  <em>{lowRam ? "slower" : "off"}</em>
+                <label className="check">
+                  <input type="checkbox" checked={lowRam}
+                    aria-describedby={`${advancedId}-saver`}
+                    onChange={(e) => setLowRam(e.target.checked)} />
+                  Memory saver
                 </label>
-                <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5, lineHeight: 1.55 }}>
-                  Caps the MLX buffer cache at 1 GiB, releases the text encoder once the prompt is
-                  encoded, and drops the model when the run ends. Bounds transient memory, not the
-                  resident weights, and makes one image at a time.
+                <div id={`${advancedId}-saver`} className="t-help" style={{ marginTop: 5 }}>
+                  Uses less memory so larger models fit. Slower, and makes one
+                  picture at a time.
                 </div>
               </div>
               <div className="field">
-                <label style={{ cursor: "pointer" }}>
-                  <span>
-                    <input type="checkbox" checked={showPreview}
-                      style={{ width: "auto", marginRight: 6 }}
-                      onChange={(e) => setShowPreview(e.target.checked)} />
-                    Show the picture forming
-                  </span>
+                <label className="check">
+                  <input type="checkbox" checked={showPreview}
+                    aria-describedby={`${advancedId}-preview`}
+                    onChange={(e) => setShowPreview(e.target.checked)} />
+                  Show the picture forming
                 </label>
-                <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5, lineHeight: 1.55 }}>
-                  Decodes each step through a small preview decoder. Costs a
-                  little time per step; turn it off for the fastest possible run.
+                <div id={`${advancedId}-preview`} className="t-help" style={{ marginTop: 5 }}>
+                  A rough preview while it works. Turn it off for the fastest run.
                 </div>
               </div>
-              <div className="field">
-                <label style={{ cursor: "pointer" }}>
-                  <span>
-                    <input type="checkbox" checked={capCache} style={{ width: "auto", marginRight: 6 }}
+              {/* A tuning knob for diagnosing memory trouble, not a choice
+                  anyone makes up front, so it is folded away. */}
+              <details className="diagnostics">
+                <summary>Diagnostics</summary>
+                <div className="field">
+                  <label className="check">
+                    <input type="checkbox" checked={capCache}
                       onChange={(e) => setCapCache(e.target.checked)} />
-                    Cap the MLX buffer cache
-                  </span>
-                  <em>{capCache ? `${cacheLimit} GiB` : "auto"}</em>
-                </label>
-                {capCache && (
-                  <input type="range" min={0.5} max={8} step={0.5} value={cacheLimit}
-                    onChange={(e) => setCacheLimit(+e.target.value)} style={{ marginTop: 6 }} />
-                )}
-                <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5, lineHeight: 1.55 }}>
-                  Without a cap the engine uses total RAM &divide; 8, clamped to 1&ndash;8 GiB.
+                    Cap the working memory cache
+                  </label>
                 </div>
-              </div>
+                {capCache && (
+                  <Field label={<>Cache limit <em aria-hidden="true">{cacheLimit} GiB</em></>}>
+                    <input type="range" min={0.5} max={8} step={0.5} value={cacheLimit}
+                      aria-valuetext={`${cacheLimit} gigabytes`}
+                      onChange={(e) => setCacheLimit(+e.target.value)} />
+                  </Field>
+                )}
+                <div className="t-help">
+                  Without a cap the engine uses an eighth of this Mac&rsquo;s memory,
+                  between 1 and 8 GiB.
+                </div>
+              </details>
             </div>
           </>
         )}
+        </div>
+
       </div>
 
-      <div>
+      <div className="creation-canvas">
         <div className="canvas">
-          {outputs.length > 0 && !running ? (
-            <img src={vaultUrl(outputs[selected])} alt="" />
-          ) : preview ? (
+          {failure && !running ? (
+            <div className="canvas-stack">
+              <RunError
+                message={failure}
+                onRetry={() => void run()}
+                onMemorySaver={lowRam ? undefined : () => { setLowRam(true); void run({ lowRam: true }); }}
+              />
+              {current && <img className="stale" src={vaultUrl(current.id)} alt={`Previous ${resultAlt}`} />}
+            </div>
+          ) : running && preview ? (
             <div style={{ textAlign: "center" }}>
               {/* Deliberately soft: this is a cheap decode of a partial step,
                   not the output, and it should not be mistaken for it. */}
               <img
                 src={preview}
-                alt=""
+                alt="Preview of the picture forming"
                 style={{
-                  maxWidth: "100%", maxHeight: "58vh", borderRadius: 6,
+                  maxWidth: "100%", maxHeight: "58vh", borderRadius: 7,
                   imageRendering: "auto", opacity: 0.92,
                 }}
               />
-              <div style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 8 }}>
+              <div className="t-note" style={{ marginTop: 8 }}>
                 Taking shape{prog?.step && prog?.total_steps
                   ? ` — step ${prog.step} of ${prog.total_steps}` : "…"}
               </div>
             </div>
+          ) : running && current ? (
+            <div className="canvas-stack">
+              <img className="stale" src={vaultUrl(current.id)} alt={`Previous ${resultAlt}`} />
+              <div className="t-note">Working — the previous result stays until the new one lands.</div>
+            </div>
+          ) : current ? (
+            <img src={vaultUrl(current.id)} alt={resultAlt} />
           ) : (
             <div className="empty">
-              <span className="big">{mode === "edit" ? "✎" : "✦"}</span>
+              <span className="big" aria-hidden="true">{mode === "edit" ? "✎" : "✦"}</span>
               {running
                 ? "Working — the first run also loads the model into memory."
                 : mode === "edit"
@@ -796,20 +861,12 @@ export default function Studio({
           )}
         </div>
 
-        {outputs.length > 0 && (
+        {current && (
           <>
-            {outputs.length > 1 && (
-              <div className="results-strip">
-                {outputs.map((p, i) => (
-                  <img key={p} src={vaultUrl(p)} alt=""
-                    className={i === selected ? "sel" : ""}
-                    onClick={() => setSelected(i)} />
-                ))}
-              </div>
-            )}
-            <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <ResultStrip items={made} selected={current.id} onSelect={setSelectedId} />
+            <div className="result-actions">
               <button className="btn small"
-                onClick={() => exportItem({ id: outputs[selected], name: "" }, notify)}>
+                onClick={() => exportItem({ id: current.id, name: "" }, notify)}>
                 Save a copy…
               </button>
               {/* Carry the result onward. It is already a vault item, so this
@@ -819,28 +876,38 @@ export default function Studio({
                   className="btn small primary"
                   title="Use this result as the new source and keep going"
                   onClick={() => {
-                    setImages([outputs[selected]]);
-                    setOutputs([]);
+                    setImages([current.id]);
                     notify("Now editing the result.");
                   }}
                 >
                   Keep editing this
                 </button>
               )}
+              <button className="btn small"
+                onClick={() => {
+                  setSeed(current.seed); setRandomSeed(false);
+                  notify(`Seed ${current.seed} will be used for the next run.`);
+                }}>
+                Reuse seed
+              </button>
+              <button className="btn small"
+                disabled={current.prompt === prompt}
+                onClick={() => { setUndoPrompt(prompt); setPrompt(current.prompt); }}>
+                Use prompt
+              </button>
               {send && (
                 <SendTo
-                  ids={[outputs[selected]]}
+                  ids={[current.id]}
                   send={send}
                   models={models}
                   exclude={mode === "edit" ? ["edit"] : []}
                 />
               )}
-              {took != null && (
-                <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--text-faint)" }}>
-                  Took {fmtDuration(Math.round(took))}
-                  {outputs.length > 1 ? ` for ${outputs.length}` : ""} · seed {seed}
-                </span>
-              )}
+              <span className="t-note" style={{ marginLeft: "auto" }}>
+                {current.took != null && <>Took {fmtDuration(Math.round(current.took))}
+                  {current.batch > 1 ? ` for ${current.batch}` : ""} · </>}
+                seed {current.seed}
+              </span>
             </div>
           </>
         )}

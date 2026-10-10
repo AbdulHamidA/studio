@@ -2218,7 +2218,7 @@ dependencies = [
 
 [[package]]
 name = "melp-model-studio"
-version = "0.3.0-preview.2"
+version = "0.3.0-preview.3"
 dependencies = [
  "argon2",
  "base64 0.22.1",

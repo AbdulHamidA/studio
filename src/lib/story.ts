@@ -42,6 +42,8 @@ export interface StoryScene {
   start: number;
   end: number;
   beats: StoryBeat[];
+  /** Left by a stopped or failed analysis; "Continue analysis" picks it up. */
+  unanalysed?: boolean;
 }
 export interface StoryChapter {
   id: string;
@@ -49,6 +51,8 @@ export interface StoryChapter {
   source: string;
   source_hash: string;
   scenes: StoryScene[];
+  /** "voice": speakers and mood only, from the Audiobook's quick analysis. */
+  analysis?: "voice";
 }
 export interface CharacterReference {
   kind?: "identity-face-v1";
@@ -64,6 +68,26 @@ export interface StoryBook {
   chapters: StoryChapter[];
 }
 export const SPEECH_MODEL_ID = "qwen3-tts-1.7b-custom-6bit";
+export const KOKORO_MODEL_ID = "kokoro-82m";
+
+/** "en_IN" -> "English (India)"; Kokoro's labels are already readable. */
+export function voiceLanguage(code: string): string {
+  if (!/^[a-z]{2,3}[_-][A-Z]{2}$/.test(code)) return code;
+  try {
+    return new Intl.DisplayNames(["en"], { type: "language" }).of(code.replace("_", "-")) ?? code;
+  } catch { return code; }
+}
+
+/** Voices grouped by language, Indian voices first, then alphabetically. */
+export function voiceGroups(voices: { id: string; language: string }[]) {
+  const groups = new Map<string, { id: string; language: string }[]>();
+  for (const v of voices) {
+    const label = voiceLanguage(v.language);
+    groups.set(label, [...(groups.get(label) ?? []), v]);
+  }
+  const indian = (label: string) => /India|Hindi/.test(label) ? 0 : 1;
+  return [...groups.entries()].sort(([a], [b]) => indian(a) - indian(b) || a.localeCompare(b));
+}
 export interface AudioSettings {
   model_id?: string;
   language?: string;
@@ -73,6 +97,9 @@ export interface AudioSettings {
   voices: Record<string, string>;
   rate: number;
   outputs: Record<string, string[]>;
+  /** Narrator and character voices last chosen on each speech engine, so
+   *  switching engines and back does not lose a cast. */
+  casts?: Record<string, { narrator: string; voices: Record<string, string> }>;
 }
 export interface StoryLibrary {
   version: 1;
@@ -87,6 +114,12 @@ export interface StoryAnalysisResult {
   book: StoryBook;
   chapter_id: string;
   panels: Panel[];
+  /** Stop was pressed: finished passages are kept, the rest left unanalysed. */
+  stopped?: boolean;
+  unanalysed?: number;
+}
+export function unanalysedIn(book: StoryBook | null, chapterId: string | null): number {
+  return book?.chapters.find((c) => c.id === chapterId)?.scenes.filter((s) => s.unanalysed).length ?? 0;
 }
 export function keepBook(library: StoryLibrary, book: StoryBook): StoryLibrary {
   const existing = library.books.find((b) => b.id === book.id);
@@ -101,8 +134,22 @@ export function keepBook(library: StoryLibrary, book: StoryBook): StoryLibrary {
   }
   const merged = { ...book, chapters: [...chapters.values()], characters: [...characters.values()],
     references: { ...existing?.references, ...book.references } };
-  return { ...library, activeBookId: book.id,
-    books: [...library.books.filter((b) => b.id !== book.id), merged] };
+  // Dividing the same text again made a new book every time and kept the old
+  // one, so retrying a chapter filled the library until it refused to save at
+  // all. A book holding nothing but text this book now holds is superseded.
+  // Never replaced by a quicker analysis than its own, and never while
+  // narrations are filed under it.
+  const held = new Map(merged.chapters.map((c) => [c.source_hash, c.analysis]));
+  const narrated = (id: string) => Object.keys(library.audio?.[id]?.outputs ?? {}).length > 0;
+  const superseded = new Set(existing ? [] : library.books
+    .filter((b) => b.id !== book.id && b.chapters.length > 0 && !narrated(b.id)
+      && b.chapters.every((c) => held.has(c.source_hash)
+        && !(held.get(c.source_hash) === "voice" && c.analysis !== "voice")))
+    .map((b) => b.id));
+  const audio = library.audio && Object.fromEntries(
+    Object.entries(library.audio).filter(([id]) => !superseded.has(id)));
+  return { ...library, activeBookId: book.id, ...(audio ? { audio } : {}),
+    books: [...library.books.filter((b) => b.id !== book.id && !superseded.has(b.id)), merged] };
 }
 export function castFromBook(book: StoryBook) {
   return { people: book.characters.map((c, i) => ({
@@ -111,4 +158,20 @@ export function castFromBook(book: StoryBook) {
       .filter((b) => b.visible.some((a) => a.character_id === c.id)).length,
     tier: i === 0 ? 1 : 2,
   })), places: [], words: book.chapters.at(-1)?.source.split(/\s+/).length ?? 0 };
+}
+
+const QWEN_VOICES: Record<string, string> = {
+  ryan: "male", aiden: "male", dylan: "male", eric: "male", uncle_fu: "male",
+  vivian: "female", serena: "female", ono_anna: "female", sohee: "female",
+};
+const KOKORO_ACCENT: Record<string, string> = {
+  a: "US", b: "UK", h: "Hindi", e: "Spanish", f: "French", i: "Italian", p: "Portuguese",
+};
+/** "hm_omega" -> "Omega · Hindi, male"; "vivian" -> "Vivian · female". */
+export function voiceLabel(id: string): string {
+  const title = (s: string) => s.split("_").map((w) => w[0]?.toUpperCase() + w.slice(1)).join(" ");
+  const kokoro = /^([abhefip])([fm])_(.+)$/.exec(id);
+  if (kokoro) return `${title(kokoro[3])} · ${KOKORO_ACCENT[kokoro[1]]}, ${kokoro[2] === "f" ? "female" : "male"}`;
+  if (QWEN_VOICES[id]) return `${title(id)} · ${QWEN_VOICES[id]}`;
+  return id;
 }

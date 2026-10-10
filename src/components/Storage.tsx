@@ -82,7 +82,7 @@ export default function Storage({
         </div>
         {orphans.repos.slice(0, 4).map(([repo, bytes]) => (
           <div key={repo} style={{ display: "flex", justifyContent: "space-between",
-                                   fontSize: 11.5, marginBottom: 3 }}>
+                                   fontSize: 12, marginBottom: 3 }}>
             <span style={{ color: "var(--text-dim)" }}>{repo}</span>
             <span>{fmtBytes(bytes)}</span>
           </div>
@@ -92,7 +92,7 @@ export default function Storage({
             {busy ?? `Recover ${fmtBytes(orphans.bytes)}`}
           </button>
         </div>
-        <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 8,
+        <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 8,
                       lineHeight: 1.55 }}>
           Safe: a file no snapshot links to cannot be reached through the cache,
           so removing it cannot break a model you have installed. Anything
@@ -114,7 +114,7 @@ export default function Storage({
             drive leaves your keys, vault and runtime where they are.
           </div>
           <div style={{
-            fontSize: 10.5, color: "var(--text-faint)", userSelect: "text",
+            fontSize: 12, color: "var(--text-faint)", userSelect: "text",
             marginBottom: 12, wordBreak: "break-all",
           }}>
             {info.models_root}
@@ -134,24 +134,29 @@ export default function Storage({
         <button className="btn small primary" disabled={!!busy} onClick={() => relocate(true)}>
           {busy ?? "Move models to another drive…"}
         </button>
-        <button
-          className={"btn small" + (confirmSwitch ? " danger" : "")}
-          disabled={!!busy}
-          onClick={() => {
-            // Only worth asking when there is something to lose sight of.
-            if (!confirmSwitch && (info?.models_bytes ?? 0) > 0) {
-              setConfirmSwitch(true); return;
-            }
-            void relocate(false);
-          }}
-        >
-          {confirmSwitch
-            ? `Point elsewhere? ${fmtBytes(info?.models_bytes ?? 0)} here stays on disk but stops being found`
-            : "Change location without moving"}
-        </button>
+        {/* The consequence is stated beside the button, with a way back; it
+            used to replace the button label with a 70-character question. */}
+        {confirmSwitch ? (
+          <span role="alert" style={{ display: "inline-flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+            <span className="t-meta">
+              {fmtBytes(info?.models_bytes ?? 0)} here stays on disk but stops being found.
+            </span>
+            <button className="btn small danger" disabled={!!busy} onClick={() => void relocate(false)}>
+              Point elsewhere
+            </button>
+            <button className="btn small" onClick={() => setConfirmSwitch(false)}>Cancel</button>
+          </span>
+        ) : (
+          <button className="btn small" disabled={!!busy}
+            onClick={() => {
+              // Only worth asking when there is something to lose sight of.
+              if ((info?.models_bytes ?? 0) > 0) { setConfirmSwitch(true); return; }
+              void relocate(false);
+            }}>Change location without moving</button>
+        )}
         <button className="btn small" disabled={!!busy} onClick={refresh}>Refresh</button>
       </div>
-      <div style={{ marginTop: 9, fontSize: 10.5, color: "var(--text-faint)", lineHeight: 1.6 }}>
+      <div style={{ marginTop: 9, fontSize: 12, color: "var(--text-faint)", lineHeight: 1.6 }}>
         Moving copies every file first and only removes the originals once they
         have all landed. The engine restarts afterwards so it picks up the new
         location; nothing needs re-downloading.

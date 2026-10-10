@@ -3,9 +3,11 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { api, errText, vaultUrl } from "../lib/api";
 import type { EngineProgress, VaultItem } from "../lib/types";
 
-export function Bar({ value }: { value: number | null }) {
+export function Bar({ value, label = "Progress" }: { value: number | null; label?: string }) {
+  // A progressbar to assistive tech; indeterminate when there is no fraction.
   return (
-    <div className="bar">
+    <div className="bar" role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100}
+         aria-valuenow={value === null ? undefined : Math.round(value * 100)}>
       <div
         className={"bar-fill" + (value === null ? " indeterminate" : "")}
         style={{ width: `${Math.round((value ?? 0) * 100)}%` }}
@@ -71,7 +73,7 @@ export function JobProgress({ p, label }: { p: EngineProgress | null; label: str
       </div>
       {note && (
         <div style={{
-          fontSize: 10.5, marginTop: 3,
+          fontSize: 12, marginTop: 3,
           color: (p.stalled_seconds ?? 0) >= 45 ? "var(--warn)" : "var(--text-faint)",
         }}>
           {note}
@@ -127,7 +129,7 @@ export function ImageDrop({
   const [over, setOver] = useState(false);
   const [picking, setPicking] = useState(false);
   const [vaultItems, setVaultItems] = useState<VaultItem[] | null>(null);
-  const ref = useRef<HTMLDivElement>(null);
+  const ref = useRef<HTMLButtonElement>(null);
 
   const add = useCallback(async (paths: string[]) => {
     const next = [...images];
@@ -230,18 +232,22 @@ export function ImageDrop({
 
   return (
     <div>
-      <div
+      {/* A button, so it can be reached and pressed from the keyboard; it was
+          a clickable div, which left Edit, Video and Upscale mouse-only. */}
+      <button
+        type="button"
         ref={ref}
         className={"dropzone" + (over ? " over" : "")}
         // Full means full. It said "Maximum of 3 images" and still opened the
         // file picker when clicked, so choosing a file there did nothing.
         onClick={images.length >= max ? undefined : pick}
-        style={images.length >= max ? { cursor: "default" } : undefined}
+        aria-disabled={images.length >= max}
+        style={{ width: "100%", ...(images.length >= max ? { cursor: "default" } : {}) }}
       >
         {images.length >= max
           ? `Maximum of ${max} image${max === 1 ? "" : "s"}`
           : "Drop an image here, or click to choose a file"}
-      </div>
+      </button>
 
       {images.length < max && (
         <button
@@ -256,7 +262,7 @@ export function ImageDrop({
       {picking && (
         <div style={{
           marginTop: 8, maxHeight: 190, overflowY: "auto",
-          border: "1px solid var(--border)", borderRadius: 8, padding: 8,
+          border: "1px solid var(--border)", borderRadius: 7, padding: 8,
         }}>
           {vaultItems === null ? (
             <div style={{ fontSize: 11, color: "var(--text-faint)" }}>Loading…</div>
@@ -267,13 +273,15 @@ export function ImageDrop({
           ) : (
             <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
               {vaultItems.map((it) => (
-                <img
+                <button
+                  type="button"
                   key={it.id}
-                  src={vaultUrl(it.id)}
-                  alt=""
+                  aria-pressed={images.includes(it.id)}
+                  aria-label={it.prompt || it.name}
                   title={it.prompt || it.name}
                   style={{
-                    width: 62, height: 62, objectFit: "cover", borderRadius: 6,
+                    padding: 0, width: 62, height: 62, borderRadius: 7, overflow: "hidden",
+                    background: "none", position: "relative",
                     border: images.includes(it.id)
                       ? "2px solid var(--accent)" : "1px solid var(--border)",
                     cursor: "pointer",
@@ -286,7 +294,11 @@ export function ImageDrop({
                       setPicking(false);
                     }
                   }}
-                />
+                >
+                  <img src={vaultUrl(it.id)} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  {images.includes(it.id) && <span aria-hidden style={{ position: "absolute", top: 2, right: 4,
+                    color: "var(--accent)", fontWeight: 700 }}>✓</span>}
+                </button>
               ))}
             </div>
           )}
@@ -296,11 +308,13 @@ export function ImageDrop({
         <div className="thumbs">
           {images.map((p, i) => (
             <div className="thumb" key={p}>
-              <img src={vaultUrl(p)} alt="" />
+              <img src={vaultUrl(p)} alt={`Selected image ${i + 1}`} />
               <button
+                type="button"
                 onClick={() => onChange(images.filter((_, j) => j !== i))}
                 title="Remove"
-              >×</button>
+                aria-label={`Remove image ${i + 1}`}
+              ><span aria-hidden>×</span></button>
             </div>
           ))}
         </div>
@@ -334,7 +348,8 @@ export function Toast({ msg, bad, onDone }: { msg: string; bad?: boolean; onDone
   }, [msg, bad]);
   useEffect(() => setCopied(false), [msg]);
   return (
-    <div className={"toast" + (bad ? " bad" : "")}>
+    // Announced: politely for news, at once for a failure (WCAG 4.1.3).
+    <div className={"toast" + (bad ? " bad" : "")} role={bad ? "alert" : "status"} aria-live={bad ? "assertive" : "polite"}>
       <span style={{ userSelect: "text", WebkitUserSelect: "text" }}>{msg}</span>
       {bad && (
         <span style={{ display: "inline-flex", gap: 6, marginLeft: 10 }}>

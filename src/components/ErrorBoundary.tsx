@@ -61,7 +61,7 @@ export default class ErrorBoundary extends Component<{ children: ReactNode }, St
             >
               Reload the interface
             </button>
-            <div style={{ marginTop: 10, fontSize: 10.5, color: "var(--text-faint)" }}>
+            <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-faint)" }}>
               Reloading does not unlock or re-lock the vault by itself, but you
               will be asked for your passphrase again.
             </div>

@@ -5,9 +5,10 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import Audiobook from "./Audiobook";
 import { api } from "../lib/api";
 import { SPEECH_MODEL_ID, type StoryLibrary } from "../lib/story";
+import { NowPlaying } from "../lib/nowPlaying";
 
 vi.mock("../lib/api", () => ({
-  api: { audioVoices: vi.fn(), generateAudiobook: vi.fn(), cancelJob: vi.fn() },
+  api: { audioVoices: vi.fn(), generateAudiobook: vi.fn(), cancelJob: vi.fn(), analyzeStory: vi.fn(), resumeStory: vi.fn(), audioPreview: vi.fn(), vaultList: vi.fn(async () => []) },
   errText: (e: unknown) => String(e), isCancelled: () => false,
   newJobId: () => "job", onEngineProgress: async () => () => {},
   vaultUrl: (id: string) => `vault://localhost/${id}`,
@@ -17,11 +18,14 @@ const initial: StoryLibrary = { audio: { book: { model_id: "macos", narrator: ""
   chapters: [{ id: "chapter", title: "The train", source: "Exact original prose.", source_hash: "hash", scenes: [] }],
 }] };
 const produced = vi.fn();
+const play = vi.fn();
 const notify = vi.fn();
-function Harness({ models = [] }: { models?: import("../lib/types").ModelStatus[] }) {
-  const [library, setLibrary] = useState(initial);
-  return <Audiobook library={library} models={models} notify={notify} onProduced={produced}
-    onLibraryChange={async (update) => { setLibrary((current) => update(current)); }} />;
+function Harness({ models = [], start = initial }: { models?: import("../lib/types").ModelStatus[]; start?: StoryLibrary }) {
+  const [library, setLibrary] = useState(start);
+  return <NowPlaying.Provider value={{ track: null, play, stop: () => {} }}>
+    <Audiobook library={library} models={models} notify={notify} onProduced={produced}
+      onLibraryChange={async (update) => { setLibrary((current) => update(current)); }} />
+  </NowPlaying.Provider>;
 }
 afterEach(cleanup);
 beforeEach(() => {
@@ -32,12 +36,13 @@ beforeEach(() => {
 describe("Audiobook", () => {
   it("narrates the selected original chapter with saved character voices and plays the sealed result", async () => {
     render(<Harness />);
-    await waitFor(() => expect(screen.getAllByRole("option", { name: "Samantha · en_US" }).length).toBe(2));
+    await waitFor(() => expect(screen.getAllByRole("option", { name: "Samantha" }).length).toBe(2));
     fireEvent.change(screen.getByLabelText("Mira voice"), { target: { value: "Karen" } });
     fireEvent.click(screen.getByRole("button", { name: "Narrate chapter" }));
     await waitFor(() => expect(api.generateAudiobook).toHaveBeenCalledWith(
       "job", initial.books[0], "chapter", "Samantha", { mira: "Karen" }, 160, { model_id: "macos", language: "auto", delivery: "", directions: {} }));
-    await waitFor(() => expect(document.querySelector('audio')?.getAttribute('src')).toBe('vault://localhost/sealed-audio'));
+    fireEvent.click(await screen.findByRole("button", { name: "▶ Play" }));
+    expect(play).toHaveBeenCalledWith(expect.objectContaining({ src: "vault://localhost/sealed-audio" }));
     expect(screen.getByText("Exact original prose.")).toBeTruthy();
     expect(produced).toHaveBeenCalledOnce();
   });
@@ -49,6 +54,29 @@ describe("Audiobook", () => {
     await waitFor(() => expect(notify).toHaveBeenCalledWith("Error: Voice unavailable", true));
     expect(document.querySelector('audio')).toBeNull();
     expect(screen.getByText("Exact original prose.")).toBeTruthy();
+  });
+  it("analyzes a new chapter with the quick voice-only analysis", async () => {
+    const book = { ...initial.books[0], chapters: [{ ...initial.books[0].chapters[0], analysis: "voice" as const }] };
+    vi.mocked(api.analyzeStory).mockResolvedValue({ book, chapter_id: "chapter", panels: [] });
+    const writer = { id: "qwen3-4b-instruct-4bit", installed: true, broken: null, hopeless: false } as unknown as import("../lib/types").ModelStatus;
+    render(<Harness models={[writer]} start={{ version: 1, books: [], activeBookId: null }} />);
+    fireEvent.change(screen.getByPlaceholderText("Paste the original prose…"), { target: { value: "Exact original prose." } });
+    fireEvent.click(screen.getByRole("button", { name: "Analyze chapter" }));
+    await waitFor(() => expect(api.analyzeStory).toHaveBeenCalledWith("job", "Exact original prose.", expect.any(String), null, null, "voice"));
+  });
+  it("plays a sample of a character's chosen voice before narrating", async () => {
+    const play = vi.fn(async () => {});
+    vi.stubGlobal("Audio", class { play = play; pause = vi.fn(); onended = null; });
+    URL.createObjectURL = vi.fn(() => "blob:sample");
+    vi.mocked(api.audioPreview).mockResolvedValue({ wav_base64: btoa("RIFF") });
+    render(<Harness />);
+    await waitFor(() => expect(screen.getAllByRole("option", { name: "Karen" }).length).toBe(2));
+    fireEvent.change(screen.getByLabelText("Mira voice"), { target: { value: "Karen" } });
+    fireEvent.click(screen.getByRole("button", { name: "Preview Mira voice" }));
+    await waitFor(() => expect(play).toHaveBeenCalled());
+    expect(api.audioPreview).toHaveBeenCalledWith(expect.objectContaining({ voice: "Karen", model_id: "macos" }));
+    expect(api.generateAudiobook).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
   it("does not enable narration when no local speech voices are available", async () => {
     vi.mocked(api.audioVoices).mockResolvedValue({ voices: [] });
@@ -62,7 +90,7 @@ describe("Audiobook", () => {
 describe("neural audiobook", () => {
   it("requires a downloaded model and resets incompatible system voice assignments", async () => {
     render(<Harness />);
-    await waitFor(() => expect(screen.getAllByRole("option", { name: "Samantha · en_US" }).length).toBe(2));
+    await waitFor(() => expect(screen.getAllByRole("option", { name: "Samantha" }).length).toBe(2));
     vi.mocked(api.audioVoices).mockResolvedValue({ voices: [{ id: "ryan", language: "multilingual" }] });
     fireEvent.change(screen.getByLabelText("Speech engine"), { target: { value: SPEECH_MODEL_ID } });
     await waitFor(() => expect(api.audioVoices).toHaveBeenCalledWith(SPEECH_MODEL_ID));
@@ -70,13 +98,28 @@ describe("neural audiobook", () => {
     expect((screen.getByRole("button", { name: "Narrate chapter" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByLabelText("Narration direction")).toBeTruthy();
   });
+  it("keeps each engine's cast and every typed letter", async () => {
+    const model = { id: SPEECH_MODEL_ID, installed: true, hopeless: false } as import("../lib/types").ModelStatus;
+    render(<Harness models={[model]} />);
+    await waitFor(() => expect(screen.getAllByRole("option", { name: "Karen" }).length).toBe(2));
+    fireEvent.change(screen.getByLabelText("Mira voice"), { target: { value: "Karen" } });
+    vi.mocked(api.audioVoices).mockResolvedValue({ voices: [{ id: "ryan", language: "multilingual" }] });
+    fireEvent.change(screen.getByLabelText("Speech engine"), { target: { value: SPEECH_MODEL_ID } });
+    await waitFor(() => expect(screen.getAllByRole("option", { name: "Ryan · male" }).length).toBe(2));
+    const direction = screen.getByLabelText("Narration direction") as HTMLTextAreaElement;
+    for (const text of ["W", "Wa", "War", "Warm"]) fireEvent.change(direction, { target: { value: text } });
+    expect(direction.value).toBe("Warm");
+    vi.mocked(api.audioVoices).mockResolvedValue({ voices: [{ id: "Samantha", language: "en_US" }, { id: "Karen", language: "en_AU" }] });
+    fireEvent.change(screen.getByLabelText("Speech engine"), { target: { value: "macos" } });
+    await waitFor(() => expect((screen.getByLabelText("Mira voice") as HTMLSelectElement).value).toBe("Karen"));
+  });
   it("passes selected neural voices, language and performance direction into generation", async () => {
     const model = { id: SPEECH_MODEL_ID, installed: true, hopeless: false } as import("../lib/types").ModelStatus;
     render(<Harness models={[model]} />);
-    await waitFor(() => expect(screen.getAllByRole("option", { name: "Samantha · en_US" }).length).toBe(2));
+    await waitFor(() => expect(screen.getAllByRole("option", { name: "Samantha" }).length).toBe(2));
     vi.mocked(api.audioVoices).mockResolvedValue({ voices: [{ id: "ryan", language: "multilingual" }, { id: "vivian", language: "multilingual" }] });
     fireEvent.change(screen.getByLabelText("Speech engine"), { target: { value: SPEECH_MODEL_ID } });
-    await waitFor(() => expect(screen.getAllByRole("option", { name: "ryan · multilingual" }).length).toBe(2));
+    await waitFor(() => expect(screen.getAllByRole("option", { name: "Ryan · male" }).length).toBe(2));
     fireEvent.change(screen.getByLabelText("Narration direction"), { target: { value: "Warm and intimate" } });
     fireEvent.change(screen.getByLabelText("Mira voice direction"), { target: { value: "Whisper nervously" } });
     fireEvent.change(screen.getByLabelText("Language"), { target: { value: "english" } });

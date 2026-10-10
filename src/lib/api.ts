@@ -1,6 +1,7 @@
 import type { StoryBook, StoryAnalysisResult } from "./story";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { mockVaultUrl } from "../mock/images";
 import type { AssistResult, CastPlace, EngineProgress, GenerateArgs, HostInfo, Lora, ModelStatus, Orphans, Panel, RepairReport, ResolvedLora, ResolvedModel, SetupProgress, SetupState, StorageInfo, VaultItem, VaultStatus } from "./types";
 
 /** Tauri rejects with our structured error; normalise it to a message. */
@@ -25,6 +26,24 @@ export function errDetail(e: unknown): string | null {
     return d && d !== m ? d : null;
   }
   return null;
+}
+
+/**
+ * Whether a failure means the engine process itself is gone.
+ *
+ * A crashed or memory-killed worker fails the job it was running, and the
+ * next job only starts a new worker to die the same way. Loops over many
+ * jobs need to tell this apart from one job going wrong.
+ */
+export function isEngineDeath(e: unknown): boolean {
+  if (e && typeof e === "object" && "kind" in e
+      && String((e as { kind: unknown }).kind) === "engine_down") return true;
+  const text = `${errText(e)} ${errDetail(e) ?? ""}`.toLowerCase();
+  return text.includes("engine process exited")
+    || text.includes("engine stopped unexpectedly")
+    || text.includes("engine ran out of memory")
+    || text.includes("could not reach the engine")
+    || text.includes("insufficient memory");
 }
 
 /**
@@ -79,11 +98,17 @@ export const api = {
   storyLibraryGet: () => invoke<string | null>("story_library_get"),
   storyLibrarySet: (value: string) => invoke<void>("story_library_set", { value }),
   analyzeStory: (jobId: string, source: string, title: string,
-                 previous: StoryBook | null = null, modelId: string | null = null) =>
+                 previous: StoryBook | null = null, modelId: string | null = null,
+                 mode: "full" | "voice" = "full") =>
     invoke<StoryAnalysisResult>("analyze_story", { jobId,
-      args: { source, title, previous, model_id: modelId } }),
+      args: { source, title, previous, model_id: modelId, mode } }),
+  resumeStory: (jobId: string, book: StoryBook, chapterId: string, modelId: string | null = null) =>
+    invoke<StoryAnalysisResult>("resume_story", { jobId, book, chapterId, modelId }),
   directStory: (jobId: string, book: StoryBook, chapterId: string) =>
     invoke<{ panels: Panel[] }>("direct_story", { jobId, book, chapterId }),
+  audioPreview: (args: { model_id: string; voice: string; text: string; language?: string;
+                         delivery?: string; direction?: string; rate: number }) =>
+    invoke<{ wav_base64: string }>("audio_preview", { args }),
   audioVoices: (modelId = "macos") => invoke<{ voices: { id: string; language: string }[] }>("audio_voices", { modelId }),
   generateAudiobook: (jobId: string, book: StoryBook, chapterId: string,
                      narrator: string, voices: Record<string, string>, rate: number,
@@ -306,7 +331,8 @@ export const onEngineStderr = (cb: (line: string) => void): Promise<UnlistenFn> 
  * bytes back, so nothing is ever written to disk in readable form.
  * Requests are refused while the vault is locked.
  */
-export const vaultUrl = (id: string) => `vault://localhost/${encodeURIComponent(id)}`;
+export const vaultUrl = (id: string) => import.meta.env.MODE === "mock"
+  ? mockVaultUrl(id) : `vault://localhost/${encodeURIComponent(id)}`;
 
 export const newJobId = () =>
   (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2));

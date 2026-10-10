@@ -735,7 +735,7 @@ def _load_model(req_id: str, model: str, quantize: int | None,
         adapters["lora_paths"] = [l["path"] for l in loras]
         adapters["lora_scales"] = [float(l.get("scale", 1.0)) for l in loras]
 
-    t0 = time.time()
+    t0 = time.monotonic()
     with _downloads_allowed(req_id):
         loaded = call_tolerant(
             req_id,
@@ -753,7 +753,7 @@ def _load_model(req_id: str, model: str, quantize: int | None,
             {"model_kwargs": {"release_text_encoder": True}} if release_text_encoder else {},
         )
     CACHE.put(key, loaded, model)
-    load_ms = (time.time() - t0) * 1000.0
+    load_ms = (time.monotonic() - t0) * 1000.0
     log(req_id, f"loaded in {load_ms / 1000:.1f}s")
     return loaded, load_ms
 
@@ -1082,7 +1082,8 @@ def _helpers_resident() -> str | None:
     one-resident rule exists to prevent.
     """
     return _ASSIST.get("key") if _ASSIST.get("model") is not None else (
-        _WRITER.get("key") if _WRITER.get("model") is not None else None
+        _WRITER.get("key") if _WRITER.get("model") is not None else (
+            "audiobook voices" if _VOICE.get("model") is not None else None)
     )
 
 
@@ -1168,7 +1169,7 @@ def _load_writer(req_id: str, repo: str | None = None) -> tuple[Any, Any]:
 
 def _write(req_id: str, system: str, user: str, max_tokens: int = 160,
            temperature: float = 0.3, repo: str | None = None,
-           label: str = "Writing") -> str:
+           label: str = "Writing", fraction: float | None = None) -> str:
     """One turn with the writer.
 
     Streamed rather than taken in one call, for two reasons.
@@ -1209,9 +1210,10 @@ def _write(req_id: str, system: str, user: str, max_tokens: int = 160,
         # shared with everything else.
         if now - last >= 0.2:
             last = now
+            # No step total: `max_tokens` is a ceiling, not the work, and was
+            # shown as "step 512/3200" on a reply that ends near 600.
             emit({"id": req_id, "type": "progress", "phase": "denoise",
-                  "progress": None, "step": written,
-                  "total_steps": max_tokens, "message": label,
+                  "progress": fraction, "message": label,
                   # The words so far. A spinner and a token count say the
                   # machine is busy; they do not say it is writing something
                   # worth waiting for, and eight seconds of a spinner feels
@@ -1253,6 +1255,7 @@ def _release_assistant_only() -> None:
 
 def _unload_assistant() -> None:
     _unload_writer()
+    _VOICE.update(model=None)
     _ASSIST.update(key=None, model=None, processor=None, config=None)
     gc.collect()
     try:
@@ -3959,32 +3962,44 @@ def op_enrich_panels(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
     if not panels:
         raise ValueError("divide the story into panels first")
 
-    if all("cast" in p for p in panels):
-        out = []
-        for i, panel in enumerate(panels):
+    # One story panel makes this a story board. A panel added by hand, or one
+    # whose cast was cleared, used to send every panel down the legacy path,
+    # which rewrites `place`/`place_key` and breaks location continuity.
+    if any("cast" in p for p in panels):
+        # Light and surfaces belong to a place in a mood, not to a panel: one
+        # writer call per pair, shared by every panel there. Per panel, a
+        # long chapter's ~300 panels cost ~40 minutes before anything was drawn.
+        def where(panel):
+            return (panel.get("place_key") or str(panel.get("setting") or "").casefold(),
+                    str(panel.get("mood") or "").casefold())
+        keys = list(dict.fromkeys(where(p) for p in panels))
+        lit: dict[Any, str | None] = {}
+        for n, key in enumerate(keys):
             if is_cancelled(req_id):
                 raise Cancelled()
+            panel = next(p for p in panels if where(p) == key)
             emit({"id": req_id, "type": "progress", "phase": "denoise",
-                  "progress": i / len(panels), "message": f"Lighting panel {i + 1} of {len(panels)}"})
+                  "progress": n / len(keys), "message": f"Lighting place {n + 1} of {len(keys)}"})
             try:
                 raw = _write(req_id,
                     'Return only JSON {"lighting": string, "surfaces": string}. '
                     'Describe visible light and surfaces matching the mood and setting. '
                     'Do not repeat or change characters, actions, dialogue, or camera framing.',
                     json.dumps({"setting": panel.get("setting"), "mood": panel.get("mood"),
-                                "tension": panel.get("tension"), "shot": panel.get("shot"),
-                                "style": req.get("style")}),
-                    max_tokens=240, repo=req.get("writer"), label="Lighting the panel")
+                                "state": panel.get("location_state"), "style": req.get("style")}),
+                    max_tokens=240, repo=req.get("writer"), label="Lighting the panel",
+                    fraction=n / len(keys))
                 surface = json.loads(raw)
                 if not isinstance(surface, dict) or any(not isinstance(surface.get(k), str) for k in ("lighting", "surfaces")):
                     raise ValueError("invalid lighting description")
-                out.append({**panel, "description": ". ".join(surface[k] for k in ("lighting", "surfaces") if surface[k])})
+                lit[key] = ". ".join(surface[k] for k in ("lighting", "surfaces") if surface[k])
             except Cancelled:
                 raise
             except Exception as exc:
-                log(req_id, f"panel {i + 1} keeps its original structured brief: {exc}", "warn")
-                out.append(panel)
-        return {"panels": out}
+                log(req_id, f"place {n + 1} keeps its original structured brief: {exc}", "warn")
+                lit[key] = None
+        return {"panels": [{**p, "description": lit[where(p)]} if lit[where(p)] is not None else p
+                           for p in panels]}
 
     style = (req.get("style") or "").strip()
     writer = req.get("writer")
@@ -5608,6 +5623,9 @@ def op_download(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
             landed = max(fresh, key=lambda d: d.stat().st_mtime)
         except (OSError, ValueError):
             landed = repo_dir
+    import audiobook
+    if repo_id == audiobook.KOKORO_REPO:
+        _install_kokoro_packages(req_id)
     try:
         (landed / ".melp-complete").write_text(str(size))
     except OSError as exc:
@@ -5856,6 +5874,11 @@ def _run_generation(req_id: str, req: dict[str, Any], task: str,
     # low-RAM default is 1 GiB), releasing the text encoder after encoding, and
     # dropping the model once the run ends. The per-transformer-block cache
     # clearing the CLI does is not exposed here.
+    #
+    # The policy goes first, as in op_upscale: applied later by the first
+    # `_load_model`, its quarter-of-budget ceiling silently raised the 1 GiB
+    # cap low-RAM mode had just set, on exactly the first run that needed it.
+    _apply_policy_once(req_id)
     cache_limit = req.get("cache_limit_gb")
     if cache_limit is None and low_ram:
         cache_limit = 1.0
@@ -5954,7 +5977,7 @@ def _generate_inner(req_id, req, task, loaded, gen_kw, optional_kw, slots,
             model, outpaint_padding, load_ms,
         )
 
-    gen_started = time.time()
+    gen_started = time.monotonic()
     try:
         results = call_tolerant(
             req_id,
@@ -5972,7 +5995,7 @@ def _generate_inner(req_id, req, task, loaded, gen_kw, optional_kw, slots,
             # was requested specifically because memory is scarce.
             CACHE.unload()
 
-    generate_ms = (time.time() - gen_started) * 1000.0
+    generate_ms = (time.monotonic() - gen_started) * 1000.0
 
     if slots:
         out = _seal_results(req_id, results, slots, model, list(seeds))
@@ -6015,7 +6038,7 @@ def _run_expand(req_id, req, loaded, gen_kw, optional_kw, slots, images, seeds,
     kwargs = {k: v for k, v in {**gen_kw, **optional_kw}.items()
               if k not in ("width", "height", "image_path", "image_paths", "mask_path")}
 
-    gen_started = time.time()
+    gen_started = time.monotonic()
     results = call_tolerant(
         req_id,
         run_outpaint,
@@ -6030,7 +6053,7 @@ def _run_expand(req_id, req, loaded, gen_kw, optional_kw, slots, images, seeds,
         # `fill` only applies to outpaint; reframe derives its own canvas.
         {"fill": req["outpaint_fill"]} if req.get("outpaint_fill") else {},
     )
-    generate_ms = (time.time() - gen_started) * 1000.0
+    generate_ms = (time.monotonic() - gen_started) * 1000.0
 
     out = _seal_results(req_id, results, slots, model, list(seeds))
     out["load_ms"] = round(load_ms)
@@ -6093,7 +6116,7 @@ def _load_mflux_model(req_id: str, backend: str, model_path: str | None,
           "message": f"Loading {backend}"})
 
     cls = getattr(importlib.import_module(module_name), class_name)
-    t0 = time.time()
+    t0 = time.monotonic()
     kwargs: dict[str, Any] = {
         "model_config": getattr(ModelConfig, factory)(),
         "quantize": quantize,
@@ -6113,7 +6136,7 @@ def _load_mflux_model(req_id: str, backend: str, model_path: str | None,
         model = call_tolerant(req_id, cls, {}, kwargs)
 
     CACHE.put(key, model, backend)
-    load_ms = (time.time() - t0) * 1000.0
+    load_ms = (time.monotonic() - t0) * 1000.0
     log(req_id, f"loaded in {load_ms / 1000:.1f}s")
     return model, load_ms
 
@@ -6156,7 +6179,7 @@ def _run_mflux(req_id: str, req: dict[str, Any], backend: str) -> dict[str, Any]
 
         preview = _attach_live_preview(req_id, model) if req.get("preview", True) else None
         artifacts = []
-        gen_started = time.time()
+        gen_started = time.monotonic()
         try:
             for seed in seeds:
                 artifacts.append(call_tolerant(
@@ -6167,7 +6190,7 @@ def _run_mflux(req_id: str, req: dict[str, Any], backend: str) -> dict[str, Any]
                 ))
         finally:
             _detach_live_preview(model, preview)
-        generate_ms = (time.time() - gen_started) * 1000.0
+        generate_ms = (time.monotonic() - gen_started) * 1000.0
 
         out = _seal_results(req_id, artifacts, slots, req.get("model", backend), list(seeds))
         out["load_ms"] = round(load_ms)
@@ -6782,6 +6805,9 @@ def op_video(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
         # plan_kw above *and* passed explicitly as 0 here, which is a
         # TypeError before any work starts -- so animating a still has never
         # reached the model on a first-frame route, whatever model was chosen.
+        # Bounded before the headroom check, like every other route that
+        # allocates, so the check measures against the process's own ceiling.
+        _apply_policy_once(req_id)
         _check_headroom(req_id, float(req.get("peak_gib") or 0))
         _check_video_size(req_id, int(req.get("width", 480)),
                           int(req.get("height", 320)))
@@ -6837,12 +6863,12 @@ def op_video(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
         # of the way.
         preview = (_attach_live_preview(req_id, loaded)
                    if req.get("preview", True) else None)
-        gen_started = time.time()
+        gen_started = time.monotonic()
         try:
             video = call_tolerant(req_id, target.generate_video, base, optional)
         finally:
             _detach_live_preview(loaded, preview)
-        generate_ms = (time.time() - gen_started) * 1000.0
+        generate_ms = (time.monotonic() - gen_started) * 1000.0
 
         # `call_tolerant` drops what a route refuses, which is right for a
         # quality knob and wrong for the picture the whole request was about.
@@ -6902,27 +6928,139 @@ def op_set_memory(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
 
 
 
-def op_story_analyze(req_id, req):
+def _story_writer(req_id, req, voice):
+    """Writer, progress and passage size shared by analysis and resume.
+
+    Stop is turned into `story.Stop`, so the finished passages come back as a
+    result instead of the whole analysis being lost."""
     import story as story_model
+    small = req.get("writer", WRITER_REPO) == WRITER_REPO
+    # Token events from the writer carry the scene label and fraction too;
+    # otherwise they replace "scene i of N" within a fifth of a second.
+    where = {"label": "Understanding the story", "fraction": None}
+    started = time.monotonic()
     def progress(i, total):
         if is_cancelled(req_id):
-            raise Cancelled()
+            raise story_model.Stop()
+        label = f"{'Casting voices in' if voice else 'Understanding'} scene {i + 1} of {total}"
+        if i:
+            left = (time.monotonic() - started) / i * (total - i)
+            label += f" · about {max(1, round(left / 60))} min left"
+        where.update(label=label, fraction=i / total)
         emit({"id": req_id, "type": "progress", "phase": "denoise",
-              "progress": i / total, "message": f"Understanding scene {i + 1} of {total}"})
-    book = story_model.analyze(req.get("source"),
-        lambda system, user: _write(req_id, system, user, max_tokens=3200,
-            temperature=0.2, repo=req.get("writer"), label="Understanding the story"),
-        previous=req.get("previous"), title=req.get("title", "Chapter"), progress=progress,
-        passage_words=250 if req.get("writer", WRITER_REPO) == WRITER_REPO else 450,
-        passage_units=4 if req.get("writer", WRITER_REPO) == WRITER_REPO else 8)
-    chapter = book["chapters"][-1]
-    panels = story_model.direct(book, chapter["id"])
-    return {"book": book, "chapter_id": chapter["id"], "panels": panels}
+              "progress": where["fraction"], "message": where["label"]})
+    def write(system, user):
+        # A repair carries the failed reply as well; a reply cut off at the
+        # first budget would be cut off again at the same one. A compact reply
+        # runs to a few hundred tokens; the ceiling only stops a writer that
+        # has started repeating itself, which at 3,200 tokens cost minutes.
+        repair = "Your previous reply failed validation" in user
+        budget = (1000, 1600) if voice else (1800, 2700)
+        try:
+            return _write(req_id, system, user, max_tokens=budget[repair],
+                          temperature=0.2, repo=req.get("writer"), label=where["label"],
+                          fraction=where["fraction"])
+        except Cancelled:
+            raise story_model.Stop()
+    def warn(message):
+        log(req_id, message, "warn")
+    # A voice reply is a few tokens per quote, so a passage can be far longer
+    # than one whose every beat is directed for drawing. Compact replies let
+    # the small writer take twice the four sentences it once could.
+    words, units = (700, 60) if voice else (450, 8) if small else (600, 12)
+    return dict(write=write, progress=progress, warn=warn, passage_words=words, passage_units=units)
+
+
+def _story_result(req_id, book, chapter_id):
+    import story as story_model
+    chapter = next(c for c in book["chapters"] if c["id"] == chapter_id)
+    left = sum(1 for s in chapter["scenes"] if s.get("unanalysed"))
+    return {"book": book, "chapter_id": chapter_id, "panels": story_model.direct(book, chapter_id),
+            "stopped": is_cancelled(req_id), "unanalysed": left}
+
+
+def op_story_analyze(req_id, req):
+    import story as story_model
+    mode = req.get("mode") or "full"
+    book = story_model.analyze(req.get("source"), previous=req.get("previous"),
+                               title=req.get("title", "Chapter"), mode=mode,
+                               **_story_writer(req_id, req, mode == "voice"))
+    return _story_result(req_id, book, book["chapters"][-1]["id"])
+
+
+def op_story_resume(req_id, req):
+    import story as story_model
+    chapter = next((c for c in req["book"]["chapters"] if c["id"] == req.get("chapter_id")), None)
+    voice = bool(chapter and chapter.get("analysis") == "voice")
+    book = story_model.resume(req["book"], req.get("chapter_id"), **_story_writer(req_id, req, voice))
+    return _story_result(req_id, book, req["chapter_id"])
 
 
 def op_audio_voices(_req_id, _req):
     import audiobook
-    return {"voices": audiobook.neural_voices() if _req.get("model_id") == audiobook.NEURAL_MODEL_ID else audiobook.voices()}
+    model = _req.get("model_id")
+    if model == audiobook.KOKORO_MODEL_ID:
+        return {"voices": audiobook.kokoro_voices()}
+    return {"voices": audiobook.neural_voices() if model == audiobook.NEURAL_MODEL_ID else audiobook.voices()}
+
+
+def _install_kokoro_packages(req_id):
+    """Kokoro's text packages, pinned, installed beside the runtime's own.
+
+    They come with the model rather than with setup so an existing install
+    gains them by downloading Kokoro, without rebuilding the runtime."""
+    lock = Path(__file__).with_name("kokoro-requirements.lock")
+    emit({"id": req_id, "type": "progress", "phase": "download", "progress": None,
+          "message": "Installing Kokoro's text packages"})
+    proc = subprocess.run([sys.executable, "-m", "pip", "install", "--no-deps", "--disable-pip-version-check",
+                           "--quiet", "-r", str(lock)], capture_output=True, text=True)
+    if proc.returncode:
+        raise RuntimeError("Kokoro's text packages could not be installed: "
+                           + (proc.stderr.strip().splitlines() or ["pip failed"])[-1])
+
+
+# The speech model kept between voice previews, so auditioning several voices
+# does not reload it each time. Released by `_unload_assistant` -- before any
+# other job and by the idle reaper -- so it never sits beside an image model.
+_VOICE: dict[str, Any] = {"model": None, "id": None}
+
+# Requests that may find the preview voice model loaded and leave it so.
+_KEEPS_VOICE = {"audio_preview", "audio_voices", "ping", "cancel"}
+
+
+def op_audio_preview(req_id, req):
+    """A few seconds of one voice, returned in memory and never written out."""
+    import audiobook
+    import base64
+    text = str(req.get("text") or "").strip()[:300] or "This is how I will read your story."
+    voice, rate = req.get("voice"), req.get("rate", 160)
+    def check():
+        if is_cancelled(req_id):
+            raise Cancelled()
+    segment = [{"speaker_id": None, "text": text}]
+    model_id = req.get("model_id") or "macos"
+    if model_id in (audiobook.NEURAL_MODEL_ID, audiobook.KOKORO_MODEL_ID) and _VOICE.get("id") != model_id:
+        _VOICE.update(model=None, id=None)
+    if model_id == audiobook.KOKORO_MODEL_ID:
+        if _VOICE["model"] is None:
+            CACHE.unload()
+            _unload_assistant()
+            _VOICE.update(model=audiobook.load_kokoro_model(), id=model_id)
+        data, _ = audiobook.synthesize_kokoro(segment, voice, {}, rate, check, load=lambda: _VOICE["model"])
+    elif model_id == audiobook.NEURAL_MODEL_ID:
+        if _VOICE["model"] is None:
+            CACHE.unload()
+            _unload_assistant()
+            emit({"id": req_id, "type": "progress", "phase": "load", "progress": 0.0,
+                  "message": "Loading neural audiobook voices"})
+            _VOICE.update(model=audiobook.load_neural_model(), id=model_id)
+        data, _ = audiobook.synthesize_neural(segment, voice, {}, rate, check,
+            language=req.get("language") or "auto", delivery=req.get("delivery") or "",
+            directions={None: str(req.get("direction") or "")[:1500]},
+            load=lambda: _VOICE["model"])
+    else:
+        data, _ = audiobook.synthesize(segment, voice, {}, rate, _stage_dir(), check)
+    return {"wav_base64": base64.b64encode(data).decode("ascii")}
 
 
 def op_audiobook(req_id, req):
@@ -6938,10 +7076,11 @@ def op_audiobook(req_id, req):
     def check():
         if is_cancelled(req_id):
             raise Cancelled()
-    def progress(i, total):
+    def progress(done, total):
         emit({"id": req_id, "type": "progress", "phase": "denoise",
-              "progress": i / total, "message": f"Narrating passage {i + 1} of {total}"})
+              "progress": done / total, "message": f"Narrating ({round(100 * done / total)}%)"})
     model_id = req.get("model_id") or "macos"
+    markers: list[dict[str, Any]] = []
     if model_id == audiobook.NEURAL_MODEL_ID:
         _apply_policy_once(req_id)
         emit({"id": req_id, "type": "progress", "phase": "load", "progress": 0.0,
@@ -6950,17 +7089,24 @@ def op_audiobook(req_id, req):
             req.get("voices") or {}, req.get("rate", 160), check, progress,
             language=req.get("language") or "auto", delivery=req.get("delivery") or "",
             directions=req.get("directions") or {},
-            character_directions={c["id"]: c.get("voice", "") for c in req["book"]["characters"]})
+            character_directions={c["id"]: c.get("voice", "") for c in req["book"]["characters"]},
+            markers=markers)
+    elif model_id == audiobook.KOKORO_MODEL_ID:
+        emit({"id": req_id, "type": "progress", "phase": "load", "progress": 0.0,
+              "message": "Loading Kokoro voices"})
+        data, seconds = audiobook.synthesize_kokoro(segments, req["narrator"],
+            req.get("voices") or {}, req.get("rate", 160), check, progress, markers=markers)
     elif model_id == "macos":
         data, seconds = audiobook.synthesize(segments, req["narrator"],
-            req.get("voices") or {}, req.get("rate", 160), _stage_dir(), check, progress)
+            req.get("voices") or {}, req.get("rate", 160), _stage_dir(), check, progress, markers=markers)
     else:
         raise ValueError("unsupported audiobook speech model")
     check()
     slot = slots[0]
     size = vc.write_sealed(slot["path"], bytes.fromhex(slot["key"]),
                            bytes.fromhex(slot["file_id"]), data)
-    return {"outputs": [slot["id"]], "sizes": [size], "seconds": seconds, "sealed": True}
+    return {"outputs": [slot["id"]], "sizes": [size], "seconds": seconds, "sealed": True,
+            "markers": markers}
 
 
 def op_character_reference(req_id, req):
@@ -6989,9 +7135,11 @@ def op_character_reference(req_id, req):
 OPS = {
     "ping": op_ping,
     "story_analyze": op_story_analyze,
+    "story_resume": op_story_resume,
     "direct_story": lambda _id, req: {"panels": __import__("story").direct(req["book"], req["chapter_id"])},
     "audio_voices": op_audio_voices,
     "audiobook": op_audiobook,
+    "audio_preview": op_audio_preview,
     "character_reference": op_character_reference,
     "capabilities": op_capabilities,
     "lora_info": op_lora_info,
@@ -7022,6 +7170,9 @@ OPS = {
 def handle(req: dict[str, Any]) -> None:
     req_id = req.get("id", "?")
     op = req.get("op", "")
+    if op not in _KEEPS_VOICE and _VOICE["model"] is not None:
+        _VOICE.update(model=None)
+        gc.collect()
     fn = OPS.get(op)
     if fn is None:
         emit({"id": req_id, "type": "error", "error": f"unknown op: {op}",

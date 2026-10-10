@@ -1,8 +1,30 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, errText, fmtBytes, newJobId, onEngineProgress } from "../lib/api";
 import type { EngineProgress, Fit, HostInfo, ModelStatus } from "../lib/types";
 import { JobProgress } from "./shared";
 import AddModel from "./AddModel";
+import HuggingFaceToken from "./HuggingFaceToken";
+import { Choice } from "./creation";
+
+type Filter = "all" | "installed" | "text_to_image" | "edit" | "video" | "upscale" | "speech" | "fits";
+
+/**
+ * Narrowing the catalog by what a model does.
+ *
+ * The list is long and sorted by whether it fits, which answers "what can I
+ * run" but not "what can I make a clip with". Each filter says how many it
+ * would show, so an empty one is not a click away from a blank screen.
+ */
+export const FILTERS: [Filter, string, (m: ModelStatus) => boolean][] = [
+  ["all", "All", () => true],
+  ["installed", "Installed", (m) => m.installed],
+  ["text_to_image", "Generate", (m) => m.tasks.includes("text_to_image")],
+  ["edit", "Edit", (m) => m.tasks.includes("edit")],
+  ["video", "Video", (m) => m.tasks.includes("video")],
+  ["upscale", "Upscale", (m) => m.tasks.includes("upscale")],
+  ["speech", "Speech", (m) => m.tasks.includes("speech")],
+  ["fits", "Fits this Mac", (m) => m.fit === "good" || m.fit === "tight"],
+];
 
 const FIT_PILL: Record<Fit, { cls: string; label: string }> = {
   good: { cls: "good", label: "Fits" },
@@ -10,6 +32,12 @@ const FIT_PILL: Record<Fit, { cls: string; label: string }> = {
   too_much_memory: { cls: "bad", label: "Too much memory" },
   too_much_disk: { cls: "bad", label: "Too large for disk" },
   broken: { cls: "bad", label: "Unavailable" },
+};
+
+/** What a task is called on screen; the ids are the engine's. */
+const TASK_LABEL: Record<string, string> = {
+  text_to_image: "Generate", edit: "Edit", upscale: "Upscale", video: "Video",
+  assist: "Writing", speech: "Speech",
 };
 
 export default function Models({
@@ -31,6 +59,9 @@ export default function Models({
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [prog, setProg] = useState<EngineProgress | null>(null);
+  const [filter, setFilter] = useState<Filter>("all");
+  /** The gated model whose token form is open, in its own card. */
+  const [tokenFor, setTokenFor] = useState<string | null>(null);
 
   const download = async (m: ModelStatus) => {
     const id = newJobId();
@@ -92,16 +123,21 @@ export default function Models({
     }
   };
 
-  const runnable = models.filter((m) => m.fit === "good" || m.fit === "tight");
-  const withLowRam = models.filter((m) => m.low_ram_may_help && !m.hopeless);
-  const blocked = models.filter(
+  const counts = useMemo(
+    () => new Map(FILTERS.map(([f, , test]) => [f, models.filter(test).length])),
+    [models]
+  );
+  const shown = models.filter(FILTERS.find(([f]) => f === filter)![2]);
+  const runnable = shown.filter((m) => m.fit === "good" || m.fit === "tight");
+  const withLowRam = shown.filter((m) => m.low_ram_may_help && !m.hopeless);
+  const blocked = shown.filter(
     (m) => m.fit !== "good" && m.fit !== "tight" && !(m.low_ram_may_help && !m.hopeless)
   );
 
   const card = (m: ModelStatus) => {
     const fit = FIT_PILL[m.fit];
-    // Only a weight floor above physical memory is genuinely unavailable.
-    // A high transient peak is something low-RAM mode can attack.
+    // Only weights too big for physical memory are genuinely unavailable.
+    // A high transient peak is something Memory saver can attack.
     const unavailable =
       m.fit === "broken" || m.hopeless || (m.fit === "too_much_disk" && !m.installed);
     return (
@@ -111,9 +147,9 @@ export default function Models({
           {m.installed && <span className="pill installed"><span className="dot" />Installed</span>}
           {m.custom && <span className="pill">Added by you</span>}
           <span className={"pill " + fit.cls}>
-            {m.low_ram_may_help && !m.hopeless ? "Needs low-RAM mode" : fit.label}
+            {m.low_ram_may_help && !m.hopeless ? "Needs Memory saver" : fit.label}
           </span>
-          {m.tasks_str.map((t) => <span className="pill" key={t}>{t}</span>)}
+          {m.tasks_str.map((t) => <span className="pill" key={t}>{TASK_LABEL[t] ?? t}</span>)}
           {/* For a video model this is the fact that decides whether the
               download is worth starting, and it was only ever shown after
               installing the model and selecting it. A model that cannot
@@ -139,18 +175,26 @@ export default function Models({
             <b>~{m.peak_gib.toFixed(1)} GiB</b> peak memory
             {m.peak_estimated && <span title="Interpolated, not a published benchmark"> *</span>}
           </span>
-          <span><b>~{m.package_gib.toFixed(1)} GiB</b> weight floor</span>
           {m.installed && m.installed_bytes > 0 && (
             <span><b>{fmtBytes(m.installed_bytes)}</b> on disk</span>
           )}
         </div>
         <div style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 6 }}>{m.fit_reason}</div>
         {m.gated && !m.installed && (
-          <div style={{ fontSize: 10.5, color: "var(--warn)", marginTop: 5,
-                        lineHeight: 1.5 }}>
-            Behind a licence. Accept it on the model&rsquo;s Hugging Face page,
-            then add an access token under <b>Security</b> — otherwise the
-            download stops with a 401 partway through.
+          <div className="gated">
+            {/* The token used to be "under Security", a different screen,
+                named from a card that gave no way to get there. The same
+                form is offered here instead, where the need is. */}
+            <span>
+              Behind a licence. Accept it on the model&rsquo;s Hugging Face
+              page, then add your access token — without one the download
+              stops partway through.
+            </span>
+            <button className="btn small" aria-expanded={tokenFor === m.id}
+              onClick={() => setTokenFor(tokenFor === m.id ? null : m.id)}>
+              {tokenFor === m.id ? "Hide token form" : "Add access token"}
+            </button>
+            {tokenFor === m.id && <HuggingFaceToken notify={notify} />}
           </div>
         )}
 
@@ -208,18 +252,33 @@ export default function Models({
 
       <AddModel onAdded={onChanged} notify={notify} host={host} />
 
-      <div className="group-label">Runs on this Mac</div>
-      <div className="model-list">{runnable.map(card)}</div>
+      <Choice
+        chip
+        label="Show"
+        value={filter}
+        onChange={setFilter}
+        options={FILTERS.map(([f, label]) => [f, <>{label} <span className="n">{counts.get(f)}</span></>] as const)}
+      />
+
+      {shown.length === 0 && (
+        <div className="t-note" style={{ margin: "12px 0" }}>No models match this filter.</div>
+      )}
+
+      {runnable.length > 0 && (
+        <>
+          <div className="group-label">Runs on this Mac</div>
+          <div className="model-list">{runnable.map(card)}</div>
+        </>
+      )}
 
       {withLowRam.length > 0 && (
         <>
-          <div className="group-label">Only with low-RAM mode</div>
+          <div className="group-label">Only with Memory saver</div>
           <div className="notice warn" style={{ marginBottom: 10 }}>
             <strong>Above the ceiling, but not out of reach</strong>
-            Peak memory here exceeds what this Mac can offer, yet the resident weights fit.
-            Low-RAM mode clears the MLX cache at transformer-block boundaries and between
-            denoise steps, which is exactly the memory that overflows. Expect slower runs, one
-            image at a time, and no guarantee — the published benchmarks put these above this tier.
+            These need more memory at their peak than this Mac has, but the
+            model itself fits. Memory saver trims that peak. Expect slower
+            runs, one picture at a time, and no guarantee.
           </div>
           <div className="model-list">{withLowRam.map(card)}</div>
         </>
@@ -236,9 +295,8 @@ export default function Models({
         * Peak memory is interpolated where MLX-Gen has not published a benchmark for that exact
         package. Figures without a star are measured.
         <br />
-        The weight floor is what has to be resident throughout a run. Low-RAM mode and a tighter
-        buffer cache reduce the gap between that floor and the peak; neither reduces the floor
-        itself, so a model whose weights exceed memory is never offered.
+        Memory saver lowers the peak, not the size of the model itself, so a model too large
+        for this Mac&rsquo;s memory is never offered.
         <br />
         Wan 2.5 and 2.6 are not listed because Alibaba never released their weights — they exist
         only as a cloud API. Wan 2.1 and 2.2 are the open ones, and 2.2 is what appears above.

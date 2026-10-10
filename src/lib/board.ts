@@ -469,6 +469,19 @@ export const CHAIN_LIMIT = 4;
  * one that survives. Identity wins, because a character who changes face
  * between panels is the failure everyone sees first.
  */
+export function storyPanelReferences(
+  panel: Panel, identity: string | null, continuation: string | null,
+  place: string | null, budget: number
+): string[] {
+  // The sheet holds who this is; the previous frame holds what they wear and
+  // where the light is. With room for both, both go -- the sheet first so it
+  // survives trimming. With room for one, the continuation is kept (outfits
+  // reset without it) and the chain re-anchors to the sheet on its interval.
+  return budget > 1
+    ? panelReferences(panel, identity, place, continuation, budget)
+    : panelReferences(panel, continuation ?? identity, place, null, budget);
+}
+
 export function panelReferences(
   panel: Panel, sheet: string | null, place: string | null,
   previous: string | null = null, budget = 3
@@ -518,13 +531,20 @@ plain background, simple neutral neckline. No full-body outfit, props, scenery o
 ${character.trim()}.`;
 }
 
-/** Structured continuity requires the exact visible cast and current state. */
+/**
+ * Structured continuity requires the exact visible cast and current state.
+ *
+ * Bounded like `previousPanel`: it used to search the whole chapter, so every
+ * panel of a scene was a copy of a copy of its first frame and the face
+ * drifted further with each one. On the interval boundary nothing is returned
+ * and the panel goes back to the character sheet alone.
+ */
 export function storyContinuityReference(index: number, panels: Panel[], drawn: (string | null)[]): string | null {
   const next = panels[index];
-  if (!next?.cast) return null;
+  if (!next?.cast || index % CHAIN_LIMIT === 0) return null;
   const signature = (p: Panel) => JSON.stringify((p.cast ?? []).map((a) =>
     [a.character_id, a.appearance ?? ""]).sort((a, b) => a[0].localeCompare(b[0])));
-  for (let i = index - 1; i >= 0; i--) {
+  for (let i = index - 1; i >= 0 && index - i <= CHAIN_LIMIT; i--) {
     const prev = panels[i];
     if (prev.chapter_id !== next.chapter_id) break;
     if (placeKey(prev) === placeKey(next) && signature(prev) === signature(next)
@@ -656,4 +676,42 @@ export function compositions(items: VaultItem[]): {
     else runs.push({ id, pages: [item] });
   }
   return runs;
+}
+
+/** How a batch of panels ended, and the failure behind it when there was one. */
+export type BatchEnd =
+  | { end: "done" }
+  | { end: "stopped" }
+  | { end: "cancelled" }
+  | { end: "engine"; error: unknown }
+  | { end: "repeated"; error: unknown };
+
+/** Two failures in a row is a pattern, not bad luck. */
+export const BATCH_FAILURE_LIMIT = 2;
+
+/**
+ * Draw panels one after another, and know when to give up.
+ *
+ * The loop used to stop only for the user's own Stop. When the engine died
+ * -- usually macOS killing it for memory -- every remaining panel started a
+ * fresh worker, loaded the model again and died the same way, so a board of
+ * twelve was twelve crashes and twelve red toasts. A dead engine ends the
+ * batch at once; any other failure ends it on the second in a row.
+ */
+export async function drawBatch(
+  indices: number[],
+  drawOne: (index: number) => Promise<{ ok: true } | { ok: false; error: unknown }>,
+  stopped: () => boolean,
+  engineDied: (error: unknown) => boolean,
+): Promise<BatchEnd> {
+  let failures = 0;
+  for (const i of indices) {
+    if (stopped()) return { end: "stopped" };
+    const outcome = await drawOne(i);
+    if (outcome.ok) { failures = 0; continue; }
+    if (stopped()) return { end: "cancelled" };
+    if (engineDied(outcome.error)) return { end: "engine", error: outcome.error };
+    if (++failures >= BATCH_FAILURE_LIMIT) return { end: "repeated", error: outcome.error };
+  }
+  return { end: "done" };
 }

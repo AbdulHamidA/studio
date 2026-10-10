@@ -2,14 +2,15 @@
   "name": "melp-model-studio",
   "private": true,
   "license": "GPL-3.0-or-later",
-  "version": "0.3.0-preview.2",
+  "version": "0.3.0-preview.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vitest run && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "vitest run"
+    "test": "vitest run",
+    "dev:mock": "vite --mode mock"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.9.0",

@@ -53,8 +53,14 @@ def render_segment(text, voice, rate, directory, check_cancel):
     return Path(wav).read_bytes()
 
 
+def _mark(markers, segment, seconds):
+    """A chapter marker where a new scene's narration begins."""
+    if markers is not None and segment.get("scene") and (not markers or markers[-1]["label"] != segment["scene"]):
+        markers.append({"time": round(seconds, 2), "label": segment["scene"]})
+
+
 def synthesize(segments, narrator, assignments, rate, staging, check_cancel,
-               progress=lambda *_: None, render=render_segment, available=None):
+               progress=lambda *_: None, render=render_segment, available=None, markers=None):
     available = {v["id"] for v in voices()} if available is None else set(available)
     if narrator not in available or any(v not in available for v in assignments.values()):
         raise ValueError("choose an installed macOS voice for narrator and characters")
@@ -70,6 +76,7 @@ def synthesize(segments, narrator, assignments, rate, staging, check_cancel,
             for i, segment in enumerate(segments):
                 check_cancel()
                 progress(i, len(segments))
+                _mark(markers, segment, frames / 24000)
                 for part in re.findall(r'[\s\S]{1,1800}(?:\s|$)|[\s\S]{1,1800}', segment["text"]):
                     if not part.strip() or not any(c.isalnum() for c in part):
                         continue
@@ -100,11 +107,123 @@ def neural_voices():
     return [{"id": speaker, "language": "multilingual"} for speaker in NEURAL_SPEAKERS]
 
 
+# Kokoro: an 82M-parameter voice model, measured on an M4 at ~14x real time
+# against ~1.8x for Qwen3-TTS, with Hindi voices. It takes no delivery
+# instructions; pace is its speed setting.
+KOKORO_MODEL_ID = "kokoro-82m"
+KOKORO_REPO = "mlx-community/Kokoro-82M-bf16"
+# Voice-name prefix -> the language its pipeline reads. Japanese and Chinese
+# need further packages and are not offered.
+KOKORO_LANGUAGES = {"a": "English (US)", "b": "English (UK)", "h": "Hindi / Indian English",
+                    "e": "Spanish", "f": "French", "i": "Italian", "p": "Portuguese"}
+KOKORO_VOICES = (
+    "hf_alpha", "hf_beta", "hm_omega", "hm_psi",
+    "af_heart", "af_bella", "af_nicole", "af_sarah", "af_sky", "af_aoede", "af_kore", "af_nova", "af_river",
+    "am_adam", "am_michael", "am_echo", "am_eric", "am_liam", "am_onyx", "am_puck", "am_fenrir",
+    "bf_alice", "bf_emma", "bf_isabella", "bf_lily", "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
+    "ef_dora", "em_alex", "ff_siwis", "if_sara", "im_nicola", "pf_dora", "pm_alex")
+
+
+def kokoro_voices():
+    return [{"id": v, "language": KOKORO_LANGUAGES[v[0]]} for v in KOKORO_VOICES]
+
+
+def load_kokoro_model():
+    from huggingface_hub import snapshot_download
+    from mlx_audio.tts.utils import load_model
+    try:
+        local = Path(snapshot_download(KOKORO_REPO, local_files_only=True))
+    except Exception as exc:
+        raise ValueError("Download Kokoro voices in Models first") from exc
+    try:
+        import misaki  # noqa: F401
+        import en_core_web_sm  # noqa: F401
+    except ImportError as exc:
+        raise ValueError("Kokoro's text packages are missing; download Kokoro again in Models") from exc
+    model = load_model(local)
+    # Voices otherwise load lazily from another repository over the network;
+    # the downloaded one already holds them under voices/.
+    model.repo_id = KOKORO_REPO
+    return model
+
+
+def kokoro_language(voice, text):
+    """Hindi voices read Devanagari as Hindi and English with their accent."""
+    if voice[0] == "h" and not re.search(r'[\u0900-\u097F]', text):
+        return "a"
+    return voice[0]
+
+
+def synthesize_kokoro(segments, narrator, assignments, rate, check_cancel,
+                      progress=lambda *_: None, load=load_kokoro_model, markers=None):
+    if narrator not in KOKORO_VOICES or any(v not in KOKORO_VOICES for v in assignments.values()):
+        raise ValueError("choose Kokoro voices for narrator and characters")
+    if type(rate) is not int or not 80 <= rate <= 300:
+        raise ValueError("reading pace must be 80..300")
+    check_cancel()
+    model = load()
+    speed = min(2.0, max(0.5, rate / 160))
+    output, frames = io.BytesIO(), 0
+    try:
+        import numpy as np
+        with wave.open(output, 'wb') as final:
+            final.setnchannels(1)
+            final.setsampwidth(2)
+            final.setframerate(24000)
+            total, done = sum(len(s["text"]) for s in segments) or 1, 0
+            for segment in segments:
+                _mark(markers, segment, frames / 24000)
+                voice = assignments.get(segment["speaker_id"], narrator)
+                for part in speech_chunks(segment["text"]):
+                    check_cancel()
+                    progress(done, total)
+                    done += len(part)
+                    if not any(c.isalnum() for c in part):
+                        continue
+                    count = 0
+                    for result in model.generate(text=part, voice=voice, speed=speed,
+                                                 lang_code=kokoro_language(voice, part)):
+                        check_cancel()
+                        if result.sample_rate != 24000:
+                            raise ValueError("Kokoro output must be 24 kHz")
+                        samples = np.asarray(result.audio, dtype=np.float32).reshape(-1)
+                        if not np.isfinite(samples).all():
+                            raise ValueError("Kokoro produced invalid audio samples")
+                        final.writeframesraw((np.clip(samples, -1, 1) * 32767).astype('<i2').tobytes())
+                        frames += len(samples)
+                        count += len(samples)
+                    if not count:
+                        raise ValueError("Kokoro produced no audio for a passage")
+        if not frames:
+            raise ValueError("chapter produced no spoken audio")
+        check_cancel()
+        return output.getvalue(), frames / 24000
+    finally:
+        del model
+        import gc
+        gc.collect()
+        try:
+            import mlx.core as mx
+            mx.clear_cache()
+        except ImportError:
+            pass
+
+
 def speech_chunks(text, limit=350):
-    """Bound inference without dropping, duplicating or rewriting source text."""
+    """Bound inference without dropping, duplicating or rewriting source text.
+
+    Each chunk is generated without the others' context, so a cut mid-sentence
+    is heard as a broken pause. Prefer the last sentence end, then a line break,
+    then clause punctuation, and a bare space only when there is none."""
     while len(text) > limit:
-        boundaries = [m.end() for m in re.finditer(r'[.!?。！？]\s+|\n+|\s+', text[:limit])]
-        end = boundaries[-1] if boundaries else limit
+        head = text[:limit]
+        for pattern in (r'[.!?…][”"’)\]]*\s+|[。！？][」』）]*', r'\n+', r'[,;:—–、，；：]\s*', r'\s+'):
+            boundaries = [m.end() for m in re.finditer(pattern, head) if m.end() > limit // 3]
+            if boundaries:
+                end = boundaries[-1]
+                break
+        else:
+            end = limit
         yield text[:end]
         text = text[end:]
     if text:
@@ -129,7 +248,7 @@ def load_neural_model():
 
 def synthesize_neural(segments, narrator, assignments, rate, check_cancel,
                       progress=lambda *_: None, language="auto", delivery="",
-                      directions=None, character_directions=None, load=load_neural_model):
+                      directions=None, character_directions=None, load=load_neural_model, markers=None):
     if narrator not in NEURAL_SPEAKERS or any(v not in NEURAL_SPEAKERS for v in assignments.values()):
         raise ValueError("choose a neural narrator and neural character voices")
     if language not in NEURAL_LANGUAGES:
@@ -152,15 +271,23 @@ def synthesize_neural(segments, narrator, assignments, rate, check_cancel,
             final.setnchannels(1)
             final.setsampwidth(2)
             final.setframerate(24000)
-            for i, segment in enumerate(segments):
+            total, done = sum(len(s["text"]) for s in segments) or 1, 0
+            for segment in segments:
                 check_cancel()
-                progress(i, len(segments))
+                _mark(markers, segment, frames / 24000)
                 speaker_id = segment["speaker_id"]
                 voice = assignments.get(speaker_id, narrator)
-                direction = directions.get(speaker_id, character_directions.get(speaker_id, ""))
+                # Bible text is only bounded at 4,000 characters, and the
+                # instruction is sent again with every chunk.
+                direction = directions.get(speaker_id, character_directions.get(speaker_id, ""))[:600]
+                mood = (segment.get("mood") or "")[:200]
                 pace = "Read slowly with measured pauses." if rate < 140 else "Read briskly but clearly." if rate > 190 else "Read at a natural conversational pace."
-                instruct = " ".join(filter(None, ["Read the supplied text verbatim. Do not add words.", delivery, direction, f"Scene mood: {segment.get('mood')}." if segment.get("mood") else "", pace]))
+                instruct = " ".join(filter(None, ["Read the supplied text verbatim. Do not add words.", delivery, direction, f"Scene mood: {mood}." if mood else "", pace]))
                 for part in speech_chunks(segment["text"]):
+                    # Per chunk, by characters: a chapter without dialogue is
+                    # one long segment and sat at 0% for the whole run.
+                    progress(done, total)
+                    done += len(part)
                     if not any(c.isalnum() for c in part):
                         continue
                     count, token_count = 0, 0

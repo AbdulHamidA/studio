@@ -1,0 +1,86 @@
+/**
+ * A stand-in Tauri host for `vite --mode mock`: the real UI in a browser with
+ * sample data, so screens can be looked at and screenshotted without an
+ * engine, a vault or any private content. Never part of the app build.
+ */
+const now = Date.now();
+const iso = (daysAgo: number) => new Date(now - daysAgo * 864e5).toISOString();
+
+const model = (id: string, name: string, tasks: string[], extra: Record<string, unknown> = {}) => ({
+  id, repo: `mock/${id}`, name, family: null, installed: true, installed_bytes: 4e9, hopeless: false,
+  fit: "good", fit_reason: "fits comfortably", tasks, tasks_str: tasks, quantize: 4,
+  steps_default: 4, guidance_max: 1, guidance_default: 1, max_edit_images: 3,
+  package_gib: 4.2, peak_gib: 9.1, peak_estimated: true, gated: false, video_from_image: false,
+  notes: "A sample model for the mock host.", broken: null, custom: false, low_ram_may_help: false,
+  measured_ms_per_step_mpx: 47000, measured_runs: 12, measured_load_ms: 600, ...extra,
+});
+
+const models = [
+  model("flux2-klein-4b-4bit", "FLUX.2 Klein 4B", ["text_to_image", "edit"]),
+  model("flux2-klein-9b-4bit", "FLUX.2 Klein 9B", ["text_to_image", "edit"], { fit: "tight", fit_reason: "tight on 16 GB" }),
+  model("seedvr2-3b-4bit", "SeedVR2 3B", ["upscale"]),
+  model("ltx-video", "LTX Video", ["video"], { installed: false, installed_bytes: 0, video_from_image: true }),
+  model("qwen3-4b-instruct-4bit", "Story analyst (Qwen3 4B)", ["assist"]),
+  model("kokoro-82m", "Fast audiobook voices (Kokoro 82M)", ["speech"], { package_gib: 0.45, peak_gib: 1.5 }),
+  model("qwen3-tts-1.7b-custom-6bit", "Audiobook voices (Qwen3-TTS 1.7B)", ["speech"], { installed: false, installed_bytes: 0 }),
+];
+
+const prompts = [
+  "A lighthouse at dusk over a stormy sea, oil painting", "Portrait of an old harbourmaster, ink and watercolour",
+  "A green dory pulled up on a pebble beach at dawn", "Kitchen interior with tar and oranges, warm lamplight",
+  "A boy mending a fishing net, graphic novel panel", "Ferry pier in heavy rain, cinematic",
+];
+const items = [
+  ...prompts.map((prompt, i) => ({
+    id: `img-${i}`, kind: i % 3 === 1 ? "edit" : "generate", name: `image-${i}.png`, mime: "image/png",
+    bytes: 1.2e6, model: "FLUX.2 Klein 4B", prompt, seed: 1000 + i, width: i % 2 ? 768 : 1024, height: 768,
+    steps: 4, guidance: 1, inputs: [], created_at: iso(i), duration_ms: 41000,
+  })),
+  { id: "up-1", kind: "upscale", name: "upscaled.png", mime: "image/png", bytes: 6e6, model: "SeedVR2 3B",
+    prompt: "", seed: 0, width: 2048, height: 1536, steps: null, guidance: null, inputs: ["img-0"], created_at: iso(2), duration_ms: 90000 },
+  { id: "aud-1", kind: "audiobook", name: "The Ferry.wav", mime: "audio/wav", bytes: 4e7, model: "Kokoro 82M",
+    prompt: "The Ferry", seed: 0, width: null, height: null, steps: null, guidance: null, inputs: [], created_at: iso(0),
+    duration_ms: 60000, markers: [{ time: 0, label: "The pier" }, { time: 95, label: "The kitchen" }] },
+  ...[0, 1, 2].map((p) => ({ id: `panel-${p}`, kind: "edit", name: `panel-${p}.png`, mime: "image/png", bytes: 9e5,
+    model: "FLUX.2 Klein 4B", prompt: `Panel ${p + 1}`, seed: p, width: 768, height: 768, steps: 4, guidance: 1,
+    inputs: [], created_at: iso(1), duration_ms: 70000, project: "board-1", project_name: "The Ferry", project_index: p })),
+];
+
+const source = "The ferry to Hollin Island ran twice a week, and I had missed both.\n\n“You’re the Pell girl,” she said.\n\n“I’m not late,” I said. “The ferry was early.”";
+const library = {
+  version: 1, activeBookId: "book-1",
+  books: [{ version: 1, id: "book-1", characters: [
+    { id: "n", name: "Narrator", aliases: [], visual: "", voice: "" },
+    { id: "a", name: "Agnes Thorne", aliases: ["Agnes"], visual: "broad, weathered", voice: "gruff, warm" },
+    { id: "t", name: "Tam", aliases: [], visual: "a boy of twelve", voice: "quiet" }],
+    chapters: [{ id: "ch-1", title: "The Ferry", source, source_hash: "mock", scenes: [{ id: "s1", title: "The pier",
+      summary: "", start: 0, end: source.length, beats: [{ id: "b1", start: 0, end: source.length, source,
+        importance: 3, tension: 3, action: "Arrival", setting: "pier", mood: "wry", visible: [],
+        dialogue: [{ speaker_id: "a", text: "You’re the Pell girl,", offscreen: false, start: 70, end: 91 },
+                   { speaker_id: "n", text: "I’m not late,", offscreen: false, start: 104, end: 117 }] }] }] }] }],
+  audio: { "book-1": { model_id: "kokoro-82m", narrator: "bf_emma", voices: { a: "hf_alpha", t: "am_puck" },
+    rate: 160, outputs: { "ch-1": ["aud-1"] } } },
+};
+
+const answers: Record<string, unknown> = {
+  setup_state: { ready: true, python_present: true, venv_present: true, engine_present: true,
+    stamp: { python_version: "3.12.14", mlxgen_version: "0.36.0", installed_at: iso(30) }, root: "/mock" },
+  host_info: { chip: "Apple M4", arch: "arm64", total_ram_gib: 16, usable_ram_gib: 12, max_params_4bit: 14,
+    max_params_8bit: 7, max_params_bf16: 3, free_disk_gib: 180, total_disk_gib: 460, disk_headroom_gib: 20, apple_silicon: true },
+  vault_status: { exists: true, unlocked: true, biometry_available: false, biometry_enrolled: false,
+    via_biometry: false, item_count: items.length, unlocked_seconds: 60, root: "/mock/vault" },
+  list_models: models,
+  vault_list: items,
+  story_library_get: JSON.stringify(library),
+  audio_voices: { voices: ["hf_alpha", "hf_beta", "hm_omega", "hm_psi", "af_heart", "am_puck", "bf_emma", "bm_george"]
+    .map((id) => ({ id, language: { h: "Hindi / Indian English", a: "English (US)", b: "English (UK)" }[id[0]] })) },
+  hf_token_status: { present: false, hint: null },
+  storage_info: { models_root: "/mock/models", models_bytes: 2.4e10, volume_free_gib: 180, is_external: false },
+};
+
+export async function invoke(cmd: string): Promise<unknown> {
+  if (cmd in answers) return structuredClone(answers[cmd]);
+  if (cmd.startsWith("list_") || cmd.endsWith("_list")) return [];
+  return null;
+}
+export const convertFileSrc = (p: string) => p;

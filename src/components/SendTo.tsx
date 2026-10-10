@@ -33,7 +33,7 @@ export default function SendTo({
   const options: [Destination, string, boolean][] = [
     ["edit", "Edit this", canRun("edit")],
     ["video", "Animate", canRun("video")],
-    ["upscale", "Enlarge", canRun("upscale")],
+    ["upscale", "Upscale", canRun("upscale")],
   ];
 
   const available = options.filter(
@@ -41,11 +41,14 @@ export default function SendTo({
   );
   if (available.length === 0 || ids.length === 0) return null;
 
+  // A group with a name, so "Animate" is heard as where the picture goes
+  // next rather than as an action on this screen.
   return (
-    <>
+    <span role="group" aria-label="Send to" className="send-to">
       {available.map(([dest, label]) => (
         <button
           key={dest}
+          type="button"
           className="btn small"
           style={compact ? { padding: "3px 8px", fontSize: 11 } : undefined}
           onClick={(e) => { e.stopPropagation(); send(dest, ids); }}
@@ -53,6 +56,6 @@ export default function SendTo({
           {label}
         </button>
       ))}
-    </>
+    </span>
   );
 }

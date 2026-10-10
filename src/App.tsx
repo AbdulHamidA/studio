@@ -2,6 +2,9 @@ import Audiobook from "./components/Audiobook";
 import { EMPTY_LIBRARY, keepBook, type CharacterReference, type StoryBook, type StoryLibrary } from "./lib/story";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, errText, onEngineExit, onEngineProgress } from "./lib/api";
+import { NowPlaying, type Track } from "./lib/nowPlaying";
+import AudioPlayer from "./components/library/AudioPlayer";
+import { Bar } from "./components/shared";
 import type { HostInfo, ModelStatus, Recipe, SetupState, VaultItem, VaultStatus } from "./lib/types";
 import Setup from "./components/Setup";
 import VaultGate from "./components/VaultGate";
@@ -23,14 +26,21 @@ type Tab = "generate" | "edit" | "board" | "audiobook" | "video" | "upscale" | "
 const TABS: [Tab, string, string][] = [
   ["generate", "✦", "Generate"],
   ["edit", "✎", "Edit"],
+  ["upscale", "⤢", "Upscale"],
+  ["video", "▷", "Video"],
   ["board", "▤", "Board"],
   ["audiobook", "♫", "Audiobook"],
-  ["video", "▷", "Video"],
-  ["upscale", "⤢", "Upscale"],
-  ["models", "◍", "Models"],
   ["gallery", "▦", "Vault"],
+  ["models", "◍", "Models"],
   ["activity", "◷", "Activity"],
   ["security", "⚿", "Security"],
+];
+/** Sidebar sections, macOS-style, so ten flat tabs read as four kinds of work. */
+const SECTIONS: [string, Tab[]][] = [
+  ["Create", ["generate", "edit", "upscale", "video"]],
+  ["Story", ["board", "audiobook"]],
+  ["Library", ["gallery"]],
+  ["Manage", ["models", "activity", "security"]],
 ];
 
 /** Lock the vault after this long without interaction. */
@@ -42,10 +52,18 @@ export default function App() {
   const [vault, setVault] = useState<VaultStatus | null>(null);
   const [models, setModels] = useState<ModelStatus[]>([]);
   const [items, setItems] = useState<VaultItem[]>([]);
-  const [tab, setTab] = useState<Tab>("generate");
+  const [tab, setTab] = useState<Tab>(() => (import.meta.env.MODE === "mock"
+    && new URLSearchParams(location.search).get("tab") as Tab) || "generate");
+  useEffect(() => { tabRef.current = tab; }, [tab]);
   const [toast, setToast] = useState<{ msg: string; bad?: boolean } | null>(null);
 
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
+  // Every job the engine is running, with the screen it was started from, so
+  // it can be watched and stopped from anywhere rather than only its own tab.
+  const [jobs, setJobs] = useState<Record<string, { label: string; progress: number | null; tab: Tab; at: number }>>({});
+  const tabRef = useRef<Tab>("generate");
+  const [track, setTrack] = useState<Track | null>(null);
+  const nowPlaying = useMemo(() => ({ track, play: setTrack, stop: () => setTrack(null) }), [track]);
   // Owned here so Generate and the Vault can both hand images to the Edit tab.
   const [editImages, setEditImages] = useState<string[]>([]);
   const [videoFrame, setVideoFrame] = useState<string[]>([]);
@@ -83,7 +101,10 @@ export default function App() {
     saveLibrary((current) => ({ ...current, books: current.books.map((book) => book.id === bookId
       ? { ...book, references: { ...book.references, [characterId]: reference } } : book) })), [saveLibrary]);
 
-  const notify = useCallback((msg: string, bad?: boolean) => setToast({ msg, bad }), []);
+  // An error waits to be read; good news arriving after it must not replace
+  // it and then fade, taking the error with it.
+  const notify = useCallback((msg: string, bad?: boolean) =>
+    setToast((current) => (current?.bad && !bad ? current : { msg, bad })), []);
 
   /**
    * Anything that got away.
@@ -125,7 +146,7 @@ export default function App() {
     if (dest === "edit") { setEditImages(ids); setTab("edit"); }
     if (dest === "video") { setVideoFrame(ids.slice(0, 1)); setTab("video"); }
     if (dest === "upscale") { setUpscaleImage(ids.slice(0, 1)); setTab("upscale"); }
-    const where = dest === "edit" ? "Edit" : dest === "video" ? "Video" : "Enlarge";
+    const where = dest === "edit" ? "Edit" : dest === "video" ? "Video" : "Upscale";
     notify(`Carried over to ${where}.`);
   }, [notify]);
 
@@ -197,12 +218,23 @@ export default function App() {
       } else {
         setBusyLabel(p.step && p.total_steps ? `${phase} ${p.step}/${p.total_steps}` : phase);
       }
+      setJobs((all) => ({ ...all, [p.job_id]: {
+        label: p.message || phase, progress: p.progress,
+        tab: all[p.job_id]?.tab ?? tabRef.current, at: Date.now() } }));
       window.clearTimeout(idle);
       // Progress events stop when a job ends; treat silence as done.
       idle = window.setTimeout(() => setBusyLabel(null), 4000);
     }).then((u) => { un = u; });
-    return () => { un?.(); window.clearTimeout(idle); };
+    // A job silent for 20 seconds has finished (or failed, which its own
+    // screen reports); model loads go quiet for less than that.
+    const sweep = window.setInterval(() => setJobs((all) => {
+      const live = Object.entries(all).filter(([, j]) => Date.now() - j.at < 20000);
+      return live.length === Object.keys(all).length ? all : Object.fromEntries(live);
+    }), 3000);
+    return () => { un?.(); window.clearTimeout(idle); window.clearInterval(sweep); };
   }, []);
+  // Recordings are served from the vault, so locking it ends playback.
+  useEffect(() => { if (!vault?.unlocked) setTrack(null); }, [vault?.unlocked]);
 
   useEffect(() => {
     if (!vault?.unlocked) {
@@ -228,8 +260,22 @@ export default function App() {
     } catch (e) { notify(errText(e), true); }
   }, [notify]);
 
+  // Whether the vault has been listed yet, and why it could not be. Without
+  // these the library said "The vault is empty" while the first listing was
+  // still on its way, and said it again when the listing failed.
+  const [itemsLoaded, setItemsLoaded] = useState(false);
+  const [itemsError, setItemsError] = useState<string | null>(null);
   const refreshItems = useCallback(async () => {
-    try { setItems(await api.vaultList()); } catch { /* locked or empty */ }
+    try {
+      setItems(await api.vaultList());
+      setItemsError(null);
+    } catch (e) {
+      // A locked vault fails here too, but then the lock screen is what is
+      // on show; this only ever reaches the library while it is unlocked.
+      setItemsError(errText(e));
+    } finally {
+      setItemsLoaded(true);
+    }
   }, []);
 
   useEffect(() => {
@@ -294,10 +340,17 @@ export default function App() {
   // Idle auto-lock. Leaving a machine unattended is the failure mode an
   // at-rest-encrypted vault is otherwise powerless against.
   const timer = useRef<number | undefined>(undefined);
+  const warnTimer = useRef<number | undefined>(undefined);
+  // A minute's notice: the lock unmounts every screen, so an unsaved prompt
+  // or a half-edited panel would otherwise vanish without warning.
+  const [lockSoon, setLockSoon] = useState(false);
   useEffect(() => {
     if (!ready) return;
     const reset = () => {
       window.clearTimeout(timer.current);
+      window.clearTimeout(warnTimer.current);
+      setLockSoon(false);
+      warnTimer.current = window.setTimeout(() => setLockSoon(true), IDLE_LOCK_MS - 60_000);
       timer.current = window.setTimeout(async () => {
         try {
           setVault(await api.vaultLock());
@@ -314,6 +367,7 @@ export default function App() {
     reset();
     return () => {
       window.clearTimeout(timer.current);
+      window.clearTimeout(warnTimer.current);
       events.forEach((e) => window.removeEventListener(e, reset));
     };
   }, [ready, notify]);
@@ -345,7 +399,9 @@ export default function App() {
   }, [items]);
 
   if (!setup || !vault) {
-    return <div className="empty-state" style={{ paddingTop: 160 }}>Loading…</div>;
+    // Draggable while it loads, like every other screen.
+    return <><div className="drag-region" data-tauri-drag-region />
+      <div className="empty-state" role="status" style={{ paddingTop: 160 }}>Loading…</div></>;
   }
 
   // The runtime has to exist before a vault is worth creating.
@@ -406,6 +462,7 @@ export default function App() {
     : 0;
 
   return (
+    <NowPlaying.Provider value={nowPlaying}>
     <div className="shell">
       <div className="drag-region" data-tauri-drag-region />
       <aside className="sidebar">
@@ -413,31 +470,54 @@ export default function App() {
           Model Studio
           <span>Local · Encrypted · Apple Silicon</span>
         </div>
-        <nav className="nav">
-          {TABS.map(([id, glyph, label]) => (
-            <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>
-              <span className="glyph">{glyph}</span>
-              {label}
-              {id === "models" && installedCount > 0 && (
-                <span className="badge">{installedCount}</span>
-              )}
-              {id === "gallery" && vaultCount > 0 && (
-                <span className="badge">{vaultCount}</span>
-              )}
-            </button>
+        <nav className="nav" aria-label="Sections">
+          {SECTIONS.map(([heading, ids]) => (
+            <div key={heading} className="nav-section" role="group" aria-labelledby={`nav-${heading}`}>
+              <div className="nav-heading" id={`nav-${heading}`}>{heading}</div>
+              {TABS.filter(([id]) => ids.includes(id)).map(([id, glyph, label]) => (
+                <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}
+                  aria-current={tab === id ? "page" : undefined} title={label}>
+                  <span className="glyph" aria-hidden="true">{glyph}</span>
+                  <span className="nav-label">{label}</span>
+                  {id === "models" && installedCount > 0 && (
+                    <span className="badge" aria-label={`${installedCount} installed`}>{installedCount}</span>
+                  )}
+                  {id === "gallery" && vaultCount > 0 && (
+                    <span className="badge" aria-label={`${vaultCount} items`}>{vaultCount}</span>
+                  )}
+                </button>
+              ))}
+            </div>
           ))}
         </nav>
+
+        {Object.keys(jobs).length > 0 && (
+          <section className="jobs" aria-label="Running jobs">
+            <div className="nav-heading">Running</div>
+            {Object.entries(jobs).map(([id, j]) => (
+              <div className="job" key={id}>
+                <button type="button" className="job-name" onClick={() => setTab(j.tab)}
+                  title={`Go to ${TABS.find(([t]) => t === j.tab)?.[2]}`}>
+                  <span className="t-meta">{TABS.find(([t]) => t === j.tab)?.[2]}</span> {j.label}
+                </button>
+                <div className="job-row">
+                  <Bar value={j.progress} label={j.label} />
+                  <button type="button" className="btn small" aria-label={`Stop ${j.label}`}
+                    onClick={() => void api.cancelJob(id).catch((e) => notify(errText(e), true))}>Stop</button>
+                </div>
+              </div>
+            ))}
+          </section>
+        )}
 
         <div className="sidebar-foot">
           {host && (
             <>
+              {/* A label, not a meter: it was a bar that was always full. */}
               <div className="meter">
                 <div className="meter-label">
                   <span>Memory for models</span>
                   <span>{host.usable_ram_gib.toFixed(1)} GB</span>
-                </div>
-                <div className="meter-track">
-                  <div className="meter-fill" style={{ width: "100%" }} />
                 </div>
               </div>
               <div className="meter">
@@ -455,7 +535,7 @@ export default function App() {
                   />
                 </div>
               </div>
-              <div style={{ fontSize: 10, color: "var(--text-faint)" }}>
+              <div style={{ fontSize: 11, color: "var(--text-faint)" }}>
                 {host.chip} · {host.total_ram_gib.toFixed(0)} GB
               </div>
             </>
@@ -474,11 +554,13 @@ export default function App() {
                 ? "No data has arrived for a while. It may need cancelling and retrying."
                 : "A job is running in the engine"}
             >
-              <span className="spin">◐</span> {busyLabel}
+              <span className="spin" aria-hidden="true">◐</span> {busyLabel}
+              {/* Said, not only hovered: a stall needs action. */}
+              {busyLabel.includes("stalled") && <span> — may need cancelling and retrying</span>}
             </span>
           )}
           <span className="pill good" title="Content is encrypted at rest">
-            <span className="dot" />Unlocked
+            <span className="dot" aria-hidden="true" />Unlocked<span className="visually-hidden"> — content is encrypted at rest</span>
           </span>
           {(tab === "generate" || tab === "edit" || tab === "upscale") && (
             <button
@@ -508,6 +590,9 @@ export default function App() {
           </button>
         </div>
 
+        {/* Positioned, so the Vault's docked viewer can cover the content
+            area alone -- sidebar, top bar and player stay usable. */}
+        <div className="content-wrap">
         <div className="content">
           {/*
             Generate and Edit stay mounted and are hidden with CSS rather than
@@ -578,8 +663,11 @@ export default function App() {
           {tab === "models" && (
             <Models models={models} host={host} onChanged={refreshModels} notify={notify} />
           )}
-          {tab === "gallery" && (
+          {/* Kept mounted like Generate and Edit: leaving the Vault and coming
+              back finds the same file open at the same place. */}
+          <div style={{ display: tab === "gallery" ? "block" : "none" }}>
             <Gallery
+              active={tab === "gallery"}
               items={items}
               onChanged={refreshItems}
               notify={notify}
@@ -587,8 +675,10 @@ export default function App() {
               models={models}
               onReuse={reuse}
               onOpenBoard={(project) => { setOpenBoard(project); setTab("board"); }}
+              loading={!itemsLoaded}
+              loadError={itemsError}
             />
-          )}
+          </div>
           {tab === "activity" && <Activity notify={notify} />}
           {tab === "security" && (
             <Security
@@ -600,9 +690,26 @@ export default function App() {
             />
           )}
         </div>
+        </div>
+        {lockSoon && (
+          <div className="notice warn lock-soon" role="alert">
+            The vault locks in a minute to protect your work while you are away.
+            <button type="button" className="btn small primary"
+              onClick={() => window.dispatchEvent(new Event("modelstudio:activity"))}>Stay unlocked</button>
+          </div>
+        )}
+        {track && (
+          <section className="now-playing" aria-label="Now playing">
+            <AudioPlayer key={track.src} src={track.src} title={track.title} markers={track.markers ?? []} autoPlay />
+            <button type="button" className="btn small" aria-label="Close player" onClick={() => setTrack(null)}>
+              <span aria-hidden>×</span>
+            </button>
+          </section>
+        )}
       </main>
 
       {toast && <Toast msg={toast.msg} bad={toast.bad} onDone={() => setToast(null)} />}
     </div>
+    </NowPlaying.Provider>
   );
 }
