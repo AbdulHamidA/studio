@@ -407,6 +407,26 @@ class NeuralNarration(unittest.TestCase):
                                           sample_rate=24000, token_count=3)
         return Model()
 
+    def test_chunks_end_at_sentences_not_mid_sentence(self):
+        text = 'The rain fell all night on the old harbor town. ' * 12
+        chunks = list(audiobook.speech_chunks(text))
+        self.assertEqual(''.join(chunks), text)
+        self.assertTrue(all(c.rstrip().endswith('.') for c in chunks), chunks)
+        japanese = '雨が一晩中降り続いた。' * 50
+        chunks = list(audiobook.speech_chunks(japanese))
+        self.assertEqual(''.join(chunks), japanese)
+        self.assertTrue(all(c.endswith('。') for c in chunks))
+
+    def test_progress_advances_within_one_long_narration(self):
+        calls, seen = [], []
+        text = 'The rain fell all night on the old harbor town. ' * 20
+        audiobook.synthesize_neural([{"speaker_id": None, "text": text}], "ryan", {}, 160,
+                                    lambda: None, lambda done, total: seen.append(done / total),
+                                    load=lambda: self.model(calls))
+        self.assertGreater(len(seen), 2)
+        self.assertEqual(seen, sorted(seen))
+        self.assertLess(seen[-1], 1)
+
     def test_voice_direction_streaming_and_pcm_output(self):
         calls = []
         data, seconds = audiobook.synthesize_neural([
@@ -646,3 +666,12 @@ class LongChapterRobustness(unittest.TestCase):
     def test_a_writer_that_never_validates_is_still_refused(self):
         with self.assertRaisesRegex(ValueError, 'Scene 3 could not be validated'):
             story.analyze('One. Two. Three. Four.', lambda *_: '{', passage_words=1, passage_units=1)
+
+
+class NarrationMood(unittest.TestCase):
+    def test_narration_carries_its_beat_mood_and_still_reconstructs_the_source(self):
+        book = example()
+        chapter = book['chapters'][0]
+        segments = story.narration_segments(book, chapter['id'])
+        self.assertEqual(''.join(s['text'] for s in segments), chapter['source'])
+        self.assertTrue(all(s.get('mood') for s in segments if s['speaker_id'] is None))

@@ -6949,9 +6949,9 @@ def op_audiobook(req_id, req):
     def check():
         if is_cancelled(req_id):
             raise Cancelled()
-    def progress(i, total):
+    def progress(done, total):
         emit({"id": req_id, "type": "progress", "phase": "denoise",
-              "progress": i / total, "message": f"Narrating passage {i + 1} of {total}"})
+              "progress": done / total, "message": f"Narrating ({round(100 * done / total)}%)"})
     model_id = req.get("model_id") or "macos"
     if model_id == audiobook.NEURAL_MODEL_ID:
         _apply_policy_once(req_id)

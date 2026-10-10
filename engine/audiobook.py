@@ -101,10 +101,20 @@ def neural_voices():
 
 
 def speech_chunks(text, limit=350):
-    """Bound inference without dropping, duplicating or rewriting source text."""
+    """Bound inference without dropping, duplicating or rewriting source text.
+
+    Each chunk is generated without the others' context, so a cut mid-sentence
+    is heard as a broken pause. Prefer the last sentence end, then a line break,
+    then clause punctuation, and a bare space only when there is none."""
     while len(text) > limit:
-        boundaries = [m.end() for m in re.finditer(r'[.!?。！？]\s+|\n+|\s+', text[:limit])]
-        end = boundaries[-1] if boundaries else limit
+        head = text[:limit]
+        for pattern in (r'[.!?…][”"’)\]]*\s+|[。！？][」』）]*', r'\n+', r'[,;:—–、，；：]\s*', r'\s+'):
+            boundaries = [m.end() for m in re.finditer(pattern, head) if m.end() > limit // 3]
+            if boundaries:
+                end = boundaries[-1]
+                break
+        else:
+            end = limit
         yield text[:end]
         text = text[end:]
     if text:
@@ -152,15 +162,22 @@ def synthesize_neural(segments, narrator, assignments, rate, check_cancel,
             final.setnchannels(1)
             final.setsampwidth(2)
             final.setframerate(24000)
-            for i, segment in enumerate(segments):
+            total, done = sum(len(s["text"]) for s in segments) or 1, 0
+            for segment in segments:
                 check_cancel()
-                progress(i, len(segments))
                 speaker_id = segment["speaker_id"]
                 voice = assignments.get(speaker_id, narrator)
-                direction = directions.get(speaker_id, character_directions.get(speaker_id, ""))
+                # Bible text is only bounded at 4,000 characters, and the
+                # instruction is sent again with every chunk.
+                direction = directions.get(speaker_id, character_directions.get(speaker_id, ""))[:600]
+                mood = (segment.get("mood") or "")[:200]
                 pace = "Read slowly with measured pauses." if rate < 140 else "Read briskly but clearly." if rate > 190 else "Read at a natural conversational pace."
-                instruct = " ".join(filter(None, ["Read the supplied text verbatim. Do not add words.", delivery, direction, f"Scene mood: {segment.get('mood')}." if segment.get("mood") else "", pace]))
+                instruct = " ".join(filter(None, ["Read the supplied text verbatim. Do not add words.", delivery, direction, f"Scene mood: {mood}." if mood else "", pace]))
                 for part in speech_chunks(segment["text"]):
+                    # Per chunk, by characters: a chapter without dialogue is
+                    # one long segment and sat at 0% for the whole run.
+                    progress(done, total)
+                    done += len(part)
                     if not any(c.isalnum() for c in part):
                         continue
                     count, token_count = 0, 0

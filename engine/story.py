@@ -474,16 +474,19 @@ def narration_segments(book, chapter_id):
     chapter = next((c for c in book["chapters"] if c["id"] == chapter_id), None)
     if not chapter:
         raise ValueError("choose an analyzed chapter")
-    source, cursor, segments = chapter["source"], 0, []
+    # Narration is split at beats so it carries the beat's mood like dialogue
+    # does; it is most of a chapter and was always read without one.
+    source, segments = chapter["source"], []
     for scene in chapter["scenes"]:
         for beat in scene["beats"]:
+            cursor = beat["start"]
             for line in beat["dialogue"]:
                 if line["start"] > cursor:
-                    segments.append({"speaker_id": None, "text": source[cursor:line["start"]]})
+                    segments.append({"speaker_id": None, "text": source[cursor:line["start"]], "mood": beat["mood"]})
                 segments.append({"speaker_id": line["speaker_id"], "text": line["text"], "mood": beat["mood"]})
                 cursor = line["end"]
-    if cursor < len(source):
-        segments.append({"speaker_id": None, "text": source[cursor:]})
+            if beat["end"] > cursor:
+                segments.append({"speaker_id": None, "text": source[cursor:beat["end"]], "mood": beat["mood"]})
     return segments
 
 
