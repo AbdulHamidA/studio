@@ -501,3 +501,46 @@ class SmallAnalystPassages(unittest.TestCase):
         self.assertEqual(len(chapter['scenes']), len(groups))
         self.assertEqual(''.join(beat['source'] for scene in chapter['scenes'] for beat in scene['beats']), source)
         self.assertTrue(chapter['scenes'][-1]['beats'][-1]['source'].endswith('The final door closes.'))
+
+
+class NarratorIdentity(unittest.TestCase):
+    """The in-app failure 'character narrator is not in this scene'."""
+
+    def scene(self, source, name, bible=(), visible=True, speaker=False):
+        group = story.passages(source)[0]
+        data = reply(group, [{"id": "n", "name": name, "aliases": [], "visual": "", "voice": ""}])
+        data['beats'][0]['visible'] = [{"character_id": "n", "expression": "", "body_language": ""}] if visible else []
+        if speaker:
+            data['beats'][0]['dialogue'] = [{"speaker_id": "n", "text": "Go.", "offscreen": False}]
+        return story.parse_scene(json.dumps(data), group, list(bible), 's1')
+
+    def test_narrator_name_is_case_and_article_insensitive(self):
+        for name in ('narrator', 'The Narrator', 'NARRATOR'):
+            _, characters = self.scene('I walked to the station.', name)
+            self.assertEqual([c['name'] for c in characters], ['Narrator'])
+
+    def test_known_narrator_is_reused_in_passages_without_first_person(self):
+        _, bible = self.scene('I saw the train leave. I was alone.', 'Narrator')
+        for source in ('I ran home.', 'The station was empty. Rain fell.'):
+            scene, characters = self.scene(source, 'narrator', bible)
+            self.assertEqual(len(characters), 1)
+            self.assertEqual(scene['beats'][0]['visible'][0]['character_id'], bible[0]['id'])
+
+    def test_named_first_person_narrator_absorbs_a_generic_narrator(self):
+        bible = [{"id": "ellen", "name": "Ellen", "aliases": ["I"], "visual": "", "voice": ""}]
+        scene, characters = self.scene('I ran home.', 'Narrator', bible)
+        self.assertEqual(characters, bible)
+        self.assertEqual(scene['beats'][0]['visible'][0]['character_id'], 'ellen')
+
+    def test_third_person_narrating_voice_is_not_a_character(self):
+        scene, characters = self.scene('Mira said “Go.”', 'Narrator', speaker=True)
+        self.assertEqual(characters, [])
+        self.assertEqual(scene['beats'][0]['visible'], [])
+        self.assertIsNone(scene['beats'][0]['dialogue'][0]['speaker_id'])
+
+    def test_undeclared_narrator_reference_is_the_narrating_voice(self):
+        group = story.passages('The station was empty.')[0]
+        data = reply(group)
+        data['beats'][0]['visible'] = [{"character_id": "narrator", "expression": "", "body_language": ""}]
+        scene, _ = story.parse_scene(json.dumps(data), group, [], 's1')
+        self.assertEqual(scene['beats'][0]['visible'], [])

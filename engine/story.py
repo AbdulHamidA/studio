@@ -150,13 +150,29 @@ def parse_scene(raw, group, bible, scene_id):
     characters = copy.deepcopy(bible)
     lookup = {c["id"]: c["id"] for c in characters}
     source = ''.join(u["text"] for u in group)
-    local_ids = set()
+    local_ids, dropped = set(), set()
+    narrative = re.sub(r'[“"]([^”"]+)[”"]|「([^」]+)」', "", source)
+    first_person = bool(re.search(r'\b(?:I|me|my|myself|we|us|our)\b', narrative, re.I))
     for person in _array(reply.get("characters"), "characters"):
         name = _text(person.get("name"), "name", False)
         local_id = _text(person.get("id"), "character id", False)
         if local_id in local_ids:
             raise ValueError("each local character ID must be unique")
         local_ids.add(local_id)
+        if re.fullmatch(r'(?:the\s+)?narrator', name, re.I):
+            name = "Narrator"
+            known = [c for c in characters if c["name"] == "Narrator"
+                     or set(c["aliases"]).intersection({"I", "my", "me"})]
+            if len(known) == 1:
+                # Models re-declare the narrator per passage; bind to the known one.
+                lookup[local_id] = known[0]["id"]
+                continue
+            if len(known) > 1:
+                raise ValueError("ambiguous narrator; use the narrator's exact character ID")
+            if not first_person:
+                # A third-person narrating voice is not a person in the scene.
+                dropped.add(local_id)
+                continue
         aliases = [_text(a, "alias", False) for a in _array(person.get("aliases", []), "aliases")]
         aliases = [a for a in aliases if a.casefold() not in {"he", "she", "they", "him", "her", "his", "their", "we", "you"}]
         identity = {name.casefold(), *(a.casefold() for a in aliases)}
@@ -167,10 +183,7 @@ def parse_scene(raw, group, bible, scene_id):
         existing = matches[0] if matches else None
         # Only literal aliases can be added to the persistent bible.
         aliases = [a for a in aliases if re.search(r'(?<!\w)' + re.escape(a) + r'(?!\w)', source, re.I)]
-        narrative = re.sub(r'[“"]([^”"]+)[”"]|「([^」]+)」', "", source)
-        anonymous_narrator = name == "Narrator" and bool(re.search(r'\b(?:I|my|me)\b', narrative, re.I))
-        if anonymous_narrator and any(set(c["aliases"]).intersection({"I", "my", "me"}) for c in characters):
-            raise ValueError("reuse the known narrator instead of adding another")
+        anonymous_narrator = name == "Narrator"
         if not existing and not anonymous_narrator and not re.search(r'(?<!\w)' + re.escape(name) + r'(?!\w)', source, re.I):
             raise ValueError(f"character {name} is not in this scene")
         if name.casefold() in {"i", "me", "my", "he", "she", "they", "him", "her", "we", "you"}:
@@ -202,6 +215,8 @@ def parse_scene(raw, group, bible, scene_id):
         if not isinstance(reference, str) or not reference.strip():
             raise ValueError(f"{field} must name a declared character ID")
         reference = reference.strip()
+        if reference in dropped:
+            return None
         if reference in lookup:
             return lookup[reference]
         matches = names.get(reference.casefold(), set())
@@ -209,6 +224,8 @@ def parse_scene(raw, group, bible, scene_id):
             return next(iter(matches))
         if len(matches) > 1:
             raise ValueError(f"{field} is ambiguous: {reference!r}; use its exact character ID")
+        if re.fullmatch(r'(?:the\s+)?narrator', reference, re.I):
+            return None
         valid = ', '.join(f"{local}={next(c['name'] for c in characters if c['id'] == cid)}"
                           for local, cid in lookup.items())
         raise ValueError(f"{field} {reference!r} is not declared. Valid IDs: {valid or '(none)'}. "
@@ -230,6 +247,8 @@ def parse_scene(raw, group, bible, scene_id):
         visible = []
         for actor in _array(beat.get("visible"), "visible"):
             cid = resolve(actor.get("character_id"), "visible character")
+            if cid is None:
+                continue
             if cid in [a["character_id"] for a in visible]:
                 raise ValueError("duplicate visible character")
             visible.append({"character_id": cid,
