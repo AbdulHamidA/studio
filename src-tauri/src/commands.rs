@@ -1254,6 +1254,40 @@ fn engine_versions() -> String {
     )
 }
 
+/// Whether a job may start, judged by the model's peak against usable RAM.
+#[derive(Debug, PartialEq, Eq)]
+enum MemoryVerdict {
+    Fits,
+    /// The weights alone do not fit; nothing the engine does can help.
+    Hopeless,
+    /// The peak does not fit, and the caller has not earned a bypass.
+    OverBudget,
+}
+
+/// The memory refusal shared by pictures and clips.
+///
+/// `allow_over_budget` is honoured only together with `low_ram`: the bypass
+/// exists because low-RAM mode may close the gap, so a request that asks for
+/// it with low-RAM mode off would run the model at full peak and be killed by
+/// the OS part-way through.
+fn memory_verdict(
+    peak_gib: f32,
+    usable_gib: f32,
+    hopeless: bool,
+    low_ram: bool,
+    allow_over_budget: bool,
+) -> MemoryVerdict {
+    if peak_gib <= usable_gib {
+        MemoryVerdict::Fits
+    } else if hopeless {
+        MemoryVerdict::Hopeless
+    } else if low_ram && allow_over_budget {
+        MemoryVerdict::Fits
+    } else {
+        MemoryVerdict::OverBudget
+    }
+}
+
 async fn run_job(
     app: &AppHandle,
     state: &AppState,
@@ -1281,8 +1315,15 @@ async fn run_job(
         )));
     }
 
-    if entry.peak_gib > host.usable_ram_gib {
-        if entry.hopeless {
+    match memory_verdict(
+        entry.peak_gib,
+        host.usable_ram_gib,
+        entry.hopeless,
+        args.low_ram,
+        args.allow_over_budget,
+    ) {
+        MemoryVerdict::Fits => {}
+        MemoryVerdict::Hopeless => {
             return Err(AppError::msg(format!(
                 "{} cannot run here: its weights alone are ~{:.1} GiB against ~{:.1} GiB \
                  usable. Low-RAM mode trims transient memory, not resident weights.",
@@ -1291,7 +1332,7 @@ async fn run_job(
                 host.usable_ram_gib
             )));
         }
-        if !args.allow_over_budget {
+        MemoryVerdict::OverBudget => {
             return Err(AppError::msg(format!(
                 "{} peaks around {:.1} GiB but this Mac can offer about {:.1} GiB. \
                  Its ~{:.1} GiB weight floor does fit, so low-RAM mode may close the gap \
@@ -1995,10 +2036,37 @@ pub fn remove_lora(state: State<'_, AppState>, handle: String) -> Result<Vec<Lor
 #[cfg(test)]
 mod tests {
     use super::{
-        app_owned_model_entries, dest_holds_other_files, foreign_model_entries, normalize_repo,
-        sweep_orphans_gated, AppPaths, AppState, Vault, MOVE_STAGING_PREFIX,
+        app_owned_model_entries, dest_holds_other_files, foreign_model_entries, memory_verdict,
+        normalize_repo, sweep_orphans_gated, AppPaths, AppState, MemoryVerdict, Vault,
+        MOVE_STAGING_PREFIX,
     };
     use std::sync::Arc;
+
+    /// The over-budget bypass used to be honoured with low-RAM mode off, which
+    /// ran a model at full peak on a Mac that could not hold it.
+    #[test]
+    fn over_budget_bypass_needs_low_ram_mode() {
+        assert_eq!(
+            memory_verdict(10.0, 12.0, false, false, false),
+            MemoryVerdict::Fits
+        );
+        assert_eq!(
+            memory_verdict(20.0, 12.0, false, false, true),
+            MemoryVerdict::OverBudget
+        );
+        assert_eq!(
+            memory_verdict(20.0, 12.0, false, true, false),
+            MemoryVerdict::OverBudget
+        );
+        assert_eq!(
+            memory_verdict(20.0, 12.0, false, true, true),
+            MemoryVerdict::Fits
+        );
+        assert_eq!(
+            memory_verdict(40.0, 12.0, true, true, true),
+            MemoryVerdict::Hopeless
+        );
+    }
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("modelstudio-{name}-{}", uuid::Uuid::new_v4()));
