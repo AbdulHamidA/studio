@@ -201,8 +201,8 @@ export default function MaskCanvas({
   return (
     <div>
       <div style={{
-        position: "relative", borderRadius: 8, overflow: "hidden",
-        border: "1px solid var(--border)", background: "#0b0d12",
+        position: "relative", borderRadius: 7, overflow: "hidden",
+        border: "1px solid var(--border)", background: "var(--bg-sunk)",
         cursor: disabled ? "default" : "crosshair", touchAction: "none",
       }}>
         <img

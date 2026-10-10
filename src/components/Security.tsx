@@ -64,12 +64,12 @@ export default function Security({
           Filenames are random and carry no information; names, prompts and seeds
           live in an encrypted index.
         </div>
-        <div style={{ fontSize: 10.5, color: "var(--text-faint)", userSelect: "text", marginBottom: 12 }}>
+        <div style={{ fontSize: 12, color: "var(--text-faint)", userSelect: "text", marginBottom: 12 }}>
           {status.root}
         </div>
-        <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginBottom: 10, lineHeight: 1.6 }}>
+        <div style={{ fontSize: 12, color: "var(--text-faint)", marginBottom: 10, lineHeight: 1.6 }}>
           Every stored file carries its own identifier, so if the index is ever
-          lost the content can be identified and re-listed. <b>Check and repair</b>
+          lost the content can be identified and re-listed. <b>Check and repair</b>{" "}
           reconciles the two.
         </div>
         <div style={{ display: "flex", gap: 7, flexWrap: "wrap" }}>
@@ -189,7 +189,7 @@ export default function Security({
         >
           Change passphrase
         </button>
-        <div style={{ marginTop: 9, fontSize: 10.5, color: "var(--text-faint)", lineHeight: 1.6 }}>
+        <div style={{ marginTop: 9, fontSize: 12, color: "var(--text-faint)", lineHeight: 1.6 }}>
           This re-wraps the same encryption key with a new salt, so your existing
           content is not re-encrypted and nothing has to be rewritten.
         </div>

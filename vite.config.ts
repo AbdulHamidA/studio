@@ -1,9 +1,21 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+// `vite --mode mock` serves the real UI in a browser against src/mock: sample
+// data in place of the Tauri host, for looking at screens. Never built.
+const mock = (mode: string) => mode === "mock" ? {
+  alias: {
+    "@tauri-apps/api/core": "/src/mock/core.ts",
+    "@tauri-apps/api/event": "/src/mock/event.ts",
+    "@tauri-apps/api/webview": "/src/mock/webview.ts",
+    "@tauri-apps/plugin-dialog": "/src/mock/dialog.ts",
+  },
+} : undefined;
+
 // Tauri expects a fixed port and must not obscure Rust errors.
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [react()],
+  resolve: mock(mode),
   clearScreen: false,
   server: {
     port: 5173,
@@ -26,4 +38,4 @@ export default defineConfig({
     // Agent worktrees live under .claude/ and carry their own copy of every test.
     exclude: ["**/node_modules/**", ".claude/**"],
   },
-});
+}));

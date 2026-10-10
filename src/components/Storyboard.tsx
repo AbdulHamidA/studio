@@ -1900,7 +1900,7 @@ export default function Storyboard({
         )}
         {panels && (
           <>
-            <span style={{ fontSize: 11.5, color: "var(--text-dim)",
+            <span style={{ fontSize: 12, color: "var(--text-dim)",
                            fontVariantNumeric: "tabular-nums" }}>
               <b style={{ color: "var(--text)" }}>{drawnCount}</b> of {panels.length} drawn
             </span>
@@ -1987,7 +1987,7 @@ export default function Storyboard({
           </button>
         )}
         {elapsed > 0 && busy && (
-          <span style={{ fontSize: 10.5, color: "var(--text-faint)",
+          <span style={{ fontSize: 12, color: "var(--text-faint)",
                          fontVariantNumeric: "tabular-nums" }}>
             {Math.floor(elapsed / 60)}m {elapsed % 60}s
           </span>
@@ -2009,10 +2009,10 @@ export default function Storyboard({
         // holds everything; what it is not doing is writing any of it down.
         <div className="notice warn" style={{ margin: "10px 0" }}>
           <strong>This board is not being saved</strong>
-          <div style={{ fontSize: 11.5, lineHeight: 1.6, marginTop: 4 }}>
+          <div style={{ fontSize: 12, lineHeight: 1.6, marginTop: 4 }}>
             {unsaved}
           </div>
-          <div style={{ fontSize: 11.5, lineHeight: 1.6, marginTop: 4 }}>
+          <div style={{ fontSize: 12, lineHeight: 1.6, marginTop: 4 }}>
             Everything on screen is still here. Nothing since the last
             successful save has been written to the vault, so copy the
             manuscript out before closing the app if this does not clear.
@@ -2025,7 +2025,7 @@ export default function Storyboard({
         // right one is not a question this can answer.
         <div className="notice warn" style={{ margin: "10px 0" }}>
           <strong>This board opened empty, and an earlier version of it exists</strong>
-          <div style={{ fontSize: 11.5, lineHeight: 1.6, marginTop: 4 }}>
+          <div style={{ fontSize: 12, lineHeight: 1.6, marginTop: 4 }}>
             {previous.story?.trim()
               ? `It begins "${previous.story.trim().slice(0, 90)}…"`
               : "It has a division but no manuscript."}
@@ -2111,7 +2111,7 @@ export default function Storyboard({
                     + "Nothing is taken, but every photograph has been turned to "
                     + "face the wall."}
                 />
-                <div id="board-ms-hint" style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 6,
+                <div id="board-ms-hint" style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 6,
                               lineHeight: 1.55 }}>
                   Prose, not prompts. It is divided into panels for you, and
                   review its interpretation before drawing.
@@ -2265,8 +2265,8 @@ export default function Storyboard({
               <div style={{ marginTop: 18 }}>
                 <div className="sub-head">Character sheet</div>
                 <img src={vaultUrl(sheet)} alt="Character sheet"
-                     style={{ width: "100%", maxWidth: 260, borderRadius: 6 }} />
-                <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5,
+                     style={{ width: "100%", maxWidth: 260, borderRadius: 7 }} />
+                <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 5,
                               lineHeight: 1.5 }}>
                   Panels share this cast reference, so recurring people keep the
                   same appearance from one shot to the next.
@@ -2320,7 +2320,7 @@ export default function Storyboard({
                 )}
                 {pages.map((id, i) => (
                   <img key={id} src={vaultUrl(id)} alt={`Page ${i + 1} of ${pages.length}`}
-                       style={{ width: "100%", borderRadius: 6, marginBottom: 10 }} />
+                       style={{ width: "100%", borderRadius: 7, marginBottom: 10 }} />
                 ))}
               </div>
             )}
@@ -2366,7 +2366,7 @@ export default function Storyboard({
                   <label>Or bring a picture of them</label>
                   <ImageDrop images={ownSheet} onChange={(images) => { setOwnSheet(images); clearCharacterSheets(); setPages([]); setOverflow([]); }} max={1}
                              onError={(m) => notify(m, true)} />
-                  <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5,
+                  <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 5,
                                 lineHeight: 1.5 }}>
                     {ownSheet.length > 0
                       ? "This picture anchors the lead character. Other visible characters keep their individual references."
@@ -2424,7 +2424,7 @@ export default function Storyboard({
                             ? "Press again to restyle"
                             : "Use this look"}
                         </button>
-                        <span style={{ fontSize: 10.5, color: "var(--text-faint)",
+                        <span style={{ fontSize: 12, color: "var(--text-faint)",
                                        lineHeight: 1.5 }}>
                           These words lead every panel prompt. The four presets
                           are a starting point, not the range.
@@ -2433,7 +2433,7 @@ export default function Storyboard({
                     </div>
                   )}
                   {confirmStyle && (
-                    <div style={{ fontSize: 10.5, color: "var(--bad)", marginTop: 5,
+                    <div style={{ fontSize: 12, color: "var(--bad)", marginTop: 5,
                                   lineHeight: 1.5 }}>
                       Press again to restyle. The {drawnCount} drawn panel
                       {drawnCount === 1 ? "" : "s"}, the cast sheet and the rooms
@@ -2443,7 +2443,7 @@ export default function Storyboard({
                     </div>
                   )}
                   {styleHasMoved(style) && (
-                    <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5,
+                    <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 5,
                                   lineHeight: 1.5 }}>
                       This board keeps the {styleLabel(style.id)} it was started in.
                       The preset has changed since, so a new board will look
@@ -2468,7 +2468,7 @@ export default function Storyboard({
                         </button>
                       ))}
                     </div>
-                    <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5,
+                    <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 5,
                                   lineHeight: 1.5 }}>
                       A reference is drawn once and every panel that needs it is
                       drawn against the same one -- which is what keeps a face and
@@ -2505,7 +2505,7 @@ export default function Storyboard({
                 <div className="field">
                   <label>Story source <em>coverage anchor</em></label>
                   <div style={{ fontSize: 11, lineHeight: 1.55, color: "var(--text-dim)",
-                                background: "var(--bg-sunk)", borderRadius: 5,
+                                background: "var(--bg-sunk)", borderRadius: 4,
                                 padding: "6px 8px" }}>
                     {sel.source || "No exact source quote was returned. Review this panel against the manuscript."}
                   </div>
@@ -2590,7 +2590,7 @@ export default function Storyboard({
                   <Field label={<>The worked-up scene <em>replaces the terse fields</em></>}>
                     <textarea
                       value={sel.description} disabled={selLocked} rows={3}
-                      style={{ fontSize: 11.5, color: "var(--text-dim)" }}
+                      style={{ fontSize: 12, color: "var(--text-dim)" }}
                       onChange={(e) => edit(selIndex, { description: e.target.value })}
                     />
                   </Field>
@@ -2599,7 +2599,7 @@ export default function Storyboard({
                   <div className="field">
                     <label>This scene's place <em>every panel here shares it</em></label>
                     <div style={{ fontSize: 11, lineHeight: 1.55, color: "var(--text-dim)",
-                                  background: "var(--bg-sunk)", borderRadius: 5,
+                                  background: "var(--bg-sunk)", borderRadius: 4,
                                   padding: "6px 8px" }}>
                       {sel.place}
                     </div>
@@ -2655,7 +2655,7 @@ export default function Storyboard({
                 <div className="field">
                   <label>The brief <em>the exact words asked for</em></label>
                   <div style={{ fontSize: 11, lineHeight: 1.6, color: "var(--text-dim)",
-                                background: "var(--bg-sunk)", borderRadius: 5,
+                                background: "var(--bg-sunk)", borderRadius: 4,
                                 padding: "7px 9px", userSelect: "text" }}>
                     {panelPrompt(sel, style, panelWho(sel), notes[selIndex])}
                   </div>
@@ -2693,7 +2693,7 @@ export default function Storyboard({
                     </button>
                     {repairing === selIndex && (
                       <div style={{ marginTop: 8 }}>
-                        <div style={{ fontSize: 10.5, color: "var(--text-faint)",
+                        <div style={{ fontSize: 12, color: "var(--text-faint)",
                                       lineHeight: 1.55, marginBottom: 6 }}>
                           Paint over what is wrong. Only the painted part is
                           drawn again; the rest of the panel is kept exactly as
@@ -2734,7 +2734,7 @@ export default function Storyboard({
                         </button>
                       ))}
                     </div>
-                    <div style={{ fontSize: 10.5, color: "var(--text-faint)",
+                    <div style={{ fontSize: 12, color: "var(--text-faint)",
                                   marginTop: 5, lineHeight: 1.55 }}>
                       Click one to put it back. The current picture takes its
                       place here, so nothing is lost either way.
@@ -2756,7 +2756,7 @@ export default function Storyboard({
       {cast?.first_person && !cast.people.some((p) => p.tier === 1) && (
         <div className="notice warn" style={{ margin: "10px 0" }}>
           <strong>This story is told by someone it never names.</strong>
-          <div style={{ fontSize: 11.5, lineHeight: 1.6, marginTop: 4 }}>
+          <div style={{ fontSize: 12, lineHeight: 1.6, marginTop: 4 }}>
             Give them a name and, if you like, a description. Without one there
             is no cast sheet, and a face drawn from nothing is a different face
             in every panel.
@@ -2782,7 +2782,7 @@ export default function Storyboard({
 
       {cast && (cast.people.length > 0 || cast.places.length > 0) && (
         <div className="board-shelf" ref={castShelf} tabIndex={-1} role="region" aria-label="Cast">
-          <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".13em",
+          <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".13em",
                          textTransform: "uppercase", color: "var(--text-faint)" }}>
             Cast
           </span>

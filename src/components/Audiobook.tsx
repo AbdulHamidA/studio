@@ -193,7 +193,7 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
 
   return <div className="audiobook-workspace">
     <div className="pane">
-      <h2>Audiobook</h2>
+      <h2>Narrate a chapter</h2>
       <p className="muted">Read the original chapter with local neural voices and character delivery. A quick analysis casts who speaks each line; Board shares its characters and adds scene direction when you draw.</p>
       {!library && <div className="notice warn">The encrypted story library is loading.</div>}
       {!!library?.books.length && <>
@@ -241,7 +241,7 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
             placeholder="Warm, intimate storytelling with restrained emotion and natural pauses."
             onChange={(e) => saveSettings({ delivery: e.target.value })} /></label>
         </>}
-        <label>Narrator<span style={{ display: "flex", gap: 6 }}><select value={narrator} disabled={!!job || !voices.length}
+        <label>Narrator<span className="control-row"><select value={narrator} disabled={!!job || !voices.length}
           onChange={(e) => saveSettings({ narrator: e.target.value })}>
           {voiceOptions}
         </select><PreviewButton id="narrator" voice={narrator} character={null} label="Preview narrator voice" /></span></label>
@@ -251,9 +251,9 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
         {/* Who speaks most in this chapter comes first, with their line count;
             those silent here follow, so a long bible does not bury the cast. */}
         {[...book.characters].sort((a, b) => (linesBy[b.id] ?? 0) - (linesBy[a.id] ?? 0)).map((c) => <label key={c.id}>
-          {c.name} <span className="t-meta">· {linesBy[c.id] ? `${linesBy[c.id]} line${linesBy[c.id] === 1 ? "" : "s"}` : "silent in this chapter"}</span>
-          {c.voice && <small className="muted">{c.voice}</small>}
-          <select aria-label={`${c.name} voice`} value={assignedVoices[c.id] ?? ""} disabled={!!job}
+          <span>{c.name} <span className="t-meta">· {linesBy[c.id] ? `${linesBy[c.id]} line${linesBy[c.id] === 1 ? "" : "s"}` : "silent in this chapter"}</span></span>
+          {c.voice && <small className="t-help">{c.voice}</small>}
+          <span className="control-row"><select aria-label={`${c.name} voice`} value={assignedVoices[c.id] ?? ""} disabled={!!job}
             onChange={(e) => {
               const value = e.target.value;
               saveSettings((latest) => {
@@ -265,7 +265,7 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
             <option value="">Use narrator</option>
             {voiceOptions}
           </select>
-          <PreviewButton id={c.id} voice={assignedVoices[c.id] ?? narrator} character={c.id} label={`Preview ${c.name} voice`} />
+          <PreviewButton id={c.id} voice={assignedVoices[c.id] ?? narrator} character={c.id} label={`Preview ${c.name} voice`} /></span>
           {neural && <input aria-label={`${c.name} voice direction`} maxLength={1500}
             value={settings.directions?.[c.id] ?? c.voice} disabled={!!job} placeholder="Quiet, guarded; a slight tremor when afraid"
             onChange={(e) => { const value = e.target.value;
@@ -297,7 +297,7 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
         </div>;
       })}
       {outputs.length > 0 && <p className="t-help">Recordings are in the Vault too, where they can be exported as WAV.</p>}
-      {chapter && <details><summary>Transcript · {chapter.scenes.length} scenes</summary>
+      {chapter && <details><summary>Transcript · {chapter.scenes.length} scene{chapter.scenes.length === 1 ? "" : "s"}</summary>
         <p style={{ whiteSpace: "pre-wrap" }}>{chapter.source}</p></details>}
       {chapter?.scenes.map((scene) => <section key={scene.id} className="notice">
         <h4>{scene.title}</h4><p>{scene.summary}</p>

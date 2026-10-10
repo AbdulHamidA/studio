@@ -34,6 +34,12 @@ const FIT_PILL: Record<Fit, { cls: string; label: string }> = {
   broken: { cls: "bad", label: "Unavailable" },
 };
 
+/** What a task is called on screen; the ids are the engine's. */
+const TASK_LABEL: Record<string, string> = {
+  text_to_image: "Generate", edit: "Edit", upscale: "Upscale", video: "Video",
+  assist: "Writing", speech: "Speech",
+};
+
 export default function Models({
   models, host, onChanged, notify,
 }: {
@@ -143,7 +149,7 @@ export default function Models({
           <span className={"pill " + fit.cls}>
             {m.low_ram_may_help && !m.hopeless ? "Needs Memory saver" : fit.label}
           </span>
-          {m.tasks_str.map((t) => <span className="pill" key={t}>{t}</span>)}
+          {m.tasks_str.map((t) => <span className="pill" key={t}>{TASK_LABEL[t] ?? t}</span>)}
           {/* For a video model this is the fact that decides whether the
               download is worth starting, and it was only ever shown after
               installing the model and selecting it. A model that cannot

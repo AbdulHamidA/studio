@@ -146,7 +146,7 @@ export default function VaultGate({
                       Also unlock with Touch ID
                     </span>
                   </label>
-                  <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5, lineHeight: 1.55 }}>
+                  <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 5, lineHeight: 1.55 }}>
                     Stores a second key in the macOS Keychain, marked
                     &ldquo;this device only&rdquo; so it never syncs to iCloud. Your
                     passphrase keeps working if the fingerprint set changes or you
@@ -199,7 +199,7 @@ export default function VaultGate({
             </button>
           )}
 
-          <div style={{ marginTop: 10, fontSize: 10.5, color: "var(--text-faint)", lineHeight: 1.6 }}>
+          <div style={{ marginTop: 10, fontSize: 12, color: "var(--text-faint)", lineHeight: 1.6 }}>
             Encrypted with ChaCha20-Poly1305. The key is derived with Argon2id
             (64 MiB, 3 passes) and held only in memory while unlocked.
           </div>

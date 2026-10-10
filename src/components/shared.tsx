@@ -73,7 +73,7 @@ export function JobProgress({ p, label }: { p: EngineProgress | null; label: str
       </div>
       {note && (
         <div style={{
-          fontSize: 10.5, marginTop: 3,
+          fontSize: 12, marginTop: 3,
           color: (p.stalled_seconds ?? 0) >= 45 ? "var(--warn)" : "var(--text-faint)",
         }}>
           {note}
@@ -262,7 +262,7 @@ export function ImageDrop({
       {picking && (
         <div style={{
           marginTop: 8, maxHeight: 190, overflowY: "auto",
-          border: "1px solid var(--border)", borderRadius: 8, padding: 8,
+          border: "1px solid var(--border)", borderRadius: 7, padding: 8,
         }}>
           {vaultItems === null ? (
             <div style={{ fontSize: 11, color: "var(--text-faint)" }}>Loading…</div>
@@ -280,7 +280,7 @@ export function ImageDrop({
                   aria-label={it.prompt || it.name}
                   title={it.prompt || it.name}
                   style={{
-                    padding: 0, width: 62, height: 62, borderRadius: 6, overflow: "hidden",
+                    padding: 0, width: 62, height: 62, borderRadius: 7, overflow: "hidden",
                     background: "none", position: "relative",
                     border: images.includes(it.id)
                       ? "2px solid var(--accent)" : "1px solid var(--border)",

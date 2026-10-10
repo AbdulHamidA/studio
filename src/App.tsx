@@ -52,7 +52,8 @@ export default function App() {
   const [vault, setVault] = useState<VaultStatus | null>(null);
   const [models, setModels] = useState<ModelStatus[]>([]);
   const [items, setItems] = useState<VaultItem[]>([]);
-  const [tab, setTab] = useState<Tab>("generate");
+  const [tab, setTab] = useState<Tab>(() => (import.meta.env.MODE === "mock"
+    && new URLSearchParams(location.search).get("tab") as Tab) || "generate");
   useEffect(() => { tabRef.current = tab; }, [tab]);
   const [toast, setToast] = useState<{ msg: string; bad?: boolean } | null>(null);
 
@@ -475,9 +476,9 @@ export default function App() {
               <div className="nav-heading" id={`nav-${heading}`}>{heading}</div>
               {TABS.filter(([id]) => ids.includes(id)).map(([id, glyph, label]) => (
                 <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}
-                  aria-current={tab === id ? "page" : undefined}>
+                  aria-current={tab === id ? "page" : undefined} title={label}>
                   <span className="glyph" aria-hidden="true">{glyph}</span>
-                  {label}
+                  <span className="nav-label">{label}</span>
                   {id === "models" && installedCount > 0 && (
                     <span className="badge" aria-label={`${installedCount} installed`}>{installedCount}</span>
                   )}
@@ -534,7 +535,7 @@ export default function App() {
                   />
                 </div>
               </div>
-              <div style={{ fontSize: 10, color: "var(--text-faint)" }}>
+              <div style={{ fontSize: 11, color: "var(--text-faint)" }}>
                 {host.chip} · {host.total_ram_gib.toFixed(0)} GB
               </div>
             </>

@@ -115,7 +115,7 @@ export default function Activity({ notify }: { notify: (m: string, bad?: boolean
             {showStderr ? "Hide raw output" : "Raw output"}
           </button>
         </div>
-        <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginBottom: 10, lineHeight: 1.6 }}>
+        <div style={{ fontSize: 12, color: "var(--text-faint)", marginBottom: 10, lineHeight: 1.6 }}>
           Models disagree about which settings they accept. Rather than fail a run
           after the weights are already loaded, the engine drops a setting the
           model rejects and says so here — so a result that came out differently

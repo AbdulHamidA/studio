@@ -83,7 +83,7 @@ export default function Loras({
       <h2>Style adapters</h2>
 
       {installed.length === 0 && !adding && (
-        <div style={{ fontSize: 11.5, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 10 }}>
+        <div style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 10 }}>
           None yet. Adapters are usually tens of megabytes and change how a
           model draws — a look, a medium, or a specific task.
         </div>

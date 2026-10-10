@@ -144,7 +144,7 @@ export default function Setup({
             </button>
           )}
           {err && !running && (
-            <div style={{ marginTop: 8, fontSize: 10.5, color: "var(--text-faint)", lineHeight: 1.6 }}>
+            <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-faint)", lineHeight: 1.6 }}>
               &ldquo;Try again&rdquo; resumes and keeps whatever downloaded correctly.
               Reinstalling throws that away, which is what you want if a previous
               attempt left something half-written.

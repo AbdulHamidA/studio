@@ -236,7 +236,7 @@ export default function Upscale({
               {/* Soft on purpose: pieces are still landing, and this should
                   not be mistaken for the finished picture. */}
               <img src={preview} alt="Preview of the upscale filling in" style={{
-                maxWidth: "100%", maxHeight: "58vh", borderRadius: 6, opacity: 0.92,
+                maxWidth: "100%", maxHeight: "58vh", borderRadius: 7, opacity: 0.92,
               }} />
               <div className="t-note" style={{ marginTop: 8 }}>
                 {prog?.message ?? "Working…"}

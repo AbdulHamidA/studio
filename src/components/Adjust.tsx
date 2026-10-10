@@ -275,8 +275,8 @@ export default function Adjust({
       <div
         ref={boxRef}
         style={{
-          position: "relative", overflow: "hidden", borderRadius: 8,
-          border: "1px solid var(--border)", background: "#0b0d12",
+          position: "relative", overflow: "hidden", borderRadius: 7,
+          border: "1px solid var(--border)", background: "var(--bg-sunk)",
           cursor: "crosshair", touchAction: "none",
         }}
         onPointerDown={(e) => {

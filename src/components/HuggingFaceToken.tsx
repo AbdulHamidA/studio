@@ -41,7 +41,7 @@ export default function HuggingFaceToken({
   return (
     <div className="panel">
       <h2>Hugging Face account</h2>
-      <div style={{ fontSize: 11.5, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 12 }}>
+      <div style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.6, marginBottom: 12 }}>
         Optional. Some models are gated: you accept their licence on Hugging
         Face, and downloads then need a token proving it is you. Without one
         those models fail to download.
@@ -64,7 +64,7 @@ export default function HuggingFaceToken({
           placeholder="hf_..."
           onChange={(e) => setToken(e.target.value)}
         />
-        <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 5, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 5, lineHeight: 1.55 }}>
           Create one at huggingface.co/settings/tokens with read access. It is
           stored on this Mac, readable by your account alone, and sent to
           Hugging Face and nowhere else.

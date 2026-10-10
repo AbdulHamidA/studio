@@ -1,6 +1,7 @@
 import type { StoryBook, StoryAnalysisResult } from "./story";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { mockVaultUrl } from "../mock/images";
 import type { AssistResult, CastPlace, EngineProgress, GenerateArgs, HostInfo, Lora, ModelStatus, Orphans, Panel, RepairReport, ResolvedLora, ResolvedModel, SetupProgress, SetupState, StorageInfo, VaultItem, VaultStatus } from "./types";
 
 /** Tauri rejects with our structured error; normalise it to a message. */
@@ -330,7 +331,8 @@ export const onEngineStderr = (cb: (line: string) => void): Promise<UnlistenFn> 
  * bytes back, so nothing is ever written to disk in readable form.
  * Requests are refused while the vault is locked.
  */
-export const vaultUrl = (id: string) => `vault://localhost/${encodeURIComponent(id)}`;
+export const vaultUrl = (id: string) => import.meta.env.MODE === "mock"
+  ? mockVaultUrl(id) : `vault://localhost/${encodeURIComponent(id)}`;
 
 export const newJobId = () =>
   (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2));

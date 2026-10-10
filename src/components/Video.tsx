@@ -479,7 +479,7 @@ export default function Video({
           ) : running && preview ? (
             <div style={{ textAlign: "center" }}>
               <img src={preview} alt="Preview of the clip forming" style={{
-                maxWidth: "100%", maxHeight: "64vh", borderRadius: 6, opacity: 0.92,
+                maxWidth: "100%", maxHeight: "64vh", borderRadius: 7, opacity: 0.92,
               }} />
               <div className="t-note" style={{ marginTop: 8 }}>
                 Taking shape{prog?.step && prog?.total_steps
@@ -497,7 +497,7 @@ export default function Video({
                 loop
                 autoPlay={!running}
                 muted
-                style={{ maxWidth: "100%", maxHeight: "64vh", borderRadius: 6 }}
+                style={{ maxWidth: "100%", maxHeight: "64vh", borderRadius: 7 }}
               />
               {running && (
                 <div className="t-note">

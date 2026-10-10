@@ -628,6 +628,45 @@ export default function Studio({
           </div>
         </div>
 
+        {/* The run button sits right under the settings it runs, before the
+            optional adapters and Advanced panels, so it neither drifts out of
+            view nor floats over panels further down. */}
+        {runnable && (
+          <div className="run-footer">
+            {running ? (
+              <>
+                <JobProgress p={prog} label="Working" />
+                <div className="t-note run-footer-times">
+                  <span>{elapsed}s elapsed</span>
+                  <span>
+                    {elapsed > eta.seconds * 1.4
+                      ? "longer than expected"
+                      : `${humanDuration(eta.seconds)} in total`}
+                  </span>
+                </div>
+                <button className="btn danger full" style={{ marginTop: 8 }} onClick={cancel}>
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <>
+                <button className="btn primary full" onClick={() => void run()}
+                  aria-keyshortcuts="Meta+Enter">
+                  {mode === "edit" ? "Apply the change" : "Make it"}
+                  <span className="kbd" aria-hidden="true">⌘↵</span>
+                </button>
+                <div className="t-note" style={{ marginTop: 6, textAlign: "center" }}>
+                  Takes {humanDuration(eta.seconds)}
+                  {eta.measured
+                    ? ` — measured over ${model?.measured_runs} run${model?.measured_runs === 1 ? "" : "s"} on this Mac`
+                    : " — a rough guess until the first run"}
+                  {eta.loadSeconds > 0 && `, including ~${eta.loadSeconds}s to load the model`}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
         {/* Style is what a picture board is made of, so the adapters that
             carry it are not an advanced setting. This used to sit inside the
             Advanced block, which is off by default -- so they could not be
@@ -773,43 +812,6 @@ export default function Studio({
         )}
         </div>
 
-        {/* The run button stays on screen while the settings above scroll.
-            It used to sit mid-panel, out of view once Advanced was open. */}
-        {runnable && (
-          <div className="run-footer">
-            {running ? (
-              <>
-                <JobProgress p={prog} label="Working" />
-                <div className="t-note run-footer-times">
-                  <span>{elapsed}s elapsed</span>
-                  <span>
-                    {elapsed > eta.seconds * 1.4
-                      ? "longer than expected"
-                      : `${humanDuration(eta.seconds)} in total`}
-                  </span>
-                </div>
-                <button className="btn danger full" style={{ marginTop: 8 }} onClick={cancel}>
-                  Cancel
-                </button>
-              </>
-            ) : (
-              <>
-                <button className="btn primary full" onClick={() => void run()}
-                  aria-keyshortcuts="Meta+Enter">
-                  {mode === "edit" ? "Apply the change" : "Make it"}
-                  <span className="kbd" aria-hidden="true">⌘↵</span>
-                </button>
-                <div className="t-note" style={{ marginTop: 6, textAlign: "center" }}>
-                  Takes {humanDuration(eta.seconds)}
-                  {eta.measured
-                    ? ` — measured over ${model?.measured_runs} run${model?.measured_runs === 1 ? "" : "s"} on this Mac`
-                    : " — a rough guess until the first run"}
-                  {eta.loadSeconds > 0 && `, including ~${eta.loadSeconds}s to load the model`}
-                </div>
-              </>
-            )}
-          </div>
-        )}
       </div>
 
       <div className="creation-canvas">
@@ -831,7 +833,7 @@ export default function Studio({
                 src={preview}
                 alt="Preview of the picture forming"
                 style={{
-                  maxWidth: "100%", maxHeight: "58vh", borderRadius: 6,
+                  maxWidth: "100%", maxHeight: "58vh", borderRadius: 7,
                   imageRendering: "auto", opacity: 0.92,
                 }}
               />

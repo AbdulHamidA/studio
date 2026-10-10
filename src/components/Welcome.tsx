@@ -107,7 +107,7 @@ export default function Welcome({
                 {installed ? "✓" : busy === p.m.id ? "◐" : "○"}
               </span>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12.5 }}>
+                <div style={{ fontSize: 13 }}>
                   {p.gives}
                   {!installed && (
                     <span style={{ color: "var(--text-faint)" }}>
@@ -115,7 +115,7 @@ export default function Welcome({
                     </span>
                   )}
                 </div>
-                <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 1 }}>
+                <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 1 }}>
                   {p.m.name}
                 </div>
               </div>
@@ -144,7 +144,7 @@ export default function Welcome({
           )}
         </div>
 
-        <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 12,
+        <div style={{ fontSize: 12, color: "var(--text-faint)", marginTop: 12,
                       lineHeight: 1.55 }}>
           You can change any of this later in <b>Models</b>, and delete anything
           you stop using. Downloads resume if they are interrupted.
