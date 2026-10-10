@@ -735,7 +735,7 @@ def _load_model(req_id: str, model: str, quantize: int | None,
         adapters["lora_paths"] = [l["path"] for l in loras]
         adapters["lora_scales"] = [float(l.get("scale", 1.0)) for l in loras]
 
-    t0 = time.time()
+    t0 = time.monotonic()
     with _downloads_allowed(req_id):
         loaded = call_tolerant(
             req_id,
@@ -753,7 +753,7 @@ def _load_model(req_id: str, model: str, quantize: int | None,
             {"model_kwargs": {"release_text_encoder": True}} if release_text_encoder else {},
         )
     CACHE.put(key, loaded, model)
-    load_ms = (time.time() - t0) * 1000.0
+    load_ms = (time.monotonic() - t0) * 1000.0
     log(req_id, f"loaded in {load_ms / 1000:.1f}s")
     return loaded, load_ms
 
@@ -5959,7 +5959,7 @@ def _generate_inner(req_id, req, task, loaded, gen_kw, optional_kw, slots,
             model, outpaint_padding, load_ms,
         )
 
-    gen_started = time.time()
+    gen_started = time.monotonic()
     try:
         results = call_tolerant(
             req_id,
@@ -5977,7 +5977,7 @@ def _generate_inner(req_id, req, task, loaded, gen_kw, optional_kw, slots,
             # was requested specifically because memory is scarce.
             CACHE.unload()
 
-    generate_ms = (time.time() - gen_started) * 1000.0
+    generate_ms = (time.monotonic() - gen_started) * 1000.0
 
     if slots:
         out = _seal_results(req_id, results, slots, model, list(seeds))
@@ -6020,7 +6020,7 @@ def _run_expand(req_id, req, loaded, gen_kw, optional_kw, slots, images, seeds,
     kwargs = {k: v for k, v in {**gen_kw, **optional_kw}.items()
               if k not in ("width", "height", "image_path", "image_paths", "mask_path")}
 
-    gen_started = time.time()
+    gen_started = time.monotonic()
     results = call_tolerant(
         req_id,
         run_outpaint,
@@ -6035,7 +6035,7 @@ def _run_expand(req_id, req, loaded, gen_kw, optional_kw, slots, images, seeds,
         # `fill` only applies to outpaint; reframe derives its own canvas.
         {"fill": req["outpaint_fill"]} if req.get("outpaint_fill") else {},
     )
-    generate_ms = (time.time() - gen_started) * 1000.0
+    generate_ms = (time.monotonic() - gen_started) * 1000.0
 
     out = _seal_results(req_id, results, slots, model, list(seeds))
     out["load_ms"] = round(load_ms)
@@ -6098,7 +6098,7 @@ def _load_mflux_model(req_id: str, backend: str, model_path: str | None,
           "message": f"Loading {backend}"})
 
     cls = getattr(importlib.import_module(module_name), class_name)
-    t0 = time.time()
+    t0 = time.monotonic()
     kwargs: dict[str, Any] = {
         "model_config": getattr(ModelConfig, factory)(),
         "quantize": quantize,
@@ -6118,7 +6118,7 @@ def _load_mflux_model(req_id: str, backend: str, model_path: str | None,
         model = call_tolerant(req_id, cls, {}, kwargs)
 
     CACHE.put(key, model, backend)
-    load_ms = (time.time() - t0) * 1000.0
+    load_ms = (time.monotonic() - t0) * 1000.0
     log(req_id, f"loaded in {load_ms / 1000:.1f}s")
     return model, load_ms
 
@@ -6161,7 +6161,7 @@ def _run_mflux(req_id: str, req: dict[str, Any], backend: str) -> dict[str, Any]
 
         preview = _attach_live_preview(req_id, model) if req.get("preview", True) else None
         artifacts = []
-        gen_started = time.time()
+        gen_started = time.monotonic()
         try:
             for seed in seeds:
                 artifacts.append(call_tolerant(
@@ -6172,7 +6172,7 @@ def _run_mflux(req_id: str, req: dict[str, Any], backend: str) -> dict[str, Any]
                 ))
         finally:
             _detach_live_preview(model, preview)
-        generate_ms = (time.time() - gen_started) * 1000.0
+        generate_ms = (time.monotonic() - gen_started) * 1000.0
 
         out = _seal_results(req_id, artifacts, slots, req.get("model", backend), list(seeds))
         out["load_ms"] = round(load_ms)
@@ -6845,12 +6845,12 @@ def op_video(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
         # of the way.
         preview = (_attach_live_preview(req_id, loaded)
                    if req.get("preview", True) else None)
-        gen_started = time.time()
+        gen_started = time.monotonic()
         try:
             video = call_tolerant(req_id, target.generate_video, base, optional)
         finally:
             _detach_live_preview(loaded, preview)
-        generate_ms = (time.time() - gen_started) * 1000.0
+        generate_ms = (time.monotonic() - gen_started) * 1000.0
 
         # `call_tolerant` drops what a route refuses, which is right for a
         # quality knob and wrong for the picture the whole request was about.
