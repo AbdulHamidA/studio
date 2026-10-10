@@ -2947,6 +2947,9 @@ pub struct StoryAnalysis {
     /// default) also directs every beat for drawing.
     #[serde(default)]
     mode: Option<String>,
+    /// The book format the director plans for: manga, webtoon, comic, picture.
+    #[serde(default)]
+    format: Option<String>,
 }
 
 /// The story analyst to use: the one asked for, or the best installed one.
@@ -3008,7 +3011,7 @@ pub async fn analyze_story(
             "story_analyze",
             json!({
                 "source": args.source, "title": args.title, "previous": args.previous,
-                "writer": writer, "mode": mode,
+                "writer": writer, "mode": mode, "format": args.format,
             }),
         )
         .await
@@ -3023,6 +3026,7 @@ pub async fn resume_story(
     book: serde_json::Value,
     chapter_id: String,
     model_id: Option<String>,
+    format: Option<String>,
 ) -> Result<serde_json::Value> {
     let _job = state.job_gate.read().await;
     state.require_unlocked()?;
@@ -3033,7 +3037,7 @@ pub async fn resume_story(
         .request(
             &job_id,
             "story_resume",
-            json!({"book": book, "chapter_id": chapter_id, "writer": writer}),
+            json!({"book": book, "chapter_id": chapter_id, "writer": writer, "format": format}),
         )
         .await
 }
@@ -3249,23 +3253,42 @@ pub async fn character_reference(
     Ok(id)
 }
 
+#[derive(Deserialize)]
+pub struct Direction {
+    book: serde_json::Value,
+    chapter_id: String,
+    #[serde(default)]
+    format: Option<String>,
+    /// The story model refines the director's plan when true; otherwise the
+    /// instant rule-based plan is returned.
+    #[serde(default)]
+    refine: bool,
+    #[serde(default)]
+    model_id: Option<String>,
+}
+
 #[tauri::command]
 pub async fn direct_story(
     app: AppHandle,
     state: State<'_, AppState>,
     job_id: String,
-    book: serde_json::Value,
-    chapter_id: String,
+    args: Direction,
 ) -> Result<serde_json::Value> {
     let _job = state.job_gate.read().await;
     state.require_unlocked()?;
+    let writer = if args.refine {
+        Some(story_writer(&state, args.model_id.as_deref())?)
+    } else {
+        None
+    };
     state
         .engine(&app)
         .await?
         .request(
             &job_id,
             "direct_story",
-            json!({"book": book, "chapter_id": chapter_id}),
+            json!({"book": args.book, "chapter_id": args.chapter_id,
+                   "format": args.format, "writer": writer}),
         )
         .await
 }

@@ -329,6 +329,12 @@ export interface ResolvedLora {
 }
 
 /** One frame of a picture board, as the writer divided the story. */
+/** The book a story is adapted into; the director plans for it. */
+export type BookFormat = "manga" | "webtoon" | "comic" | "picture";
+/** Camera distance, from a whole place to a detail. The three older names
+ *  remain valid for boards made before the director. */
+export type Shot = "EWS" | "WS" | "MS" | "MCU" | "CU" | "ECU" | "INSERT" | "wide" | "medium" | "close-up";
+
 export interface Panel {
   beat_id?: string;
   chapter_id?: string;
@@ -336,7 +342,23 @@ export interface Panel {
   tension?: number;
   mood?: string;
   cast?: { character_id: string; name: string; visual: string; expression: string; body_language: string; appearance?: string }[];
-  shot: "wide" | "medium" | "close-up";
+  shot: Shot;
+  /** Where the camera looks from: eye, high, low, bird, worm, dutch. */
+  angle?: string;
+  /** How the frame is composed: establishing, single, two, group, ots, pov, insert. */
+  framing?: string;
+  /** Who the shot favours. */
+  focus?: string;
+  /** Where each person stands in frame and which way they face, kept per place. */
+  positions?: Record<string, string>;
+  facing?: Record<string, string>;
+  /** Role in the scene: Establisher, Initial, proLongation, Peak, Release. */
+  role?: "E" | "I" | "L" | "P" | "R";
+  transition?: string;
+  /** 1 small, 2 standard, 3 large (a Peak or an establishing panel). */
+  weight?: number;
+  /** The single instant this panel shows. */
+  moment?: string;
   subject: string;
   action: string;
   setting: string;

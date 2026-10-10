@@ -92,7 +92,8 @@ describe("Board shared story workflow", () => {
     const saved = await screen.findByLabelText("Use an analyzed chapter");
     fireEvent.change(saved, { target: { value: "book:chapter" } });
     expect(await screen.findByText("Story direction · The reveal")).toBeTruthy();
-    expect(direct).toHaveBeenCalledWith(expect.objectContaining({ book, chapterId: "chapter" }));
+    expect(direct).toHaveBeenCalledWith(expect.objectContaining({
+      args: expect.objectContaining({ book, chapter_id: "chapter", format: "manga", refine: false }) }));
     expect(save).not.toHaveBeenCalled();
   });
 });

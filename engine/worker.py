@@ -6971,11 +6971,18 @@ def _story_writer(req_id, req, voice):
     return dict(write=write, progress=progress, warn=warn, passage_words=words, passage_units=units)
 
 
-def _story_result(req_id, book, chapter_id):
+def req_format(req):
+    fmt = req.get("format") or "manga"
+    return fmt if fmt in ("manga", "webtoon", "comic", "picture") else "manga"
+
+
+def _story_result(req_id, book, chapter_id, req=None):
     import story as story_model
     chapter = next(c for c in book["chapters"] if c["id"] == chapter_id)
     left = sum(1 for s in chapter["scenes"] if s.get("unanalysed"))
-    return {"book": book, "chapter_id": chapter_id, "panels": story_model.direct(book, chapter_id),
+    import director
+    return {"book": book, "chapter_id": chapter_id,
+            "panels": director.plan(book, chapter_id, req_format(req or {})),
             "stopped": is_cancelled(req_id), "unanalysed": left}
 
 
@@ -6985,7 +6992,7 @@ def op_story_analyze(req_id, req):
     book = story_model.analyze(req.get("source"), previous=req.get("previous"),
                                title=req.get("title", "Chapter"), mode=mode,
                                **_story_writer(req_id, req, mode == "voice"))
-    return _story_result(req_id, book, book["chapters"][-1]["id"])
+    return _story_result(req_id, book, book["chapters"][-1]["id"], req)
 
 
 def op_story_resume(req_id, req):
@@ -6993,7 +7000,35 @@ def op_story_resume(req_id, req):
     chapter = next((c for c in req["book"]["chapters"] if c["id"] == req.get("chapter_id")), None)
     voice = bool(chapter and chapter.get("analysis") == "voice")
     book = story_model.resume(req["book"], req.get("chapter_id"), **_story_writer(req_id, req, voice))
-    return _story_result(req_id, book, req["chapter_id"])
+    return _story_result(req_id, book, req["chapter_id"], req)
+
+
+def op_direct_story(req_id, req):
+    """The shot list for a chapter: the director's rules, refined scene by
+    scene by the story model when one is named. A refinement that fails or is
+    stopped keeps the rules' plan for the scenes it did not reach."""
+    import director
+    fmt = req_format(req)
+    if not req.get("writer"):
+        return {"panels": director.plan(req["book"], req["chapter_id"], fmt)}
+    started = time.monotonic()
+    def progress(i, total):
+        label = f"Directing scene {i + 1} of {total}"
+        if i:
+            label += f" · about {max(1, round((time.monotonic() - started) / i * (total - i) / 60))} min left"
+        emit({"id": req_id, "type": "progress", "phase": "denoise", "progress": i / total, "message": label})
+        where.update(label=label, fraction=i / total)
+    where = {"label": "Directing", "fraction": None}
+    def write(system, user):
+        if is_cancelled(req_id):
+            raise director.Stop()
+        try:
+            return _write(req_id, system, user, max_tokens=1600, temperature=0.4, repo=req.get("writer"),
+                          label=where["label"], fraction=where["fraction"])
+        except Cancelled:
+            raise director.Stop()
+    panels = director.direct(req["book"], req["chapter_id"], fmt, write=write, progress=progress)
+    return {"panels": panels, "stopped": is_cancelled(req_id)}
 
 
 def op_audio_voices(_req_id, _req):
@@ -7136,7 +7171,7 @@ OPS = {
     "ping": op_ping,
     "story_analyze": op_story_analyze,
     "story_resume": op_story_resume,
-    "direct_story": lambda _id, req: {"panels": __import__("story").direct(req["book"], req["chapter_id"])},
+    "direct_story": op_direct_story,
     "audio_voices": op_audio_voices,
     "audiobook": op_audiobook,
     "audio_preview": op_audio_preview,

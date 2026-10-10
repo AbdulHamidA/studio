@@ -2,7 +2,7 @@ import { ANALYST_IDS, castFromBook, unanalysedIn, type CharacterReference, type 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api, errText, isCancelled, isEngineDeath, newJobId, onEngineProgress, vaultUrl,
          type TextOverflow } from "../lib/api";
-import type { Cast, EngineProgress, ModelStatus, Panel } from "../lib/types";
+import type { BookFormat, Cast, EngineProgress, ModelStatus, Panel } from "../lib/types";
 import { ImageDrop, JobProgress } from "./shared";
 import Field from "./Field";
 import MaskCanvas from "./MaskCanvas";
@@ -16,7 +16,7 @@ import { loadBoardDraft, loadSavedBoard, type BoardDraft, type Coverage }
 import { CUSTOM_STYLE, STYLES, drawBatch, isKnownStyle, lockCustomStyle, lockStyle,
          panelPrompt, panelReferences, storyPanelReferences, panelSeed, placeKey, placePrompt, identityPrompt, storyContinuityReference,
          placeSeed, previousPanel, reviveLock, sheetPrompt, styleHasMoved,
-         styleLabel } from "../lib/board";
+         styleLabel, shotClass } from "../lib/board";
 import type { StyleLock } from "../lib/board";
 
 /**
@@ -116,6 +116,9 @@ export default function Storyboard({
   const [appendChapter, setAppendChapter] = useState(false);
   const [continuationBookId, setContinuationBookId] = useState("");
   const [analystId, setAnalystId] = useState("");
+  // What the story becomes; the director plans its panels for this.
+  const [bookFormat, setBookFormatState] = useState<BookFormat>(() => loadPref("boardFormat", "manga"));
+  const setBookFormat = (f: BookFormat) => { setBookFormatState(f); savePref("boardFormat", f); };
   const [characterSheets, setCharacterSheets] = useState<Record<string, string>>({});
   const characterSheetsRef = useRef<Record<string, string>>({});
   const referenceCache = useRef<Record<string, string>>({});
@@ -846,7 +849,7 @@ export default function Storyboard({
       const previous = appendChapter
         ? storyLibrary.books.find((b) => b.id === (continuationBookId || storyLibrary.activeBookId)) ?? null
         : null;
-      const r = await api.analyzeStory(id, story, chapterTitle, previous, analystId || null);
+      const r = await api.analyzeStory(id, story, chapterTitle, previous, analystId || null, "full", bookFormat);
       // Save the shared model before replacing the current Board's work.
       await onStoryAnalyzed(r.book);
       setStoryBook(r.book); storyBookRef.current = r.book; setChapterId(r.chapter_id);
@@ -882,10 +885,33 @@ export default function Storyboard({
    * Finished passages are not sent again, and panels of unchanged beats keep
    * their pictures and notes. Stopping this keeps what it finished, too.
    */
+  /**
+   * Have the story model direct the chapter: within the director's rules it
+   * chooses each panel's camera, angle, framing and what is in frame. Panels
+   * of unchanged beats keep their pictures; Stop keeps the scenes done.
+   */
+  const directWithModel = async () => {
+    if (!storyBook || !chapterId) return;
+    await runJob("dividing", async (id) => {
+      const r = await api.directStory(id, storyBook, chapterId, bookFormat, true, analystId || null);
+      setDoc((d) => replan(d, r.panels));
+      notify(r.stopped ? "Stopped. Scenes directed so far are kept; the rest keep the planned shots."
+        : `Directed ${r.panels.length} panels. Drawn panels of unchanged moments were kept.`);
+    });
+  };
+  const replanFormat = async (f: BookFormat) => {
+    setBookFormat(f);
+    if (!storyBook || !chapterId) return;
+    await runJob("dividing", async (id) => {
+      const r = await api.directStory(id, storyBook, chapterId, f);
+      setDoc((d) => replan(d, r.panels));
+    });
+  };
+
   const continueAnalysis = async () => {
     if (!storyBook || !chapterId) return;
     await runJob("dividing", async (id) => {
-      const r = await api.resumeStory(id, storyBook, chapterId, analystId || null);
+      const r = await api.resumeStory(id, storyBook, chapterId, analystId || null, bookFormat);
       await onStoryAnalyzed(r.book);
       setStoryBook(r.book); storyBookRef.current = r.book;
       setCast(castFromBook(r.book));
@@ -916,7 +942,7 @@ export default function Storyboard({
       return;
     }
     await runJob("dividing", async (id) => {
-      const result = await api.directStory(id, book, cid);
+      const result = await api.directStory(id, book, cid, bookFormat);
       setStory(chapter.source); setChapterTitle(chapter.title);
       setStoryBook(book); storyBookRef.current = book; setChapterId(cid);
       ignoreSavedReferences.current = false; setCast(castFromBook(book));
@@ -1632,7 +1658,8 @@ export default function Storyboard({
                    dialogue: { speaker: string; text: string }[]; scene: number;
                    at: number };
     const pairs = panels
-      .map((p, i) => ({ id: drawn[i], caption: p.caption, shot: p.shot,
+      // The compositor lays out by three classes; a large panel takes a tier.
+      .map((p, i) => ({ id: drawn[i], caption: p.caption, shot: shotClass(p) as Panel["shot"],
                         dialogue: p.dialogue ?? [], scene: p.scene ?? 1,
                         at: i }))
       .filter((x): x is Ready => Boolean(x.id));
@@ -2080,6 +2107,13 @@ export default function Storyboard({
                 </select></label>}
                 <label>Chapter title<input value={chapterTitle} disabled={busy}
                   onChange={(e) => setChapterTitle(e.target.value)} /></label>
+                <label>Make it a<select value={bookFormat} disabled={busy}
+                  onChange={(e) => setBookFormat(e.target.value as BookFormat)}>
+                  <option value="manga">Manga — 4–7 panels a page, reveals on the turn</option>
+                  <option value="webtoon">Webtoon — vertical scroll, space as time</option>
+                  <option value="comic">Comic — about five panels a page</option>
+                  <option value="picture">Picture book — one spread per scene, the full text</option>
+                </select></label>
                 <label>Story analyst<select value={analystId} disabled={busy}
                   onChange={(e) => setAnalystId(e.target.value)}>
                   <option value="">Best installed model for this Mac</option>
@@ -2132,6 +2166,25 @@ export default function Storyboard({
                       || p.caption || `Panel ${i + 1}`}
                   </span>
                 ))}
+                {/* Direction: the format re-plans at once; the story model
+                    then chooses each panel's camera and what is in frame. */}
+                <div className="panel board-direction" style={{ marginTop: 10 }}>
+                  <h2>Direction</h2>
+                  <label>Make it a<select value={bookFormat} disabled={busy}
+                    onChange={(e) => void replanFormat(e.target.value as BookFormat)}>
+                    <option value="manga">Manga</option>
+                    <option value="webtoon">Webtoon</option>
+                    <option value="comic">Comic</option>
+                    <option value="picture">Picture book</option>
+                  </select></label>
+                  <p className="t-help">
+                    Each panel shows its own moment with its own camera: places are
+                    established, people introduced, conversations covered from both
+                    sides, waits shown, and every scene builds to one large Peak.
+                  </p>
+                  <button className="btn small primary" disabled={busy || !models.some((m) => ANALYST_IDS.includes(m.id) && m.installed)}
+                    onClick={() => void directWithModel()}>Direct with the story model</button>
+                </div>
                 {unanalysed > 0 && (
                   <div className="notice warn" style={{ marginTop: 10 }}>
                     <strong>{unanalysed} passage{unanalysed === 1 ? "" : "s"} not analysed yet</strong>
@@ -2497,9 +2550,37 @@ export default function Storyboard({
                 <Field label="Shot">
                   <select value={sel.shot} disabled={selLocked}
                           onChange={(e) => edit(selIndex, { shot: e.target.value as Panel["shot"] })}>
-                    <option value="wide">wide</option>
-                    <option value="medium">medium</option>
-                    <option value="close-up">close-up</option>
+                    <option value="EWS">Extreme wide — the whole place</option>
+                    <option value="WS">Wide — full figures in their setting</option>
+                    <option value="MS">Medium — waist up</option>
+                    <option value="MCU">Medium close-up — head and shoulders</option>
+                    <option value="CU">Close-up — the face</option>
+                    <option value="ECU">Extreme close-up — eyes, hands</option>
+                    <option value="INSERT">Insert — an object or detail</option>
+                    {["wide", "medium", "close-up"].includes(sel.shot) && <option value={sel.shot}>{sel.shot} (older board)</option>}
+                  </select>
+                </Field>
+                <Field label="Camera angle">
+                  <select value={sel.angle ?? "eye"} disabled={selLocked}
+                          onChange={(e) => edit(selIndex, { angle: e.target.value })}>
+                    <option value="eye">Eye level — neutral</option>
+                    <option value="high">High — looking down, vulnerable</option>
+                    <option value="low">Low — looking up, powerful</option>
+                    <option value="bird">Bird's-eye — from above, small in the world</option>
+                    <option value="worm">Worm's-eye — from the ground</option>
+                    <option value="dutch">Dutch — tilted, uneasy</option>
+                  </select>
+                </Field>
+                <Field label="Framing">
+                  <select value={sel.framing ?? "single"} disabled={selLocked}
+                          onChange={(e) => edit(selIndex, { framing: e.target.value })}>
+                    <option value="establishing">Establishing</option>
+                    <option value="single">Single</option>
+                    <option value="two">Two-shot</option>
+                    <option value="group">Group</option>
+                    <option value="ots">Over the shoulder</option>
+                    <option value="pov">Point of view</option>
+                    <option value="insert">Insert</option>
                   </select>
                 </Field>
                 <div className="field">
@@ -2532,7 +2613,9 @@ export default function Storyboard({
                 </Field>
                 <Field label="Action">
                   <input type="text" value={sel.action} disabled={selLocked}
-                         onChange={(e) => edit(selIndex, { action: e.target.value })} />
+                         // The moment is what the prompt draws; an edit to the
+                         // action is an edit to the moment.
+                         onChange={(e) => edit(selIndex, { action: e.target.value, moment: e.target.value })} />
                 </Field>
                 <Field label="Setting">
                   <input type="text" value={sel.setting} disabled={selLocked}

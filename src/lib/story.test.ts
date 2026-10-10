@@ -44,7 +44,7 @@ describe("shared story model", () => {
       cast: [{ character_id: "mira", name: "Mira", visual: "red coat", expression: "grief",
         body_language: "clenched hands" }], mood: "loss", tension: 5 };
     const prompt = panelPrompt(panel, lockStyle("ink"), "ignored legacy binding");
-    for (const text of ["releases the key", "cold blue light", "grief", "clenched hands", "Mood: loss"]) {
+    for (const text of ["releases the key", "cold blue light", "grief", "clenched hands", "The feeling of the moment: loss"]) {
       expect(prompt).toContain(text);
     }
     expect(prompt).not.toContain("ignored legacy binding");

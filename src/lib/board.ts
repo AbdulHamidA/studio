@@ -230,8 +230,56 @@ const SHOT_BACKGROUND: Record<string, string> = {
   "close-up": "plain ground behind the subject, no scenery",
 };
 
+/** How a shot is said to an image model: distance, then what it holds. */
+const SHOT_WORDS: Record<string, string> = {
+  EWS: "extreme wide establishing shot, the whole place in view, any people small within it",
+  WS: "wide shot, full figures head to toe with their surroundings",
+  MS: "medium shot, framed from the waist up",
+  MCU: "medium close-up, head and shoulders",
+  CU: "close-up on the face, filling the frame",
+  ECU: "extreme close-up on a single detail of the face or hands",
+  INSERT: "insert shot, a close view of one object or detail",
+  wide: "wide shot", medium: "medium shot", "close-up": "close-up",
+};
+const ANGLE_WORDS: Record<string, string> = {
+  eye: "camera at eye level",
+  high: "high-angle camera looking down on the subject",
+  low: "low-angle camera looking up at the subject",
+  bird: "bird's-eye view from directly above",
+  worm: "worm's-eye view from the ground looking up",
+  dutch: "dutch angle, the horizon tilted",
+};
+
+/** The three layout classes the page compositor knows, from any shot. A
+ *  large panel takes a whole tier, as an establishing shot or a Peak should. */
+export function shotClass(panel: Pick<Panel, "shot" | "weight">): "wide" | "medium" | "close-up" {
+  if ((panel.weight ?? 2) >= 3) return "wide";
+  if (["EWS", "WS", "wide"].includes(panel.shot)) return "wide";
+  if (["CU", "ECU", "INSERT", "close-up"].includes(panel.shot)) return "close-up";
+  return "medium";
+}
+
+/** The camera, said first: how far, from where, composed how. */
+export function cameraWords(panel: Panel): string[] {
+  const words = [SHOT_WORDS[panel.shot] ?? `${panel.shot} shot`];
+  if (panel.angle && ANGLE_WORDS[panel.angle]) words.push(ANGLE_WORDS[panel.angle]);
+  const cast = panel.cast ?? [];
+  const focus = panel.focus || cast[0]?.name || "";
+  const other = cast.find((a) => a.name !== focus)?.name;
+  if (panel.framing === "ots" && other) words.push(`over-the-shoulder shot from behind ${other}, looking at ${focus}`);
+  else if (panel.framing === "pov") words.push("first-person point of view; the viewer is the narrator, seen at most as their own hands");
+  else if (panel.framing === "two" && cast.length >= 2) words.push(`two-shot of ${cast.map((a) => a.name).join(" and ")}`);
+  else if (panel.framing === "insert" && !cast.length) words.push("no people in frame");
+  for (const [name, where] of Object.entries(panel.positions ?? {})) {
+    if (!cast.some((a) => a.name === name)) continue;
+    const facing = panel.facing?.[name];
+    words.push(`${name} at the ${where} of the frame${facing ? `, facing ${facing}` : ""}`);
+  }
+  return words;
+}
+
 export function shotBackground(shot: string): string {
-  return SHOT_BACKGROUND[shot] ?? SHOT_BACKGROUND.medium;
+  return SHOT_BACKGROUND[shot] ?? SHOT_BACKGROUND[shotClass({ shot: shot as Panel["shot"] })];
 }
 
 /**
@@ -289,13 +337,19 @@ export function panelPrompt(
       actor.body_language && `body language: ${actor.body_language}`].filter(Boolean).join(", "));
     const reference = panel.cast.length > 1
       ? `Character reference figures from left to right: ${panel.cast.map((a) => a.name).join(", ")}` : "";
-    return [style.words, style.framing, `${panel.shot} shot`, reference,
+    // The camera leads: a model weighs what it reads first, and the shot was
+    // a lone "medium shot" lost in the middle, which is why panels came out
+    // alike. The instant comes next -- the director's visual note if it has
+    // one, otherwise the sentence this panel shows -- then who, then where.
+    const instant = panel.moment || panel.action;
+    return [style.words, style.framing, ...cameraWords(panel), panel.description, instant,
+      panel.subject && panel.subject !== panel.focus && `Subject: ${panel.subject}`, reference,
       "Character references establish identity only; follow the current outfit, pose and scene instead of copying reference clothing or background",
       panel.cast.length ? `Only visible people: ${panel.cast.map((a) => a.name).join(", ")}` : "No people visible in frame",
-      ...actors, panel.subject, panel.purpose === "reaction" ? `Reaction immediately after: ${panel.action}` : panel.action, panel.setting,
-      panel.mood && `Mood: ${panel.mood}`, panel.tension && `Tension ${panel.tension} of 5`,
+      ...actors, panel.setting && `Setting: ${panel.setting}`,
       panel.location_state && `Current location state: ${panel.location_state}`,
-      panel.description, shotBackground(panel.shot), note]
+      panel.mood && `The feeling of the moment: ${panel.mood}`,
+      shotBackground(panel.shot), note]
       .filter(Boolean).map((part) => String(part).trim().replace(/[.,;:]+$/, "")).join(". ") + ".";
   }
   const cast = character.trim();
@@ -511,7 +565,7 @@ export function panelReferences(
   // And still not for a close-up, for the older reason that has not changed:
   // at that distance the room is not in frame at all, so a picture of it pulls
   // the shot wider to fit the furniture in.
-  if (place && !panel.character_in_frame && panel.shot !== "close-up") {
+  if (place && !panel.character_in_frame && shotClass(panel) !== "close-up") {
     refs.push(place);
   }
   // Nothing, when there is nothing that belongs. This used to fall back to the

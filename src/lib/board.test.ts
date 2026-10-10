@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CHAIN_LIMIT, compositions, drawBatch, continuesFrom, CUSTOM_STYLE, isKnownStyle, lockCustomStyle, lockStyle,
+import { cameraWords, shotClass, CHAIN_LIMIT, compositions, drawBatch, continuesFrom, CUSTOM_STYLE, isKnownStyle, lockCustomStyle, lockStyle,
          panelPrompt, previousPanel,
          panelReferences, panelSeed, placeKey, placePrompt, placeSeed,
          reviveLock, sheetPrompt, shotBackground, styleHasMoved, styleWords,
@@ -832,5 +832,31 @@ describe("drawBatch", () => {
       () => stop, died);
     expect(end.end).toBe("stopped");
     expect(tried).toEqual([0]);
+  });
+});
+
+
+describe("director's camera in the prompt", () => {
+  const cast = [{ character_id: "a", name: "Agnes", visual: "", expression: "", body_language: "" },
+                { character_id: "n", name: "Narrator", visual: "", expression: "", body_language: "" }];
+  it("leads with distance, angle, framing and blocking", () => {
+    const words = cameraWords(panel({ shot: "MCU", angle: "low", framing: "ots", focus: "Agnes", cast,
+      positions: { Agnes: "left third", Narrator: "right third" }, facing: { Agnes: "right", Narrator: "left" } }));
+    expect(words[0]).toMatch(/medium close-up/);
+    expect(words).toContain("low-angle camera looking up at the subject");
+    expect(words).toContain("over-the-shoulder shot from behind Narrator, looking at Agnes");
+    expect(words).toContain("Agnes at the left third of the frame, facing right");
+  });
+  it("puts the camera before the moment in a directed panel's prompt", () => {
+    const prompt = panelPrompt(panel({ shot: "EWS", angle: "bird", framing: "establishing", cast: [],
+      moment: "The harbour under low cloud" }), INK, "");
+    expect(prompt.indexOf("extreme wide establishing shot")).toBeLessThan(prompt.indexOf("The harbour under low cloud"));
+    expect(prompt).toContain("bird's-eye view");
+  });
+  it("lays a Peak or an establishing shot out as a full tier", () => {
+    expect(shotClass({ shot: "CU", weight: 3 })).toBe("wide");
+    expect(shotClass({ shot: "INSERT", weight: 1 })).toBe("close-up");
+    expect(shotClass({ shot: "MCU" })).toBe("medium");
+    expect(shotClass({ shot: "wide" })).toBe("wide");
   });
 });

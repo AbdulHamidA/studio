@@ -2,6 +2,7 @@ import type { StoryBook, StoryAnalysisResult } from "./story";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { mockVaultUrl } from "../mock/images";
+import type { BookFormat } from "./types";
 import type { AssistResult, CastPlace, EngineProgress, GenerateArgs, HostInfo, Lora, ModelStatus, Orphans, Panel, RepairReport, ResolvedLora, ResolvedModel, SetupProgress, SetupState, StorageInfo, VaultItem, VaultStatus } from "./types";
 
 /** Tauri rejects with our structured error; normalise it to a message. */
@@ -99,13 +100,17 @@ export const api = {
   storyLibrarySet: (value: string) => invoke<void>("story_library_set", { value }),
   analyzeStory: (jobId: string, source: string, title: string,
                  previous: StoryBook | null = null, modelId: string | null = null,
-                 mode: "full" | "voice" = "full") =>
+                 mode: "full" | "voice" = "full", format: BookFormat = "manga") =>
     invoke<StoryAnalysisResult>("analyze_story", { jobId,
-      args: { source, title, previous, model_id: modelId, mode } }),
-  resumeStory: (jobId: string, book: StoryBook, chapterId: string, modelId: string | null = null) =>
-    invoke<StoryAnalysisResult>("resume_story", { jobId, book, chapterId, modelId }),
-  directStory: (jobId: string, book: StoryBook, chapterId: string) =>
-    invoke<{ panels: Panel[] }>("direct_story", { jobId, book, chapterId }),
+      args: { source, title, previous, model_id: modelId, mode, format } }),
+  resumeStory: (jobId: string, book: StoryBook, chapterId: string, modelId: string | null = null,
+                format: BookFormat = "manga") =>
+    invoke<StoryAnalysisResult>("resume_story", { jobId, book, chapterId, modelId, format }),
+  /** The director's shot list; `refine` has the story model improve it scene by scene. */
+  directStory: (jobId: string, book: StoryBook, chapterId: string, format: BookFormat = "manga",
+                refine = false, modelId: string | null = null) =>
+    invoke<{ panels: Panel[]; stopped?: boolean }>("direct_story", { jobId,
+      args: { book, chapter_id: chapterId, format, refine, model_id: modelId } }),
   audioPreview: (args: { model_id: string; voice: string; text: string; language?: string;
                          delivery?: string; direction?: string; rate: number }) =>
     invoke<{ wav_base64: string }>("audio_preview", { args }),
