@@ -1311,6 +1311,15 @@ fn memory_verdict(
     }
 }
 
+/// Why a clip was refused for memory, and what to do about it.
+fn video_over_budget(name: &str, peak_gib: f32, usable_gib: f32) -> String {
+    format!(
+        "{name} peaks around {peak_gib:.1} GiB but this Mac can offer about {usable_gib:.1} GiB, \
+         so the clip was not started. Close other apps to free memory, or choose a smaller \
+         video model."
+    )
+}
+
 async fn run_job(
     app: &AppHandle,
     state: &AppState,
@@ -1822,11 +1831,30 @@ pub async fn generate_video(
             entry.name
         )));
     }
-    if entry.hopeless {
-        return Err(AppError::msg(format!(
-            "{} needs more memory than this Mac has.",
-            entry.name
-        )));
+    // The same refusal as pictures, with no bypass: clips have no low-RAM
+    // switch, so nothing the request could ask for would close the gap, and
+    // starting anyway is how the engine gets killed for memory part-way in.
+    match memory_verdict(
+        entry.peak_gib,
+        host.usable_ram_gib,
+        entry.hopeless,
+        false,
+        false,
+    ) {
+        MemoryVerdict::Fits => {}
+        MemoryVerdict::Hopeless => {
+            return Err(AppError::msg(format!(
+                "{} needs more memory than this Mac has.",
+                entry.name
+            )));
+        }
+        MemoryVerdict::OverBudget => {
+            return Err(AppError::msg(video_over_budget(
+                &entry.name,
+                entry.peak_gib,
+                host.usable_ram_gib,
+            )));
+        }
     }
 
     let (slot_id, file_id, key, path) = state.vault.reserve_slot()?;
@@ -2061,9 +2089,25 @@ mod tests {
     use super::{
         app_owned_model_entries, begin_runtime_repair, dest_holds_other_files,
         foreign_model_entries, memory_verdict, normalize_repo, replace_dead_engine,
-        sweep_orphans_gated, AppPaths, AppState, MemoryVerdict, Vault, MOVE_STAGING_PREFIX,
+        sweep_orphans_gated, video_over_budget, AppPaths, AppState, MemoryVerdict, Vault,
+        MOVE_STAGING_PREFIX,
     };
     use std::sync::Arc;
+
+    /// Clips ran with no memory check beyond the weights alone, so a model
+    /// whose peak did not fit was started and killed by the OS part-way in.
+    #[test]
+    fn video_is_refused_when_its_peak_does_not_fit() {
+        // A clip has no low-RAM switch, so it is judged with no bypass.
+        assert_eq!(
+            memory_verdict(20.0, 12.0, false, false, false),
+            MemoryVerdict::OverBudget
+        );
+        let message = video_over_budget("Wan", 20.0, 12.0);
+        assert!(message.contains("20.0 GiB"), "{message}");
+        assert!(message.contains("not started"), "{message}");
+        assert!(!message.contains("low-RAM"), "{message}");
+    }
 
     /// The over-budget bypass used to be honoured with low-RAM mode off, which
     /// ran a model at full peak on a Mac that could not hold it.
