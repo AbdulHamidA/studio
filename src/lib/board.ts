@@ -469,6 +469,19 @@ export const CHAIN_LIMIT = 4;
  * one that survives. Identity wins, because a character who changes face
  * between panels is the failure everyone sees first.
  */
+export function storyPanelReferences(
+  panel: Panel, identity: string | null, continuation: string | null,
+  place: string | null, budget: number
+): string[] {
+  // The sheet holds who this is; the previous frame holds what they wear and
+  // where the light is. With room for both, both go -- the sheet first so it
+  // survives trimming. With room for one, the continuation is kept (outfits
+  // reset without it) and the chain re-anchors to the sheet on its interval.
+  return budget > 1
+    ? panelReferences(panel, identity, place, continuation, budget)
+    : panelReferences(panel, continuation ?? identity, place, null, budget);
+}
+
 export function panelReferences(
   panel: Panel, sheet: string | null, place: string | null,
   previous: string | null = null, budget = 3
@@ -518,13 +531,20 @@ plain background, simple neutral neckline. No full-body outfit, props, scenery o
 ${character.trim()}.`;
 }
 
-/** Structured continuity requires the exact visible cast and current state. */
+/**
+ * Structured continuity requires the exact visible cast and current state.
+ *
+ * Bounded like `previousPanel`: it used to search the whole chapter, so every
+ * panel of a scene was a copy of a copy of its first frame and the face
+ * drifted further with each one. On the interval boundary nothing is returned
+ * and the panel goes back to the character sheet alone.
+ */
 export function storyContinuityReference(index: number, panels: Panel[], drawn: (string | null)[]): string | null {
   const next = panels[index];
-  if (!next?.cast) return null;
+  if (!next?.cast || index % CHAIN_LIMIT === 0) return null;
   const signature = (p: Panel) => JSON.stringify((p.cast ?? []).map((a) =>
     [a.character_id, a.appearance ?? ""]).sort((a, b) => a[0].localeCompare(b[0])));
-  for (let i = index - 1; i >= 0; i--) {
+  for (let i = index - 1; i >= 0 && index - i <= CHAIN_LIMIT; i--) {
     const prev = panels[i];
     if (prev.chapter_id !== next.chapter_id) break;
     if (placeKey(prev) === placeKey(next) && signature(prev) === signature(next)

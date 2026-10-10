@@ -13,7 +13,7 @@ import { anchorOverflow, artOf, fromArrays, identify, setArt, toArrays,
 import { loadBoardDraft, loadSavedBoard, type BoardDraft, type Coverage }
   from "../lib/boardDraft";
 import { CUSTOM_STYLE, STYLES, isKnownStyle, lockCustomStyle, lockStyle,
-         panelPrompt, panelReferences, panelSeed, placeKey, placePrompt, identityPrompt, storyContinuityReference,
+         panelPrompt, panelReferences, storyPanelReferences, panelSeed, placeKey, placePrompt, identityPrompt, storyContinuityReference,
          placeSeed, previousPanel, reviveLock, sheetPrompt, styleHasMoved,
          styleLabel } from "../lib/board";
 import type { StyleLock } from "../lib/board";
@@ -1124,10 +1124,11 @@ export default function Storyboard({
       if (stop.current) return false;
       const continuation = panels[i].cast !== undefined
         ? storyContinuityReference(i, panels, drawnRef.current) : null;
-      const refs = panelReferences(
-        panels[i], continuation ?? identity, places[placeKey(panels[i])] ?? null,
-        panels[i].cast !== undefined ? null : previousPanel(i, panels, drawnRef.current),
-        model.max_edit_images || 1);
+      const refs = panels[i].cast !== undefined
+        ? storyPanelReferences(panels[i], identity, continuation,
+            places[placeKey(panels[i])] ?? null, model.max_edit_images || 1)
+        : panelReferences(panels[i], identity, places[placeKey(panels[i])] ?? null,
+            previousPanel(i, panels, drawnRef.current), model.max_edit_images || 1);
       const params = {
         job_id: id, model_id: model.id,
         prompt: panelPrompt({ ...panels[i], cast: panels[i].cast?.map((actor) => ({
