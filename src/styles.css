@@ -974,3 +974,4 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
   padding: var(--sp-2) var(--sp-4); flex: 0 0 auto;
 }
 .now-playing > :first-child { flex: 1; min-width: 0; }
+.field-error { font-size: var(--fs-small); color: var(--bad); margin-top: var(--sp-1); }
