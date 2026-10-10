@@ -101,6 +101,35 @@ export function fromArrays(
   return { panels: identified, art };
 }
 
+/**
+ * A new panel plan for the same chapter, keeping the work on panels it shares.
+ *
+ * Continuing a stopped analysis re-plans the chapter, but the passages that
+ * were already analysed come back with the same beats. A panel is the same
+ * panel when it is the same frame of the same beat; it keeps its identity and
+ * so its picture, notes and variants. Panels of newly analysed passages start
+ * empty, as they must -- their briefs did not exist before.
+ */
+export function replan(doc: BoardDoc, panels: Panel[]): BoardDoc {
+  const key = (list: Panel[]) => {
+    const seen: Record<string, number> = {};
+    return list.map((p) => {
+      const beat = p.beat_id ?? "";
+      seen[beat] = (seen[beat] ?? 0) + 1;
+      return beat ? `${beat}#${seen[beat]}` : null;
+    });
+  };
+  const before = new Map<string, IdentifiedPanel>();
+  key(doc.panels).forEach((k, i) => { if (k) before.set(k, doc.panels[i]); });
+  const next = identify(key(panels).map((k, i) => {
+    const old = k ? before.get(k) : undefined;
+    return old ? { ...panels[i], id: old.id } : panels[i];
+  }));
+  const art: Record<string, PanelArt> = {};
+  for (const p of next) if (doc.art[p.id]) art[p.id] = doc.art[p.id];
+  return { panels: next, art };
+}
+
 /** The art for one panel, never undefined. */
 export function artOf(doc: BoardDoc, id: string): PanelArt {
   return doc.art[id] ?? EMPTY_ART;

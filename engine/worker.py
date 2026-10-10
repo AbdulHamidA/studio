@@ -6923,10 +6923,12 @@ def op_set_memory(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
 
 
 
-def op_story_analyze(req_id, req):
+def _story_writer(req_id, req, voice):
+    """Writer, progress and passage size shared by analysis and resume.
+
+    Stop is turned into `story.Stop`, so the finished passages come back as a
+    result instead of the whole analysis being lost."""
     import story as story_model
-    mode = req.get("mode") or "full"
-    voice = mode == "voice"
     small = req.get("writer", WRITER_REPO) == WRITER_REPO
     # Token events from the writer carry the scene label and fraction too;
     # otherwise they replace "scene i of N" within a fifth of a second.
@@ -6934,7 +6936,7 @@ def op_story_analyze(req_id, req):
     started = time.monotonic()
     def progress(i, total):
         if is_cancelled(req_id):
-            raise Cancelled()
+            raise story_model.Stop()
         label = f"{'Casting voices in' if voice else 'Understanding'} scene {i + 1} of {total}"
         if i:
             left = (time.monotonic() - started) / i * (total - i)
@@ -6944,27 +6946,49 @@ def op_story_analyze(req_id, req):
               "progress": where["fraction"], "message": where["label"]})
     def write(system, user):
         # A repair carries the failed reply as well; a reply cut off at the
-        # first budget would be cut off again at the same one.
+        # first budget would be cut off again at the same one. A compact reply
+        # runs to a few hundred tokens; the ceiling only stops a writer that
+        # has started repeating itself, which at 3,200 tokens cost minutes.
         repair = "Your previous reply failed validation" in user
-        # A compact reply runs to a few hundred tokens; the ceiling only stops
-        # a writer that has started repeating itself, which at 3,200 tokens
-        # cost minutes per scene.
         budget = (1000, 1600) if voice else (1800, 2700)
-        return _write(req_id, system, user, max_tokens=budget[repair],
-                      temperature=0.2, repo=req.get("writer"), label=where["label"],
-                      fraction=where["fraction"])
+        try:
+            return _write(req_id, system, user, max_tokens=budget[repair],
+                          temperature=0.2, repo=req.get("writer"), label=where["label"],
+                          fraction=where["fraction"])
+        except Cancelled:
+            raise story_model.Stop()
     def warn(message):
         log(req_id, message, "warn")
     # A voice reply is a few tokens per quote, so a passage can be far longer
     # than one whose every beat is directed for drawing. Compact replies let
     # the small writer take twice the four sentences it once could.
     words, units = (700, 60) if voice else (450, 8) if small else (600, 12)
-    book = story_model.analyze(req.get("source"), write,
-        previous=req.get("previous"), title=req.get("title", "Chapter"), progress=progress,
-        passage_words=words, passage_units=units, warn=warn, mode=mode)
-    chapter = book["chapters"][-1]
-    panels = story_model.direct(book, chapter["id"])
-    return {"book": book, "chapter_id": chapter["id"], "panels": panels}
+    return dict(write=write, progress=progress, warn=warn, passage_words=words, passage_units=units)
+
+
+def _story_result(req_id, book, chapter_id):
+    import story as story_model
+    chapter = next(c for c in book["chapters"] if c["id"] == chapter_id)
+    left = sum(1 for s in chapter["scenes"] if s.get("unanalysed"))
+    return {"book": book, "chapter_id": chapter_id, "panels": story_model.direct(book, chapter_id),
+            "stopped": is_cancelled(req_id), "unanalysed": left}
+
+
+def op_story_analyze(req_id, req):
+    import story as story_model
+    mode = req.get("mode") or "full"
+    book = story_model.analyze(req.get("source"), previous=req.get("previous"),
+                               title=req.get("title", "Chapter"), mode=mode,
+                               **_story_writer(req_id, req, mode == "voice"))
+    return _story_result(req_id, book, book["chapters"][-1]["id"])
+
+
+def op_story_resume(req_id, req):
+    import story as story_model
+    chapter = next((c for c in req["book"]["chapters"] if c["id"] == req.get("chapter_id")), None)
+    voice = bool(chapter and chapter.get("analysis") == "voice")
+    book = story_model.resume(req["book"], req.get("chapter_id"), **_story_writer(req_id, req, voice))
+    return _story_result(req_id, book, req["chapter_id"])
 
 
 def op_audio_voices(_req_id, _req):
@@ -7036,6 +7060,7 @@ def op_character_reference(req_id, req):
 OPS = {
     "ping": op_ping,
     "story_analyze": op_story_analyze,
+    "story_resume": op_story_resume,
     "direct_story": lambda _id, req: {"panels": __import__("story").direct(req["book"], req["chapter_id"])},
     "audio_voices": op_audio_voices,
     "audiobook": op_audiobook,

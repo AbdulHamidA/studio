@@ -42,6 +42,8 @@ export interface StoryScene {
   start: number;
   end: number;
   beats: StoryBeat[];
+  /** Left by a stopped or failed analysis; "Continue analysis" picks it up. */
+  unanalysed?: boolean;
 }
 export interface StoryChapter {
   id: string;
@@ -89,6 +91,12 @@ export interface StoryAnalysisResult {
   book: StoryBook;
   chapter_id: string;
   panels: Panel[];
+  /** Stop was pressed: finished passages are kept, the rest left unanalysed. */
+  stopped?: boolean;
+  unanalysed?: number;
+}
+export function unanalysedIn(book: StoryBook | null, chapterId: string | null): number {
+  return book?.chapters.find((c) => c.id === chapterId)?.scenes.filter((s) => s.unanalysed).length ?? 0;
 }
 export function keepBook(library: StoryLibrary, book: StoryBook): StoryLibrary {
   const existing = library.books.find((b) => b.id === book.id);

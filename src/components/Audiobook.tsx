@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errText, isCancelled, newJobId, onEngineProgress, vaultUrl } from "../lib/api";
-import { ANALYST_IDS, SPEECH_MODEL_ID, keepBook, type AudioSettings, type StoryLibrary } from "../lib/story";
+import { ANALYST_IDS, SPEECH_MODEL_ID, keepBook, unanalysedIn, type AudioSettings, type StoryLibrary } from "../lib/story";
 import type { EngineProgress, ModelStatus } from "../lib/types";
 import { JobProgress } from "./shared";
 
@@ -75,6 +75,13 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
     setBookId(result.book.id); setChapterId(result.chapter_id); setSource(""); setAppend(false);
     notify("Voices cast and saved. Board shares this character bible and adds its scene direction when you draw.");
   });
+  // Stop keeps the passages already cast; this casts only the rest.
+  const resume = () => perform(async (id) => {
+    if (!book || !chapter) return;
+    const result = await api.resumeStory(id, book, chapter.id);
+    await onLibraryChange((current) => keepBook(current, result.book));
+    notify(result.unanalysed ? `${result.unanalysed} passages still to cast; the rest is saved.` : "Every passage is cast.");
+  });
   const narrate = () => perform(async (id) => {
     if (!book || !chapter) return;
     const audio = await api.generateAudiobook(id, book, chapter.id, narrator, assignedVoices, settings.rate, {
@@ -125,6 +132,10 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
           onClick={() => void analyze()}>Analyze chapter</button>
         {!writerReady && <p className="notice warn">Install a story analyst or the prompt writer in Models to analyze prose.</p>}
       </details>
+      {book && chapter && unanalysedIn(book, chapter.id) > 0 && <div className="notice warn">
+        {unanalysedIn(book, chapter.id)} passages are not cast yet and would be read by the narrator.
+        <button className="btn small" disabled={!!job || !writerReady} onClick={() => void resume()}>Continue analysis</button>
+      </div>}
       {book && chapter && <>
         <label>Speech engine<select value={speechModel} disabled={!!job}
           onChange={(e) => saveSettings({ model_id: e.target.value, narrator: "", voices: {} })}>

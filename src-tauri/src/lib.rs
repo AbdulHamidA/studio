@@ -232,6 +232,7 @@ pub fn run() {
             commands::story_library_get,
             commands::story_library_set,
             commands::analyze_story,
+            commands::resume_story,
             commands::direct_story,
             commands::audio_voices,
             commands::generate_audiobook,

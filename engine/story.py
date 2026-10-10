@@ -546,6 +546,47 @@ def _unanalysed_scene(group, scene_id, number):
             "start": group[0]["start"], "end": group[-1]["end"], "beats": beats, "unanalysed": True}
 
 
+class Stop(Exception):
+    """Raised by a writer or progress callback to end analysis early.
+
+    Stopping used to throw away every finished passage, so an hour of
+    analysis was all or nothing. The finished passages are kept and the rest
+    are left unanalysed, for `resume` to pick up."""
+
+
+def _analyze_passage(group, number, scene_id, characters, continuity, write, mode, warn, may_refuse):
+    voice = mode == "voice"
+    prompt = (voice_instruction(group, characters) if voice
+              else compact_instruction(group, characters, continuity))
+    for attempt in range(2):
+        raw = write(VOICE_SYSTEM if voice else COMPACT_SYSTEM, prompt)
+        try:
+            reply = (voice_scene_reply(raw, group, number, characters) if voice
+                     else compact_scene_reply(raw, group, continuity, characters))
+            return parse_scene(reply, group, characters, scene_id)
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            if attempt:
+                # A writer that cannot produce any valid scene is broken or
+                # unsuitable; refuse rather than return a chapter of stubs.
+                if may_refuse:
+                    raise ValueError(f"Scene {number} could not be validated: {exc}") from exc
+                warn(f"Scene {number} could not be validated ({exc}); kept its text unanalysed")
+                return _unanalysed_scene(group, scene_id, number), characters
+            prompt += (f"\nYour previous reply failed validation: {exc}."
+                       "\nPrevious reply to repair:\n" + raw[:20000]
+                       + "\nReturn corrected complete JSON, preserving the full source coverage. "
+                       "Every visible character and speaker must refer to an ID declared in "
+                       "the character bible or your characters array. Use null for uncertain speakers.")
+
+
+def _continuity(chapters, scenes=()):
+    state = {"characters": {}, "locations": {}}
+    for scene in [s for c in chapters for s in c["scenes"]] + list(scenes):
+        for beat in scene["beats"]:
+            _remember_state(state, beat)
+    return state
+
+
 def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: None,
             passage_words=450, passage_units=8, warn=lambda _: None, mode="full"):
     """`mode="voice"` asks only who speaks each quote and the mood: enough for
@@ -562,44 +603,74 @@ def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: N
     chapter_id = str(uuid.uuid4())
     groups = passages(source, max_words=passage_words, max_units=passage_units)
     scenes = []
-    continuity = {"characters": {}, "locations": {}}
-    for old_chapter in book["chapters"]:
-        for old_scene in old_chapter["scenes"]:
-            for old_beat in old_scene["beats"]:
-                _remember_state(continuity, old_beat)
+    continuity = _continuity(book["chapters"])
     for i, group in enumerate(groups):
-        progress(i, len(groups))
-        voice = mode == "voice"
-        prompt = (voice_instruction(group, book["characters"]) if voice
-                  else compact_instruction(group, book["characters"], continuity))
-        for attempt in range(2):
-            raw = write(VOICE_SYSTEM if voice else COMPACT_SYSTEM, prompt)
-            try:
-                reply = voice_scene_reply(raw, group, i + 1, book["characters"]) if voice else compact_scene_reply(raw, group, continuity, book["characters"])
-                scene, characters = parse_scene(reply, group, book["characters"], f"{chapter_id}-s{i + 1}")
-                break
-            except (ValueError, TypeError, KeyError, AttributeError) as exc:
-                if attempt:
-                    # A writer that cannot produce any valid scene is broken or
-                    # unsuitable; refuse rather than return a chapter of stubs.
-                    if not any(not s.get("unanalysed") for s in scenes) and i >= min(2, len(groups) - 1):
-                        raise ValueError(f"Scene {i + 1} could not be validated: {exc}") from exc
-                    warn(f"Scene {i + 1} could not be validated ({exc}); kept its text unanalysed")
-                    scene, characters = _unanalysed_scene(group, f"{chapter_id}-s{i + 1}", i + 1), book["characters"]
-                    break
-                prompt += (f"\nYour previous reply failed validation: {exc}."
-                           "\nPrevious reply to repair:\n" + raw[:20000]
-                           + "\nReturn corrected complete JSON, preserving the full source coverage. "
-                           "Every visible character and speaker must refer to an ID declared in "
-                           "the character bible or your characters array. Use null for uncertain speakers.")
+        try:
+            progress(i, len(groups))
+            refuse = not any(not s.get("unanalysed") for s in scenes) and i >= min(2, len(groups) - 1)
+            scene, book["characters"] = _analyze_passage(
+                group, i + 1, f"{chapter_id}-s{i + 1}", book["characters"], continuity,
+                write, mode, warn, refuse)
+        except Stop:
+            scenes.extend(_unanalysed_scene(g, f"{chapter_id}-s{j + 1}", j + 1)
+                          for j, g in enumerate(groups[i:], i))
+            break
         scenes.append(scene)
         for beat in scene["beats"]:
             _remember_state(continuity, beat)
-        book["characters"] = characters
     chapter = {"id": chapter_id, "title": title.strip() or "Chapter",
                "source": source, "source_hash": hashlib.sha256(source.encode()).hexdigest(),
                "scenes": scenes, **({"analysis": "voice"} if mode == "voice" else {})}
     book["chapters"].append(chapter)
+    validate_book(book)
+    return book
+
+
+def resume(book, chapter_id, write, progress=lambda *_: None, passage_words=450,
+           passage_units=8, warn=lambda _: None):
+    """Analyse only the passages a stopped or failed run left unanalysed.
+
+    Each is re-divided and analysed with the bible and continuity of
+    everything before it; finished passages are never sent again."""
+    book = copy.deepcopy(book)
+    validate_book(book)
+    chapter = next((c for c in book["chapters"] if c["id"] == chapter_id), None)
+    if not chapter:
+        raise ValueError("choose an analyzed chapter")
+    mode = chapter.get("analysis") or "full"
+    before = book["chapters"][:book["chapters"].index(chapter)]
+    plan = []
+    for k, scene in enumerate(chapter["scenes"]):
+        if scene.get("unanalysed"):
+            groups = passages(chapter["source"][scene["start"]:scene["end"]],
+                              max_words=passage_words, max_units=passage_units)
+            for group in groups:
+                for unit in group:
+                    unit["start"] += scene["start"]
+                    unit["end"] += scene["start"]
+            plan.append((k, groups))
+    total, done, stopped, rebuilt = sum(len(g) for _, g in plan), 0, False, []
+    replaced = dict((k, []) for k, _ in plan)
+    for k, groups in plan:
+        for group in groups:
+            scene_id = f"{chapter_id}-s{uuid.uuid4().hex[:8]}"
+            if not stopped:
+                try:
+                    progress(done, total)
+                    earlier = [done_scene for j, old in enumerate(chapter["scenes"][:k])
+                               for done_scene in replaced.get(j, [old])]
+                    scene, book["characters"] = _analyze_passage(
+                        group, k + 1, scene_id, book["characters"],
+                        _continuity(before, earlier + replaced[k]), write, mode, warn, False)
+                except Stop:
+                    stopped = True
+            if stopped:
+                scene = _unanalysed_scene(group, scene_id, k + 1)
+            replaced[k].append(scene)
+            done += 1
+    for k, scene in enumerate(chapter["scenes"]):
+        rebuilt.extend(replaced.get(k, [scene]))
+    chapter["scenes"] = rebuilt
     validate_book(book)
     return book
 

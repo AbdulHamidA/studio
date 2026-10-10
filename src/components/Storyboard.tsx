@@ -1,4 +1,4 @@
-import { ANALYST_IDS, castFromBook, type CharacterReference, type StoryBook, type StoryLibrary } from "../lib/story";
+import { ANALYST_IDS, castFromBook, unanalysedIn, type CharacterReference, type StoryBook, type StoryLibrary } from "../lib/story";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api, errText, isCancelled, isEngineDeath, newJobId, onEngineProgress, vaultUrl,
          type TextOverflow } from "../lib/api";
@@ -9,7 +9,7 @@ import { loadPref, savePref } from "../lib/prefs";
 import { anchorOverflow, artOf, fromArrays, identify, setArt, toArrays,
          edit as editPanel, insert as insertPanel, merge as mergePanelIn,
          move as movePanelIn, remove as removePanel, split as splitPanelIn,
-         type BoardDoc, type PanelArt } from "../lib/boardDoc";
+         replan, type BoardDoc, type PanelArt } from "../lib/boardDoc";
 import { loadBoardDraft, loadSavedBoard, type BoardDraft, type Coverage }
   from "../lib/boardDraft";
 import { CUSTOM_STYLE, STYLES, drawBatch, isKnownStyle, lockCustomStyle, lockStyle,
@@ -779,13 +779,44 @@ export default function Storyboard({
       const beats = r.book.chapters.at(-1)!.scenes.flatMap((s) => s.beats);
       setCoverage({ covered: beats.length, total: beats.length, percent: 100, missing: [] });
       setAppendChapter(false);
-      notify(`Analyzed ${beats.length} beats and directed ${r.panels.length} panels. The chapter is also available in Audiobook.`);
+      notify(r.unanalysed
+        ? `${r.stopped ? "Stopped. " : ""}${r.unanalysed} passage${r.unanalysed === 1 ? " is" : "s are"} not analysed yet; `
+          + "the rest is saved. Continue analysis from the Manuscript whenever you like."
+        : `Analyzed ${beats.length} beats and directed ${r.panels.length} panels. The chapter is also available in Audiobook.`);
     } catch (e) {
       notify(errText(e), true);
     } finally {
       un(); setStage("idle"); setProg(null); setJobId(null);
     }
   };
+
+  /**
+   * Analyse what a stopped or failed run left, with any analyst.
+   *
+   * Finished passages are not sent again, and panels of unchanged beats keep
+   * their pictures and notes. Stopping this keeps what it finished, too.
+   */
+  const continueAnalysis = async () => {
+    if (!storyBook || !chapterId) return;
+    const id = newJobId();
+    setStage("dividing"); setJobId(id);
+    const un = await onEngineProgress((p) => { if (p.job_id === id) setProg(p); });
+    try {
+      const r = await api.resumeStory(id, storyBook, chapterId, analystId || null);
+      await onStoryAnalyzed(r.book);
+      setStoryBook(r.book); storyBookRef.current = r.book;
+      setCast(castFromBook(r.book));
+      setDoc((d) => replan(d, r.panels));
+      notify(r.unanalysed
+        ? `${r.unanalysed} passage${r.unanalysed === 1 ? " is" : "s are"} still not analysed; the rest is saved.`
+        : `Analysis complete: ${r.panels.length} panels planned. Drawn panels were kept.`);
+    } catch (e) {
+      notify(errText(e), true);
+    } finally {
+      un(); setStage("idle"); setProg(null); setJobId(null);
+    }
+  };
+  const unanalysed = unanalysedIn(storyBook, chapterId);
 
   /** Which panels have a picture, and which are still waiting. */
   const drawnCount = useMemo(
@@ -1672,6 +1703,23 @@ export default function Storyboard({
                       || p.caption || `Panel ${i + 1}`}
                   </span>
                 ))}
+                {unanalysed > 0 && (
+                  <div className="notice warn" style={{ marginTop: 10 }}>
+                    <strong>{unanalysed} passage{unanalysed === 1 ? "" : "s"} not analysed yet</strong>
+                    <div style={{ fontSize: 11, marginTop: 4 }}>
+                      Their text is on the board without cast or direction. Continue with
+                      any analyst; finished passages and drawn panels are kept.
+                    </div>
+                    <label>Story analyst<select value={analystId} disabled={busy}
+                      onChange={(e) => setAnalystId(e.target.value)}>
+                      <option value="">Best installed model for this Mac</option>
+                      {models.filter((m) => ANALYST_IDS.includes(m.id) && m.installed && !m.hopeless)
+                        .map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                    </select></label>
+                    <button className="btn small primary" disabled={busy}
+                      onClick={() => void continueAnalysis()}>Continue analysis</button>
+                  </div>
+                )}
                 {coverage && coverage.total > 0 && (() => {
                   // The engine caps the listed passages at twenty. Counting
                   // the list meant the worst-covered boards reported the

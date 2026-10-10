@@ -2948,18 +2948,11 @@ pub struct StoryAnalysis {
     mode: Option<String>,
 }
 
-#[tauri::command]
-pub async fn analyze_story(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    job_id: String,
-    args: StoryAnalysis,
-) -> Result<serde_json::Value> {
-    let _job = state.job_gate.read().await;
-    state.require_unlocked()?;
+/// The story analyst to use: the one asked for, or the best installed one.
+fn story_writer(state: &AppState, model_id: Option<&str>) -> Result<String> {
     let host = HostInfo::probe(&state.paths());
-    let ids = if let Some(ref id) = args.model_id {
-        vec![id.as_str()]
+    let ids = if let Some(id) = model_id {
+        vec![id]
     } else if host.total_ram_gib >= 24.0 {
         vec![
             "qwen3-14b-story-4bit",
@@ -2969,8 +2962,7 @@ pub async fn analyze_story(
     } else {
         vec!["qwen3-8b-story-4bit", "qwen3-4b-instruct-4bit"]
     };
-    let writer = ids
-        .into_iter()
+    ids.into_iter()
         .filter(|id| {
             [
                 "qwen3-14b-story-4bit",
@@ -2986,9 +2978,22 @@ pub async fn analyze_story(
                 && m.broken.is_none()
                 && (m.id != "qwen3-14b-story-4bit" || host.total_ram_gib >= 24.0)
         })
+        .map(|m| m.repo)
         .ok_or_else(|| {
             AppError::msg("Install a story analyst or the prompt writer from Models first.")
-        })?;
+        })
+}
+
+#[tauri::command]
+pub async fn analyze_story(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+    args: StoryAnalysis,
+) -> Result<serde_json::Value> {
+    let _job = state.job_gate.read().await;
+    state.require_unlocked()?;
+    let writer = story_writer(&state, args.model_id.as_deref())?;
     let mode = args.mode.as_deref().unwrap_or("full");
     if !["full", "voice"].contains(&mode) {
         return Err(AppError::msg(format!(
@@ -3002,8 +3007,32 @@ pub async fn analyze_story(
             "story_analyze",
             json!({
                 "source": args.source, "title": args.title, "previous": args.previous,
-                "writer": writer.repo, "mode": mode,
+                "writer": writer, "mode": mode,
             }),
+        )
+        .await
+}
+
+/// Analyse only the passages a stopped or failed analysis left unanalysed.
+#[tauri::command]
+pub async fn resume_story(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+    book: serde_json::Value,
+    chapter_id: String,
+    model_id: Option<String>,
+) -> Result<serde_json::Value> {
+    let _job = state.job_gate.read().await;
+    state.require_unlocked()?;
+    let writer = story_writer(&state, model_id.as_deref())?;
+    state
+        .engine(&app)
+        .await?
+        .request(
+            &job_id,
+            "story_resume",
+            json!({"book": book, "chapter_id": chapter_id, "writer": writer}),
         )
         .await
 }

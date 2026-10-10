@@ -838,3 +838,59 @@ class SmallWriterSlips(unittest.TestCase):
         chapter = book['chapters'][0]
         self.assertFalse(chapter['scenes'][0].get('unanalysed'))
         self.assertEqual(''.join(b['source'] for s in chapter['scenes'] for b in s['beats']), self.SOURCE)
+
+
+class StopAndResume(unittest.TestCase):
+    SOURCE = ' '.join(f'Mira walked past house {i}.' for i in range(12))
+
+    def write_until(self, limit, calls):
+        def write(_, prompt):
+            calls.append(prompt)
+            if len(calls) > limit:
+                raise story.Stop()
+            group = json.loads(prompt.split('Numbered source units:\n')[1].split('\nYour previous reply')[0])
+            return json.dumps({"title": "Walk", "characters": [], "looks": [], "places": [], "speakers": [],
+                               "beats": [{"units": [u["id"] for u in group], "importance": 2, "action": "walks",
+                                          "place": "street", "mood": "calm", "cast": []}]})
+        return write
+
+    def test_stopping_keeps_finished_passages_and_resume_finishes_only_the_rest(self):
+        calls = []
+        book = story.analyze(self.SOURCE, self.write_until(2, calls), passage_words=99, passage_units=3)
+        chapter = book['chapters'][0]
+        self.assertEqual([bool(s.get('unanalysed')) for s in chapter['scenes']], [False, False, True, True])
+        self.assertEqual(''.join(b['source'] for s in chapter['scenes'] for b in s['beats']), self.SOURCE)
+        calls.clear()
+        done = story.resume(book, chapter['id'], self.write_until(99, calls), passage_words=99, passage_units=3)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all('house 0.' not in c for c in calls))
+        scenes = done['chapters'][0]['scenes']
+        self.assertFalse(any(s.get('unanalysed') for s in scenes))
+        self.assertEqual(len({s['id'] for s in scenes}), len(scenes))
+        self.assertEqual(''.join(b['source'] for s in scenes for b in s['beats']), self.SOURCE)
+
+    def test_stopping_a_resume_keeps_what_it_finished(self):
+        calls = []
+        book = story.analyze(self.SOURCE, self.write_until(1, calls), passage_words=99, passage_units=3)
+        calls.clear()
+        more = story.resume(book, book['chapters'][0]['id'], self.write_until(1, calls), passage_words=99, passage_units=3)
+        self.assertEqual([bool(s.get('unanalysed')) for s in more['chapters'][0]['scenes']], [False, False, True, True])
+
+    def test_worker_stop_returns_the_finished_part_instead_of_an_error(self):
+        import worker
+        calls = []
+        def write(req_id, system, user, **kw):
+            calls.append(1)
+            if len(calls) == 2:
+                raise worker.Cancelled()
+            group = json.loads(user.split('Numbered source units:\n')[1].split('\nYour previous reply')[0])
+            return json.dumps({"title": "Walk", "characters": [], "speakers": [],
+                               "beats": [{"units": [u["id"] for u in group], "importance": 2, "action": "walks",
+                                          "place": "street", "mood": "calm", "cast": []}]})
+        with patch.object(worker, '_write', side_effect=write), \
+                patch.object(worker, 'is_cancelled', lambda _id: len(calls) >= 2):
+            result = worker.op_story_analyze('test-stop', {'source': self.SOURCE * 3})
+        self.assertTrue(result['stopped'])
+        self.assertGreater(result['unanalysed'], 0)
+        scenes = result['book']['chapters'][0]['scenes']
+        self.assertFalse(scenes[0].get('unanalysed'))

@@ -70,6 +70,21 @@ describe("Board shared story workflow", () => {
     const images = (edit.mock.calls[0] as unknown as [{ args: { images: string[] } }])[0].args.images;
     expect(images).toEqual(["new-sheet"]);
   });
+  it("continues a stopped analysis from the Manuscript, with the analyst chosen there", async () => {
+    const stub = { id: "stub", title: "Passage 2 (not analysed)", summary: "", start: 30, end: 30, beats: [], unanalysed: true };
+    const stopped = { ...book, chapters: [{ ...book.chapters[0], scenes: [...book.chapters[0].scenes, stub] }] };
+    const finished = { ...book };
+    const resume = vi.fn(() => ({ book: finished, chapter_id: "chapter", panels: [panel, { ...panel, beat_id: "beat2" }], unanalysed: 0 }));
+    hostAnswers({ direct_story: () => ({ panels: [panel] }), resume_story: resume });
+    show({ version: 1, books: [stopped], activeBookId: stopped.id });
+    fireEvent.change(await screen.findByLabelText("Use an analyzed chapter"), { target: { value: "book:chapter" } });
+    expect(await screen.findByText("1 passage not analysed yet")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Continue analysis" }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(finished));
+    expect(resume).toHaveBeenCalledWith(expect.objectContaining({ book: stopped, chapterId: "chapter" }));
+    expect(await screen.findByRole("button", { name: /Draw 2 of 2/ })).toBeTruthy();
+    expect(screen.queryByText("1 passage not analysed yet")).toBeNull();
+  });
   it("loads an Audiobook chapter without running story analysis again", async () => {
     const direct = vi.fn(() => ({ panels: [panel] }));
     hostAnswers({ direct_story: direct });

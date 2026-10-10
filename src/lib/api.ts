@@ -101,6 +101,8 @@ export const api = {
                  mode: "full" | "voice" = "full") =>
     invoke<StoryAnalysisResult>("analyze_story", { jobId,
       args: { source, title, previous, model_id: modelId, mode } }),
+  resumeStory: (jobId: string, book: StoryBook, chapterId: string, modelId: string | null = null) =>
+    invoke<StoryAnalysisResult>("resume_story", { jobId, book, chapterId, modelId }),
   directStory: (jobId: string, book: StoryBook, chapterId: string) =>
     invoke<{ panels: Panel[] }>("direct_story", { jobId, book, chapterId }),
   audioVoices: (modelId = "macos") => invoke<{ voices: { id: string; language: string }[] }>("audio_voices", { modelId }),
