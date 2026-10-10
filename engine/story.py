@@ -841,11 +841,19 @@ def validate_book(book):
     return book
 
 
+def _with_tags(book, chapter):
+    """The chapter with speech tags applied, for books analysed before them."""
+    chapter = copy.deepcopy(chapter)
+    _attribute_by_tags([b for s in chapter["scenes"] for b in s["beats"]], chapter["source"], 0, book["characters"])
+    return chapter
+
+
 def narration_segments(book, chapter_id):
     validate_book(book)
     chapter = next((c for c in book["chapters"] if c["id"] == chapter_id), None)
     if not chapter:
         raise ValueError("choose an analyzed chapter")
+    chapter = _with_tags(book, chapter)
     # Narration is split at beats so it carries the beat's mood like dialogue
     # does; it is most of a chapter and was always read without one.
     source, segments = chapter["source"], []
@@ -874,6 +882,7 @@ def direct(book, chapter_id):
     chapter = next((c for c in book["chapters"] if c["id"] == chapter_id), None)
     if not chapter:
         raise ValueError("choose an analyzed chapter")
+    chapter = _with_tags(book, chapter)
     people = {c["id"]: c for c in book["characters"]}
     panels = []
     for scene_no, scene in enumerate(chapter["scenes"], 1):

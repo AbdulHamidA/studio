@@ -934,3 +934,16 @@ class SpeechTagAttribution(unittest.TestCase):
     def test_speech_continued_into_the_next_paragraph(self):
         source = 'Agnes said, “You’re the Pell girl.\n\n“Your grandmother said you’d come.”\n\n“Hello.”'
         self.assertEqual(self.speakers(source, ['Agnes']), ['Agnes', 'Agnes', None])
+
+
+class SavedBooksGetTags(unittest.TestCase):
+    def test_a_book_analysed_before_tags_is_narrated_with_them(self):
+        source = 'Agnes said, “Come in.”'
+        group = story.passages(source)[0]
+        data = reply(group, [{"id": "a", "name": "Agnes", "aliases": [], "visual": "", "voice": ""}])
+        book = story.analyze(source, lambda *_: json.dumps(data))
+        line = book['chapters'][0]['scenes'][0]['beats'][0]['dialogue'][0]
+        line['speaker_id'] = None  # as saved by an older analysis
+        segments = story.narration_segments(book, book['chapters'][0]['id'])
+        self.assertEqual([s['speaker_id'] for s in segments if s['text'] == 'Come in.'], [book['characters'][0]['id']])
+        self.assertIsNone(line['speaker_id'])  # the saved book itself is not changed
