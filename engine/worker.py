@@ -6912,7 +6912,9 @@ def op_story_analyze(req_id, req):
     book = story_model.analyze(req.get("source"),
         lambda system, user: _write(req_id, system, user, max_tokens=3200,
             temperature=0.2, repo=req.get("writer"), label="Understanding the story"),
-        previous=req.get("previous"), title=req.get("title", "Chapter"), progress=progress)
+        previous=req.get("previous"), title=req.get("title", "Chapter"), progress=progress,
+        passage_words=250 if req.get("writer", WRITER_REPO) == WRITER_REPO else 450,
+        passage_units=4 if req.get("writer", WRITER_REPO) == WRITER_REPO else 8)
     chapter = book["chapters"][-1]
     panels = story_model.direct(book, chapter["id"])
     return {"book": book, "chapter_id": chapter["id"], "panels": panels}

@@ -16,6 +16,10 @@ Read this scene for causality, dramatic turns and emotion, not equal coverage.
 Use the supplied numbered source units, each exactly once, in order. Group
 adjacent units into beats. Importance is 1 (context), 2 (quiet action), 3
 (meaningful change), 4 (turn), 5 (climax/reveal). Preserve the ending.
+Every visible.character_id and dialogue.speaker_id must EXACTLY match an id in
+the character bible or in this reply's characters array. For a new character,
+declare a unique short local id (c1, c2, c3), then reuse that exact ID in beats.
+Never use an undeclared ID or the schema placeholder as a character reference.
 Canonical characters have stable IDs. Reuse them for aliases; never create a
 second person for a narrator already named. New characters must have a name
 or noun phrase literally in this scene; never invent appearance or aliases.
@@ -101,13 +105,13 @@ def passages(source, max_words=450, max_units=8):
 def instruction(group, characters, continuity=None):
     schema = {
         "title": "scene title", "summary": "causal/emotional meaning",
-        "characters": [{"id": "existing ID or new local ID", "name": "literal source name",
+        "characters": [{"id": "c1", "name": "literal source name",
                         "aliases": [], "visual": "lasting face/hair/build only, no outfit",
                         "voice": "voice direction"}],
         "beats": [{"units": [0], "importance": 3, "action": "visible action",
                    "setting": "location", "location_id": "stable room/place key",
                    "location_state": "current layout, objects, light and weather", "mood": "emotional tone", "tension": 3,
-                   "visible": [{"character_id": "ID", "expression": "expression",
+                   "visible": [{"character_id": "c1", "expression": "expression",
                                 "body_language": "pose", "appearance": "complete current outfit and temporary condition"}],
                    "dialogue": [{"speaker_id": None, "text": "exact quoted words",
                                  "offscreen": True}]}],
@@ -185,7 +189,31 @@ def parse_scene(raw, group, bible, scene_id):
                         "visual": visual, "voice": voice}
             characters.append(existing)
         lookup[local_id] = existing["id"]
-    known = {c["id"] for c in characters}
+    # The model may use a canonical name or alias instead of the requested ID.
+    # Resolve only exact, unique bindings to validated characters; no fuzzy
+    # matching or character invention. Generated UUIDs also remain valid.
+    names = {}
+    for character in characters:
+        lookup.setdefault(character["id"], character["id"])
+        for name in [character["name"], *character["aliases"]]:
+            names.setdefault(name.strip().casefold(), set()).add(character["id"])
+
+    def resolve(reference, field):
+        if not isinstance(reference, str) or not reference.strip():
+            raise ValueError(f"{field} must name a declared character ID")
+        reference = reference.strip()
+        if reference in lookup:
+            return lookup[reference]
+        matches = names.get(reference.casefold(), set())
+        if len(matches) == 1:
+            return next(iter(matches))
+        if len(matches) > 1:
+            raise ValueError(f"{field} is ambiguous: {reference!r}; use its exact character ID")
+        valid = ', '.join(f"{local}={next(c['name'] for c in characters if c['id'] == cid)}"
+                          for local, cid in lookup.items())
+        raise ValueError(f"{field} {reference!r} is not declared. Valid IDs: {valid or '(none)'}. "
+                         "Declare new people in characters before referencing them in beats.")
+
     beats, consumed = [], []
     for i, beat in enumerate(_array(reply.get("beats"), "beats")):
         ids = _array(beat.get("units"), "units")
@@ -201,9 +229,7 @@ def parse_scene(raw, group, bible, scene_id):
             raise ValueError("tension must be 1..5")
         visible = []
         for actor in _array(beat.get("visible"), "visible"):
-            cid = lookup.get(actor.get("character_id"))
-            if cid not in known:
-                raise ValueError("visible character must be in the bible")
+            cid = resolve(actor.get("character_id"), "visible character")
             if cid in [a["character_id"] for a in visible]:
                 raise ValueError("duplicate visible character")
             visible.append({"character_id": cid,
@@ -219,9 +245,7 @@ def parse_scene(raw, group, bible, scene_id):
             at = excerpt.find(text, local_end)
             if at < 0:
                 raise ValueError("dialogue must quote this beat exactly and in order")
-            cid = lookup.get(line.get("speaker_id")) if line.get("speaker_id") is not None else None
-            if line.get("speaker_id") is not None and cid not in known:
-                raise ValueError("dialogue speaker must be in the bible or null")
+            cid = resolve(line.get("speaker_id"), "dialogue speaker") if line.get("speaker_id") is not None else None
             offscreen = line.get("offscreen")
             if type(offscreen) is not bool:
                 raise ValueError("offscreen must be boolean")
@@ -253,7 +277,8 @@ def _remember_state(state, beat):
         state["locations"][key] = beat["location_state"]
 
 
-def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: None):
+def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: None,
+            passage_words=450, passage_units=8):
     if not isinstance(source, str) or not source.strip():
         raise ValueError("paste a chapter first")
     if len(source) > 200000:
@@ -262,7 +287,7 @@ def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: N
         "version": 1, "id": str(uuid.uuid4()), "characters": [], "chapters": []}
     validate_book(book)
     chapter_id = str(uuid.uuid4())
-    groups = passages(source)
+    groups = passages(source, max_words=passage_words, max_units=passage_units)
     scenes = []
     continuity = {"characters": {}, "locations": {}}
     for old_chapter in book["chapters"]:
@@ -280,7 +305,11 @@ def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: N
             except (ValueError, TypeError, KeyError, AttributeError) as exc:
                 if attempt:
                     raise ValueError(f"Scene {i + 1} could not be validated: {exc}") from exc
-                prompt += f"\nYour previous reply failed validation: {exc}. Return corrected complete JSON."
+                prompt += (f"\nYour previous reply failed validation: {exc}."
+                           "\nPrevious reply to repair:\n" + raw[:20000]
+                           + "\nReturn corrected complete JSON, preserving the full source coverage. "
+                           "Every visible character and speaker must refer to an ID declared in "
+                           "the character bible or your characters array. Use null for uncertain speakers.")
         scenes.append(scene)
         for beat in scene["beats"]:
             _remember_state(continuity, beat)

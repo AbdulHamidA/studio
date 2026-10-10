@@ -432,3 +432,72 @@ class NeuralNarration(unittest.TestCase):
             audiobook.synthesize_neural([{"speaker_id": None, "text": "Hello"}], "ryan", {}, 160,
                 check, load=lambda: self.model(calls))
         self.assertEqual(len(calls), 1)
+
+
+class CharacterReferenceBindings(unittest.TestCase):
+    def data(self):
+        source = 'Mira says, “Wait.”'
+        group = story.passages(source)[0]
+        data = reply(group, [{"id": "c1", "name": "Mira", "aliases": [], "visual": "", "voice": ""}])
+        data["beats"][0]["visible"] = [{"character_id": "Mira", "expression": "worried", "body_language": "still"}]
+        data["beats"][0]["dialogue"] = [{"speaker_id": "Mira", "text": "Wait.", "offscreen": False}]
+        return source, group, data
+
+    def test_names_resolve_to_the_same_canonical_id_as_local_ids(self):
+        source, group, data = self.data()
+        book = story.analyze(source, lambda *_: json.dumps(data))
+        cid = book['characters'][0]['id']
+        beat = book['chapters'][0]['scenes'][0]['beats'][0]
+        self.assertEqual(beat['visible'][0]['character_id'], cid)
+        self.assertEqual(beat['dialogue'][0]['speaker_id'], cid)
+
+    def test_prior_alias_resolves_without_redeclaring_the_character(self):
+        source, group, data = self.data()
+        bible = [{'id': 'uuid-mira', 'name': 'Mira', 'aliases': ['Mi'], 'visual': '', 'voice': ''}]
+        data['characters'] = []
+        data['beats'][0]['visible'][0]['character_id'] = ' mi '
+        data['beats'][0]['dialogue'][0]['speaker_id'] = 'uuid-mira'
+        scene, characters = story.parse_scene(json.dumps(data), group, bible, 's1')
+        self.assertEqual(scene['beats'][0]['visible'][0]['character_id'], 'uuid-mira')
+        self.assertEqual(characters, bible)
+
+    def test_undeclared_ids_are_rejected_with_repair_information(self):
+        source, group, data = self.data()
+        data['beats'][0]['visible'][0]['character_id'] = 'c9'
+        with self.assertRaisesRegex(ValueError, "c9.*not declared.*c1=Mira"):
+            story.parse_scene(json.dumps(data), group, [], 's1')
+
+    def test_ambiguous_aliases_do_not_merge_two_characters(self):
+        source, group, data = self.data()
+        bible = [{'id': name.lower(), 'name': name, 'aliases': ['Captain'], 'visual': '', 'voice': ''}
+                 for name in ['Mira', 'Jonas']]
+        data['characters'] = []
+        data['beats'][0]['visible'][0]['character_id'] = 'Captain'
+        with self.assertRaisesRegex(ValueError, 'ambiguous'):
+            story.parse_scene(json.dumps(data), group, bible, 's1')
+
+    def test_retry_includes_the_failed_reply_and_valid_ids(self):
+        source, group, valid = self.data()
+        broken = copy.deepcopy(valid)
+        broken['beats'][0]['visible'][0]['character_id'] = 'missing-id'
+        prompts = []
+        def write(system, prompt):
+            prompts.append(prompt)
+            return json.dumps(broken if len(prompts) == 1 else valid)
+        book = story.analyze(source, write)
+        self.assertEqual(len(prompts), 2)
+        self.assertIn(json.dumps(broken), prompts[1])
+        self.assertIn('c1=Mira', prompts[1])
+        self.assertEqual(len(book['characters']), 1)
+
+
+class SmallAnalystPassages(unittest.TestCase):
+    def test_smaller_calls_preserve_full_source_and_ending(self):
+        source = 'The train waits. ' * 15 + 'The final door closes.'
+        groups = story.passages(source, max_words=250, max_units=4)
+        responses = iter(json.dumps(reply(group)) for group in groups)
+        book = story.analyze(source, lambda *_: next(responses), passage_words=250, passage_units=4)
+        chapter = book['chapters'][0]
+        self.assertEqual(len(chapter['scenes']), len(groups))
+        self.assertEqual(''.join(beat['source'] for scene in chapter['scenes'] for beat in scene['beats']), source)
+        self.assertTrue(chapter['scenes'][-1]['beats'][-1]['source'].endswith('The final door closes.'))
