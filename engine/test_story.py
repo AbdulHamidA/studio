@@ -827,7 +827,8 @@ class SmallWriterSlips(unittest.TestCase):
         scene = book['chapters'][0]['scenes'][0]
         self.assertFalse(scene.get('unanalysed'))
         self.assertEqual([c['name'] for c in book['characters']], ['Agnes'])
-        self.assertIsNone(scene['beats'][0]['dialogue'][0]['speaker_id'])
+        # Not the invented person: the speech tag names Agnes.
+        self.assertEqual(scene['beats'][0]['dialogue'][0]['speaker_id'], book['characters'][0]['id'])
 
     def test_skipped_and_repeated_units_are_regrouped_in_order(self):
         reply = {"title": "Pier", "characters": [],
@@ -903,3 +904,33 @@ class WriterJsonSlips(unittest.TestCase):
         self.assertEqual(story._loads('{"a": "He said “hi”, then left"}')['a'], 'He said “hi”, then left')
         with self.assertRaises(ValueError):
             story._loads('{"beats": [')
+
+
+class SpeechTagAttribution(unittest.TestCase):
+    """Lines the writer leaves unattributed get the speaker their tag names."""
+
+    def speakers(self, source, cast):
+        group = story.passages(source, max_words=999, max_units=99)[0]
+        reply = {"title": "t", "characters": [{"id": n.lower(), "name": n, "aliases": [], "visual": "", "voice": ""} for n in cast],
+                 "beats": [{"units": [u["id"] for u in group], "importance": 2, "action": "a", "place": "p",
+                            "mood": "m", "cast": []}], "speakers": []}
+        book = story.analyze(source, lambda *_: json.dumps(reply), passage_words=999, passage_units=99)
+        people = {c['id']: c['name'] for c in book['characters']}
+        return [people.get(d['speaker_id']) for s in book['chapters'][0]['scenes'] for b in s['beats'] for d in b['dialogue']]
+
+    def test_named_first_person_and_interrupted_tags(self):
+        source = ('Agnes said, “Come in.” “I’m not late,” I said. “The ferry was early.” '
+                  '“The ferry,” Agnes said, “has never been early.”')
+        self.assertEqual(self.speakers(source, ['Narrator', 'Agnes']), ['Agnes', 'Narrator', 'Narrator', 'Agnes', 'Agnes'])
+
+    def test_pronoun_tag_takes_the_person_last_named_in_narration(self):
+        source = 'Tam finally looked at me. “It won’t drop,” he said.'
+        self.assertEqual(self.speakers(source, ['Narrator', 'Tam']), ['Tam'])
+
+    def test_a_tag_for_the_next_quote_and_untagged_lines_are_not_guessed(self):
+        source = 'Mira read the sign: “Closed.” She said, “Go home.” Later: “Who knows?”'
+        self.assertEqual(self.speakers(source, ['Mira']), [None, 'Mira', None])
+
+    def test_speech_continued_into_the_next_paragraph(self):
+        source = 'Agnes said, “You’re the Pell girl.\n\n“Your grandmother said you’d come.”\n\n“Hello.”'
+        self.assertEqual(self.speakers(source, ['Agnes']), ['Agnes', 'Agnes', None])

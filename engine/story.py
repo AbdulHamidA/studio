@@ -538,8 +538,95 @@ def parse_scene(raw, group, bible, scene_id):
                       "visible": visible, "dialogue": dialogue})
     if consumed != list(range(len(group))):
         raise ValueError("beats must cover every source unit exactly once, in order")
+    _attribute_by_tags(beats, source, group[0]["start"], characters)
     return {"id": scene_id, "title": title, "summary": summary,
             "start": group[0]["start"], "end": group[-1]["end"], "beats": beats}, characters
+
+
+SPEECH_VERBS = (r'said|says|asked|asks|replied|replies|answered|called|calls|shouted|yelled|cried|'
+                r'whispered|muttered|murmured|added|snapped|laughed|sighed|told|continued|insisted|warned|began')
+
+
+def _attribute_by_tags(beats, text, base, characters):
+    """Give an unattributed line the speaker its speech tag names.
+
+    The writer leaves many lines unattributed even when the prose says who
+    spoke -- `"...," I said`, `Agnes said, "..."` -- and the audiobook then
+    reads them in the narrator's voice. Only an explicit tag next to the quote
+    counts: a character's name or alias, or "I" for a first-person narrator,
+    beside a speech verb. A bare "she said" is left alone; guessing it is how
+    lines end up in the wrong mouth. The second half of an utterance the tag
+    interrupts takes the speaker of the first."""
+    names = []
+    for c in characters:
+        for name in [c["name"], *c["aliases"]]:
+            if name.casefold() in {"i", "me", "my"}:
+                continue
+            if name.strip():
+                names.append((name.strip(), c["id"]))
+    narrator = [c["id"] for c in characters if c["name"] == "Narrator"
+                or set(c["aliases"]).intersection({"I", "me", "my"})]
+    lines = [d for b in beats for d in b["dialogue"]]
+
+    def who(tag):
+        found = set()
+        for name, cid in names:
+            word = r'(?<!\w)' + re.escape(name) + r'(?!\w)'
+            if re.search(word + r'\s+(?:' + SPEECH_VERBS + r')\b', tag) or \
+                    re.search(r'\b(?:' + SPEECH_VERBS + r')\s+' + word, tag):
+                found.add(cid)
+        if len(narrator) == 1 and re.search(r'\bI\s+(?:' + SPEECH_VERBS + r')\b|\b(?:' + SPEECH_VERBS + r')\s+I\b', tag):
+            found.add(narrator[0])
+        return found.pop() if len(found) == 1 else None
+
+    for n, line in enumerate(lines):
+        if line["speaker_id"] is not None:
+            continue
+        a, b = line["start"] - base, line["end"] - base
+        # The tag runs from the quote to the sentence end or the next quote.
+        after = re.split(r'[“"「]|(?<=[.!?])\s', text[b + 1:b + 120], maxsplit=1)[0]
+        # `"Closed." She said, "..."`: a full stop then a capital starts a new
+        # sentence, whose tag is for the next quote, not this one.
+        if line["text"].rstrip().endswith(".") and re.match(r'\s*[A-Z]', after) \
+                and not re.match(r'\s*I\b', after):
+            after = ""
+        before = re.split(r'[”"」]|[.!?]\s', text[max(0, a - 120):max(0, a - 1)])[-1]
+        line["speaker_id"] = who(after) or who(before)
+        if line["speaker_id"] is None and re.search(
+                r'\b(?:he|she)\s+(?:' + SPEECH_VERBS + r')\b|\b(?:' + SPEECH_VERBS + r')\s+(?:he|she)\b',
+                after or before, re.I):
+            # "she said": the person the narration last named, if any. Quoted
+            # words are skipped -- a name inside speech is not who is speaking.
+            narration = QUOTE.sub(" ", text[max(0, a - 400):max(0, a - 1)])
+            last = None
+            for name, cid in names:
+                if cid in narrator:
+                    continue
+                for m in re.finditer(r'(?<!\w)' + re.escape(name) + r'(?!\w)', narration):
+                    if last is None or m.end() > last[0]:
+                        last = (m.end(), cid)
+            line["speaker_id"] = last[1] if last else None
+    for n, line in enumerate(lines):
+        if line["speaker_id"] is not None:
+            continue
+        for other in (lines[n - 1] if n else None, lines[n + 1] if n + 1 < len(lines) else None):
+            if other is None or other["speaker_id"] is None:
+                continue
+            gap = text[min(line["end"], other["end"]) - base + 1:max(line["start"], other["start"]) - base - 1]
+            # Only a tag between them: `"...," she said, "..."` or `"...," I said. "..."`.
+            # The tag must belong to the first quote: it ended on a comma, or the
+            # tag starts lowercase (`"Hi!" she said. "Bye."`). `"Closed." She
+            # said, "Go home."` is a tag for the second quote only.
+            first = lines[n - 1] if other is lines[n - 1] else line
+            tag = len(gap) < 50 and re.search(r'\b(?:' + SPEECH_VERBS + r')\b', gap) \
+                and not re.search(r'[.!?]\s+\S', gap.strip()) \
+                and (first["text"].rstrip().endswith((",", "，", "、")) or re.match(r'\s*(?:[a-z]|I\b)', gap))
+            # Or the first quote was left open at a paragraph break: speech
+            # continued into the next paragraph, which reopens without a tag.
+            left_open = text[first["end"] - base:first["end"] - base + 1] not in ('”', '"', '」')
+            if tag or (gap.strip() == "" and "\n" in gap and left_open):
+                line["speaker_id"] = other["speaker_id"]
+                break
 
 
 def _remember_state(state, beat):
@@ -642,6 +729,9 @@ def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: N
         scenes.append(scene)
         for beat in scene["beats"]:
             _remember_state(continuity, beat)
+    # Once more over the whole chapter: a tag's name can sit in the passage
+    # before, and unanalysed passages have no attribution of their own.
+    _attribute_by_tags([b for s in scenes for b in s["beats"]], source, 0, book["characters"])
     chapter = {"id": chapter_id, "title": title.strip() or "Chapter",
                "source": source, "source_hash": hashlib.sha256(source.encode()).hexdigest(),
                "scenes": scenes, **({"analysis": "voice"} if mode == "voice" else {})}
@@ -695,6 +785,7 @@ def resume(book, chapter_id, write, progress=lambda *_: None, passage_words=450,
     for k, scene in enumerate(chapter["scenes"]):
         rebuilt.extend(replaced.get(k, [scene]))
     chapter["scenes"] = rebuilt
+    _attribute_by_tags([b for s in rebuilt for b in s["beats"]], chapter["source"], 0, book["characters"])
     validate_book(book)
     return book
 
