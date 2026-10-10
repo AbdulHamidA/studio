@@ -658,10 +658,17 @@ impl Vault {
     /// Write the index, keeping one previous copy.
     ///
     /// The index is the only record of what every blob *is*: lose it and the
-    /// content is still decryptable but anonymous. Rotating a `.bak` costs one
-    /// rename and turns a corrupt write from total metadata loss into the loss
-    /// of whatever changed since the last save.
+    /// content is still decryptable but anonymous. Keeping a `.bak` turns a
+    /// corrupt write from total metadata loss into the loss of whatever
+    /// changed since the last save.
+    ///
+    /// The live file is never moved out of the way: the backup is a copy, and
+    /// the new index replaces the old one in a single rename once its bytes
+    /// are flushed. Renaming `index.enc` to `.bak` first left a window in
+    /// which a crash meant no `index.enc` at all, which read back as an empty
+    /// library and was then saved over the good backup.
     fn write_index(&self, dek: &[u8; 32], index: &Index) -> Result<(), VaultError> {
+        use std::io::Write;
         let mut plain =
             serde_json::to_vec(index).map_err(|e| VaultError::Corrupt(e.to_string()))?;
         let sealed = crypto::seal(dek, &plain);
@@ -669,36 +676,60 @@ impl Vault {
 
         let path = self.index_path();
         let tmp = path.with_extension("enc.tmp");
-        std::fs::write(&tmp, &sealed)?;
+        {
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(&sealed)?;
+            file.sync_all()?;
+        }
 
         if path.exists() {
-            let backup = path.with_extension("enc.bak");
             // A failed backup must not block the write; the new index is still
             // strictly better than no write at all.
-            let _ = std::fs::rename(&path, &backup);
+            let _ = self.copy_durably(&path, &self.index_backup_path());
         }
         std::fs::rename(&tmp, &path)?;
+        // Best-effort, as for the manifest: the data itself is already flushed.
+        let _ = std::fs::File::open(&self.root).and_then(|dir| dir.sync_all());
         Ok(())
     }
 
+    fn index_backup_path(&self) -> PathBuf {
+        self.index_path().with_extension("enc.bak")
+    }
+
+    /// Copy `from` over `to` through a flushed temporary file, so `to` is
+    /// always either the old backup or the complete new one.
+    fn copy_durably(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        let tmp = to.with_extension("bak.tmp");
+        std::fs::copy(from, &tmp)?;
+        std::fs::File::open(&tmp)?.sync_all()?;
+        std::fs::rename(&tmp, to)
+    }
+
     fn read_index_with_fallback(&self, dek: &[u8; 32]) -> Result<Index, VaultError> {
-        match self.read_index(dek) {
-            Ok(i) => Ok(i),
-            Err(primary) => {
-                let backup = self.index_path().with_extension("enc.bak");
-                if !backup.exists() {
-                    return Err(primary);
-                }
-                // The live index is unreadable. The previous one loses only the
-                // most recent change, which beats losing every name and prompt.
-                let sealed = std::fs::read(&backup)?;
-                let plain = crypto::open(dek, &sealed)?;
-                let index: Index = serde_json::from_slice(&plain)
-                    .map_err(|e| VaultError::Corrupt(e.to_string()))?;
-                eprintln!("vault: index was unreadable ({primary}); recovered the backup");
-                Ok(index)
+        let backup = self.index_backup_path();
+        // A missing live index next to a backup is an interrupted write, not
+        // an empty library. Reading it as empty would show no items and the
+        // next save would rotate the only good copy away.
+        let primary = if self.index_path().exists() || !backup.exists() {
+            match self.read_index(dek) {
+                Ok(i) => return Ok(i),
+                Err(e) => e,
             }
+        } else {
+            VaultError::Corrupt("index.enc is missing".into())
+        };
+        if !backup.exists() {
+            return Err(primary);
         }
+        // The live index is unreadable. The previous one loses only the
+        // most recent change, which beats losing every name and prompt.
+        let sealed = std::fs::read(&backup)?;
+        let plain = crypto::open(dek, &sealed)?;
+        let index: Index =
+            serde_json::from_slice(&plain).map_err(|e| VaultError::Corrupt(e.to_string()))?;
+        eprintln!("vault: index was unreadable ({primary}); recovered the backup");
+        Ok(index)
     }
 
     fn with_unlocked<T>(
@@ -1210,6 +1241,31 @@ mod tests {
         );
         vault.unlock_with_passphrase("a longer new one").unwrap();
         assert_eq!(vault.get(&id).unwrap(), b"still readable");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A crash between moving the live index aside and renaming the new one
+    /// in left no `index.enc`, which used to read back as an empty library.
+    #[test]
+    fn missing_index_is_recovered_from_the_backup() {
+        let root = scratch("index-crash");
+        let vault = Vault::new(root.clone());
+        vault.create("a long test passphrase", false).unwrap();
+        let first = vault.put(b"first", an_item("a.png")).unwrap();
+        let second = vault.put(b"second", an_item("b.png")).unwrap();
+        // Writes keep the live file in place and leave a copy behind.
+        assert!(vault.index_path().exists());
+        assert!(vault.index_backup_path().exists());
+
+        // Simulate the crash window: only the backup survives.
+        std::fs::rename(vault.index_path(), vault.index_backup_path()).unwrap();
+        vault.lock();
+        vault
+            .unlock_with_passphrase("a long test passphrase")
+            .unwrap();
+        let items = vault.list().unwrap();
+        assert!(!items.is_empty(), "the library came back empty");
+        assert!(items.iter().any(|i| i.id == first || i.id == second));
         let _ = std::fs::remove_dir_all(root);
     }
 }
