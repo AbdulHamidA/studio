@@ -68,6 +68,24 @@ impl Engine {
     pub fn is_dead(&self) -> bool {
         self.dead.load(Ordering::Relaxed)
     }
+
+    /// A handle around an already-running stand-in process, for tests that
+    /// need an engine without a Python runtime or an `AppHandle`.
+    #[cfg(test)]
+    pub(crate) fn for_test(mut child: Child) -> Arc<Self> {
+        let stdin = child.stdin.take().expect("test child needs piped stdin");
+        Arc::new(Self {
+            stdin: Mutex::new(stdin),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            child: Mutex::new(child),
+            dead: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_exited(&self) -> bool {
+        matches!(self.child.lock().await.try_wait(), Ok(Some(_)))
+    }
 }
 
 impl Engine {

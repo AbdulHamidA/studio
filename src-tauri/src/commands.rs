@@ -113,8 +113,13 @@ pub fn setup_state(state: State<'_, AppState>) -> SetupState {
     setup::state(&state.paths())
 }
 
-#[tauri::command]
-pub async fn run_setup(app: AppHandle, state: State<'_, AppState>, force: bool) -> Result<()> {
+/// Take the runtime for a repair: no job running, and no worker either.
+///
+/// The job gate only proves nothing is generating. An idle worker is still a
+/// Python process running out of `python/` and the venv that setup is about
+/// to delete or rename, with a model's weights mapped from it. It is shut
+/// down first, and the next request starts a fresh one on the new runtime.
+async fn begin_runtime_repair(state: &AppState) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>> {
     if state.setup_running.swap(true, Ordering::AcqRel) {
         return Err(AppError::msg("Runtime setup is already running."));
     }
@@ -122,6 +127,13 @@ pub async fn run_setup(app: AppHandle, state: State<'_, AppState>, force: bool) 
         state.setup_running.store(false, Ordering::Release);
         AppError::msg("Wait for the current local job before repairing the runtime.")
     })?;
+    state.stop_engine().await;
+    Ok(exclusive)
+}
+
+#[tauri::command]
+pub async fn run_setup(app: AppHandle, state: State<'_, AppState>, force: bool) -> Result<()> {
+    let exclusive = begin_runtime_repair(&state).await?;
     let paths = state.paths();
     // Cleared on drop rather than by a statement after the await. A panic in
     // the setup task skipped that statement, leaving the flag set for the rest
@@ -2036,9 +2048,9 @@ pub fn remove_lora(state: State<'_, AppState>, handle: String) -> Result<Vec<Lor
 #[cfg(test)]
 mod tests {
     use super::{
-        app_owned_model_entries, dest_holds_other_files, foreign_model_entries, memory_verdict,
-        normalize_repo, sweep_orphans_gated, AppPaths, AppState, MemoryVerdict, Vault,
-        MOVE_STAGING_PREFIX,
+        app_owned_model_entries, begin_runtime_repair, dest_holds_other_files,
+        foreign_model_entries, memory_verdict, normalize_repo, sweep_orphans_gated, AppPaths,
+        AppState, MemoryVerdict, Vault, MOVE_STAGING_PREFIX,
     };
     use std::sync::Arc;
 
@@ -2140,6 +2152,34 @@ mod tests {
         );
         drop(job);
         assert!(sweep_orphans_gated(&state).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Setup deletes and renames the runtime the worker runs from. Taking only
+    /// the job gate left an idle worker alive on top of it.
+    #[tokio::test]
+    async fn runtime_repair_stops_the_worker_first() {
+        let root = scratch("repair-stops-worker");
+        let paths = AppPaths::at(root.clone());
+        let vault = Arc::new(Vault::new(paths.vault()));
+        let state = AppState::new(paths, vault);
+
+        // Stands in for an idle worker: exits when told to shut down.
+        let child = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("read line")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let engine = crate::engine::Engine::for_test(child);
+        *state.engine.lock().await = Some(engine.clone());
+
+        let _exclusive = begin_runtime_repair(&state).await.unwrap();
+        assert!(
+            state.engine.lock().await.is_none(),
+            "the worker was left in place"
+        );
+        assert!(engine.has_exited().await, "the worker is still running");
         std::fs::remove_dir_all(root).unwrap();
     }
 
