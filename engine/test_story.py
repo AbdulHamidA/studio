@@ -765,14 +765,16 @@ class VoiceAnalysis(unittest.TestCase):
         self.assertEqual(''.join(s['text'] for s in segments), self.SOURCE)
         self.assertEqual({s['mood'] for s in segments}, {'wry'})
 
-    def test_an_undeclared_speaker_is_repaired_and_unnumbered_quotes_stay_unattributed(self):
+    def test_an_undeclared_speaker_is_repaired_and_untagged_quotes_stay_unattributed(self):
         replies = iter([{"mood": "", "characters": [], "speakers": [{"quote": 1, "speaker_id": "ghost"}]},
                         {"mood": "", "characters": [{"id": "c1", "name": "Agnes Thorne", "aliases": [], "voice": ""}],
                          "speakers": [{"quote": 1, "speaker_id": "c1"}]}])
         book = story.analyze(self.SOURCE, lambda *_: json.dumps(next(replies)), mode="voice",
                              passage_words=700, passage_units=60)
         lines = [d['speaker_id'] is not None for s in book['chapters'][0]['scenes'] for b in s['beats'] for d in b['dialogue']]
-        self.assertEqual(lines, [True, False, False])
+        # The second line is tagged "I said": a Narrator is added for it.
+        self.assertEqual(lines, [True, True, False])
+        self.assertIn('Narrator', [c['name'] for c in book['characters']])
 
     def test_worker_casts_voices_in_long_passages_with_a_small_budget(self):
         import worker
@@ -1019,3 +1021,19 @@ class KokoroNarration(unittest.TestCase):
         import worker
         voices = worker.op_audio_voices('v', {"model_id": audiobook.KOKORO_MODEL_ID})['voices']
         self.assertIn({"id": "hm_omega", "language": "Hindi / Indian English"}, voices)
+
+
+class TagsOverrideTheWriter(unittest.TestCase):
+    def test_an_explicit_tag_corrects_a_wrong_attribution(self):
+        source = 'Agnes said, “Come in.” “I’m not late,” I said.'
+        group = story.passages(source)[0]
+        data = reply(group, [{"id": "a", "name": "Agnes", "aliases": [], "visual": "", "voice": ""}])
+        data['beats'][0]['dialogue'] = [{"speaker_id": "a", "text": "Come in.", "offscreen": False},
+                                        {"speaker_id": "a", "text": "I’m not late,", "offscreen": False}]
+        book = story.analyze(source, lambda *_: json.dumps(data))
+        people = {c['id']: c['name'] for c in book['characters']}
+        said = [people[d['speaker_id']] for d in book['chapters'][0]['scenes'][0]['beats'][0]['dialogue']]
+        self.assertEqual(said, ['Agnes', 'Narrator'])
+
+    def test_a_stray_straight_quote_inside_a_field_is_escaped(self):
+        self.assertEqual(story._loads('{"action": "Agnes says "hello" twice", "place": "pier"}')['place'], 'pier')

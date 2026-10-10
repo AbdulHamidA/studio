@@ -215,9 +215,18 @@ def _loads(raw):
                 slip = None
                 for m in re.finditer(r'[”’」』](?=\s*[,}\]])', window):
                     slip = max(0, exc.pos - 200) + m.end()
-                if slip is None:
-                    raise
-                fixed = raw[:slip] + '"' + raw[slip:]
+                if slip is not None:
+                    fixed = raw[:slip] + '"' + raw[slip:]
+                else:
+                    # A straight quote left unescaped inside a field ends the
+                    # string early: the last one before the failure that is not
+                    # followed by a delimiter is the stray, so escape it.
+                    stray = None
+                    for m in re.finditer(r'(?<!\\)"(?!\s*[,:}\]])', raw[:exc.pos]):
+                        stray = m.start()
+                    if stray is None:
+                        raise
+                    fixed = raw[:stray] + '\\"' + raw[stray + 1:]
             raw = fixed
     return json.loads(raw)
 
@@ -547,6 +556,18 @@ SPEECH_VERBS = (r'said|says|asked|asks|replied|replies|answered|called|calls|sho
                 r'whispered|muttered|murmured|added|snapped|laughed|sighed|told|continued|insisted|warned|began')
 
 
+def _ensure_narrator(characters, source):
+    """A first-person story whose prose tags its own lines ('I said') gets a
+    Narrator, so those lines have someone to belong to."""
+    if any(c["name"] == "Narrator" or set(c["aliases"]).intersection({"I", "me", "my"}) for c in characters):
+        return characters
+    narrative = QUOTE.sub(" ", source)
+    if not re.search(r'\b(?:I|me|my)\b', narrative) or not re.search(
+            r'[”"」]\s*,?\s*I\s+(?:' + SPEECH_VERBS + r')\b', source):
+        return characters
+    return [*characters, {"id": str(uuid.uuid4()), "name": "Narrator", "aliases": [], "visual": "", "voice": ""}]
+
+
 def _attribute_by_tags(beats, text, base, characters):
     """Give an unattributed line the speaker its speech tag names.
 
@@ -580,8 +601,6 @@ def _attribute_by_tags(beats, text, base, characters):
         return found.pop() if len(found) == 1 else None
 
     for n, line in enumerate(lines):
-        if line["speaker_id"] is not None:
-            continue
         a, b = line["start"] - base, line["end"] - base
         # The tag runs from the quote to the sentence end or the next quote.
         after = re.split(r'[“"「]|(?<=[.!?])\s', text[b + 1:b + 120], maxsplit=1)[0]
@@ -591,8 +610,16 @@ def _attribute_by_tags(beats, text, base, characters):
                 and not re.match(r'\s*I\b', after):
             after = ""
         before = re.split(r'[”"」]|[.!?]\s', text[max(0, a - 120):max(0, a - 1)])[-1]
-        line["speaker_id"] = who(after) or who(before)
-        if line["speaker_id"] is None and re.search(
+        # A tag that names the speaker settles it, even over the writer: a
+        # small writer gave '"I'm not late," I said' to the woman being
+        # answered. Pronoun tags below only fill gaps.
+        named = who(after) or who(before)
+        if named:
+            line["speaker_id"] = named
+            continue
+        if line["speaker_id"] is not None:
+            continue
+        if re.search(
                 r'\b(?:he|she)\s+(?:' + SPEECH_VERBS + r')\b|\b(?:' + SPEECH_VERBS + r')\s+(?:he|she)\b',
                 after or before, re.I):
             # "she said": the person the narration last named, if any. Quoted
@@ -731,6 +758,7 @@ def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: N
             _remember_state(continuity, beat)
     # Once more over the whole chapter: a tag's name can sit in the passage
     # before, and unanalysed passages have no attribution of their own.
+    book["characters"] = _ensure_narrator(book["characters"], source)
     _attribute_by_tags([b for s in scenes for b in s["beats"]], source, 0, book["characters"])
     chapter = {"id": chapter_id, "title": title.strip() or "Chapter",
                "source": source, "source_hash": hashlib.sha256(source.encode()).hexdigest(),
@@ -785,6 +813,7 @@ def resume(book, chapter_id, write, progress=lambda *_: None, passage_words=450,
     for k, scene in enumerate(chapter["scenes"]):
         rebuilt.extend(replaced.get(k, [scene]))
     chapter["scenes"] = rebuilt
+    book["characters"] = _ensure_narrator(book["characters"], chapter["source"])
     _attribute_by_tags([b for s in rebuilt for b in s["beats"]], chapter["source"], 0, book["characters"])
     validate_book(book)
     return book
