@@ -336,7 +336,10 @@ pub fn board_state_set(
     value: String,
     key: Option<String>,
 ) -> Result<()> {
-    if value.len() > 2 * 1024 * 1024 {
+    // A sanity bound, not a budget: the draft carries the chapter, its analysis
+    // and every panel's source, so one long CJK chapter was already past 2 MB
+    // and autosave failed for good.
+    if value.len() > 16 * 1024 * 1024 {
         return Err(AppError::msg("the Board draft is unexpectedly large"));
     }
     serde_json::from_str::<serde_json::Value>(&value)
@@ -2729,7 +2732,7 @@ pub fn story_library_get(state: State<'_, AppState>) -> Result<Option<String>> {
 
 #[tauri::command]
 pub fn story_library_set(state: State<'_, AppState>, value: String) -> Result<()> {
-    if value.len() > 8 * 1024 * 1024 {
+    if value.len() > 32 * 1024 * 1024 {
         return Err(AppError::msg(
             "the story library is too large; archive completed books",
         ));
