@@ -843,7 +843,7 @@ describe("director's camera in the prompt", () => {
     const words = cameraWords(panel({ shot: "MCU", angle: "low", framing: "ots", focus: "Agnes", cast,
       positions: { Agnes: "left third", Narrator: "right third" }, facing: { Agnes: "right", Narrator: "left" } }));
     expect(words[0]).toMatch(/medium close-up/);
-    expect(words).toContain("low-angle camera looking up at the subject");
+    expect(words.some((w) => w.startsWith("low-angle shot, camera near the ground"))).toBe(true);
     expect(words).toContain("over-the-shoulder shot from behind Narrator, looking at Agnes");
     expect(words).toContain("Agnes at the left third of the frame, facing right");
   });

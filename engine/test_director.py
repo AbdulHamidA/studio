@@ -157,3 +157,11 @@ class WorkerDirection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlaceMoves(unittest.TestCase):
+    def test_a_scene_moved_into_a_named_room_is_drawn_there(self):
+        self.assertEqual(director._named_place(["Her kitchen smelled of tar."], "pier"), "kitchen")
+        self.assertEqual(director._named_place(["We went into the hall."], "street"), "hall")
+        self.assertIsNone(director._named_place(["The harbour lay grey."], "pier"))
+        self.assertIsNone(director._named_place(["Her kitchen was warm."], "the kitchen"))

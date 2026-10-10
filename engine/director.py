@@ -72,6 +72,25 @@ def _named(sentence, people):
     return [c for _, c in sorted(found, key=lambda x: x[0])]
 
 
+# A place the prose moves into: someone's ("her kitchen") or entered ("into the
+# hall"). "The harbour lay grey" names where we already are, so it does not count.
+PLACE_NAMED = re.compile(r"\b(?:her|his|my|their|our|into the|inside the|into her|into his|into my)\s+(kitchen|bedroom|bathroom|hall|"
+                         r"hallway|parlou?r|living room|study|office|shop|cafe|café|bar|pub|inn|street|alley|road|"
+                         r"forest|woods|beach|shore|pier|harbou?r|dock|house|cottage|church|school|classroom|station|"
+                         r"platform|train|carriage|car|boat|ship|deck|garden|yard|field|cave|castle|tower|library|"
+                         r"hospital|ward|attic|cellar|basement|barn|market|square|bridge|roof|stairs|lighthouse)\b", re.I)
+
+
+def _named_place(sentences, current):
+    """The place a passage moves to, when its prose names one the analysis
+    did not: a small analyst kept a whole kitchen scene on the pier."""
+    for sentence in sentences:
+        m = PLACE_NAMED.search(sentence)
+        if m and m.group(1).casefold() not in (current or "").casefold():
+            return m.group(1).casefold()
+    return None
+
+
 def _human(place):
     return re.sub(r"[_-]+", " ", place or "").strip()
 
@@ -177,7 +196,13 @@ def plan(book, chapter_id, fmt="manga"):
     for scene_no, scene in enumerate(chapter["scenes"], 1):
         beats = scene["beats"]
         peak = max(beats, key=lambda b: (b["importance"], b["tension"])) if beats else None
+        moved = None
         for beat in beats:
+            is_peak = beat is peak
+            named = _named_place(_sentences(beat["source"]), beat["setting"])
+            moved = named or moved
+            if moved and moved not in beat["setting"].casefold():
+                beat = {**beat, "setting": moved, "location_id": moved, "location_state": ""}
             actors = [{**a, "name": people[a["character_id"]]["name"],
                        "visual": people[a["character_id"]]["visual"][:story.VISUAL_LIMIT]} for a in beat["visible"]]
             key = beat.get("location_id") or beat["setting"].casefold()
@@ -190,7 +215,10 @@ def plan(book, chapter_id, fmt="manga"):
 
             # A new place is shown before anything happens in it.
             if (key, setting_seen) != last_place and (key or setting_seen):
-                opening = narration.pop(0) if narration and PLACE.search(narration[0]) and not PERSON.search(narration[0]) else ""
+                # Only a sentence about the place itself opens on it; one about
+                # a person acting belongs to that person's panel.
+                opening = narration.pop(0) if narration and PLACE.search(narration[0]) and not PERSON.search(narration[0]) \
+                    and not _named(narration[0], book["characters"]) else ""
                 panels.append(mk(shot="EWS" if last_place is None else "WS", angle="high", framing="establishing",
                                  role="E", transition="scene", weight=3, purpose="establishing",
                                  moment=opening or f"The {_human(beat['setting']) or 'place'}, seen whole",
@@ -241,7 +269,7 @@ def plan(book, chapter_id, fmt="manga"):
                     if picture and tag:
                         p["caption"] = tag
                     panels.append(p)
-                    if beat is peak and n == len(groups) - 1 and listeners and beat["importance"] >= 4:
+                    if is_peak and n == len(groups) - 1 and listeners and beat["importance"] >= 4:
                         panels.append(mk(shot="CU", focus=listeners[0]["name"], cast=[_who(listeners[0])], role="R",
                                          transition="subject", purpose="reaction", weight=1,
                                          moment=f"{listeners[0]['name']} reacts, silent"))
@@ -298,7 +326,7 @@ def plan(book, chapter_id, fmt="manga"):
                     panels[-1]["caption"] = " ".join([panels[-1]["caption"], *rest]).strip()
 
             # The Peak: one per scene, the largest panel, camera by feeling.
-            if beat is peak and beat["importance"] >= 4 and len(panels) > first_of_beat:
+            if is_peak and beat["importance"] >= 4 and len(panels) > first_of_beat:
                 # The Peak is a person's moment where the beat has one.
                 mine = [p for p in panels[first_of_beat:] if p["role"] != "R"]
                 top = next((p for p in reversed(mine) if p["character_in_frame"]), mine[-1])
@@ -375,6 +403,15 @@ def rules(panels):
             else:
                 p["angle"] = "high" if p["angle"] == "eye" else "eye"
         out.append(p)
+    # A close shot holds one person: listing everyone visible drew a two-
+    # person medium shot whatever the shot was called.
+    for p in out:
+        if p["shot"] in ("MCU", "CU", "ECU") and p["framing"] not in ("ots", "two", "group") and len(p["cast"]) > 1:
+            keep = [a for a in p["cast"] if a["name"] == p["focus"]] or p["cast"][:1]
+            p["cast"], p["characters"] = keep, [a["name"] for a in keep]
+            p["positions"] = {k: v for k, v in p["positions"].items() if k in p["characters"]}
+            p["facing"] = {k: v for k, v in p["facing"].items() if k in p["characters"]}
+            p["focus"] = keep[0]["name"]
     # No more than four close shots in any ten.
     for i, p in enumerate(out):
         window = out[max(0, i - 9):i + 1]

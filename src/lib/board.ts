@@ -241,13 +241,15 @@ const SHOT_WORDS: Record<string, string> = {
   INSERT: "insert shot, a close view of one object or detail",
   wide: "wide shot", medium: "medium shot", "close-up": "close-up",
 };
+// Said as where the camera physically is: image models follow a described
+// position far better than an angle's name.
 const ANGLE_WORDS: Record<string, string> = {
   eye: "camera at eye level",
-  high: "high-angle camera looking down on the subject",
-  low: "low-angle camera looking up at the subject",
-  bird: "bird's-eye view from directly above",
-  worm: "worm's-eye view from the ground looking up",
-  dutch: "dutch angle, the horizon tilted",
+  high: "high-angle shot, camera above the subject looking down at them, they look small",
+  low: "low-angle shot, camera near the ground looking up at the subject, they tower over the viewer",
+  bird: "bird's-eye view, camera directly overhead looking straight down",
+  worm: "worm's-eye view, camera on the ground looking steeply up",
+  dutch: "dutch angle, the whole frame tilted, horizon on a diagonal",
 };
 
 /** The three layout classes the page compositor knows, from any shot. A
