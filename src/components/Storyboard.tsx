@@ -1,6 +1,6 @@
 import { ANALYST_IDS, castFromBook, type CharacterReference, type StoryBook, type StoryLibrary } from "../lib/story";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { api, errText, isCancelled, newJobId, onEngineProgress, vaultUrl,
+import { api, errText, isCancelled, isEngineDeath, newJobId, onEngineProgress, vaultUrl,
          type TextOverflow } from "../lib/api";
 import type { Cast, EngineProgress, ModelStatus, Panel } from "../lib/types";
 import { ImageDrop, JobProgress } from "./shared";
@@ -12,7 +12,7 @@ import { anchorOverflow, artOf, fromArrays, identify, setArt, toArrays,
          type BoardDoc, type PanelArt } from "../lib/boardDoc";
 import { loadBoardDraft, loadSavedBoard, type BoardDraft, type Coverage }
   from "../lib/boardDraft";
-import { CUSTOM_STYLE, STYLES, isKnownStyle, lockCustomStyle, lockStyle,
+import { CUSTOM_STYLE, STYLES, drawBatch, isKnownStyle, lockCustomStyle, lockStyle,
          panelPrompt, panelReferences, panelSeed, placeKey, placePrompt, identityPrompt, storyContinuityReference,
          placeSeed, previousPanel, reviveLock, sheetPrompt, styleHasMoved,
          styleLabel } from "../lib/board";
@@ -372,6 +372,8 @@ export default function Storyboard({
   /** Set when the user cancels, checked between panels. Cancelling the job in
    *  flight only ever stopped one panel; the loop then started the next. */
   const stop = useRef(false);
+  /** Why the last panel failed, read by the batch loop to decide whether to go on. */
+  const lastFailure = useRef<unknown>(null);
   const [elapsed, setElapsed] = useState(0);
   const [composing, setComposing] = useState(false);
   const [pages, setPages] = useState<string[]>([]);
@@ -902,11 +904,7 @@ export default function Storyboard({
       setSheet(existingSheet ?? null);
       const places = await buildPlaces();
       setStage("drawing");
-      for (const i of nextBatch()) {
-        if (stop.current) { notify("Stopped."); break; }
-        const ok = await drawOne(i, existingSheet ?? null, places);
-        if (!ok && stop.current) break;
-      }
+      await drawPanels(existingSheet ?? null, places);
       if (timer.current) { window.clearInterval(timer.current); timer.current = null; }
       setStage("idle"); setProg(null); setJobId(null);
       return;
@@ -948,13 +946,29 @@ export default function Storyboard({
     // and a board of six is minutes of work either way.
     const places = await buildPlaces();
     setStage("drawing");
-    for (const i of nextBatch()) {
-      if (stop.current) { notify("Stopped."); break; }
-      const ok = await drawOne(i, sheetId, places);
-      if (!ok && stop.current) break;
-    }
+    await drawPanels(sheetId, places);
     if (timer.current) { window.clearInterval(timer.current); timer.current = null; }
     setStage("idle"); setProg(null); setJobId(null);
+  };
+
+  /** Draw the next batch, stopping early when carrying on cannot help.
+   *
+   *  The toast is a single slot, so the closing message here replaces the
+   *  last panel's failure rather than adding to it: one clear reason the
+   *  batch ended instead of one red toast per remaining panel.
+   */
+  const drawPanels = async (sheetId: string | null, places: Record<string, string>) => {
+    const result = await drawBatch(nextBatch(), async (i) => {
+      lastFailure.current = null;
+      const ok = await drawOne(i, sheetId, places);
+      return ok ? { ok: true } : { ok: false, error: lastFailure.current };
+    }, () => stop.current, isEngineDeath);
+    if (result.end === "stopped") notify("Stopped.");
+    else if (result.end === "engine") {
+      notify(`${errText(result.error)} The rest of this batch was not drawn.`, true);
+    } else if (result.end === "repeated") {
+      notify(`Two panels in a row failed, so the batch stopped: ${errText(result.error)}`, true);
+    }
   };
 
   /** Draw each scene's room once, empty, for its panels to be set inside.
@@ -1186,6 +1200,7 @@ export default function Storyboard({
       const msg = errText(e);
       notify(`Panel ${i + 1}: ${msg}`, true);
       if (isCancelled(e)) stop.current = true;
+      lastFailure.current = e;
       return false;
     } finally {
       un();
