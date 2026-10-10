@@ -298,6 +298,7 @@ fn task_name(t: Task) -> &'static str {
         Task::Upscale => "Upscale",
         Task::Video => "Video",
         Task::Assist => "Prompt help",
+        Task::Speech => "Audiobook",
     }
 }
 
@@ -308,6 +309,7 @@ fn parse_task(s: &str) -> Option<Task> {
         "upscale" => Some(Task::Upscale),
         "video" => Some(Task::Video),
         "assist" => Some(Task::Assist),
+        "speech" => Some(Task::Speech),
         _ => None,
     }
 }

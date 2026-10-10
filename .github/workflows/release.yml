@@ -84,8 +84,8 @@ jobs:
       # commit, on a commit CI had already passed against the pinned set.
       - name: Engine tests
         run: |
-          python -m pip install --quiet pillow==12.3.0 pillow-heif==1.7.0 cryptography==50.0.1
-          python engine/test_worker.py
+          python -m pip install --quiet pillow==12.3.0 pillow-heif==1.7.0 cryptography==50.0.1 numpy==2.5.3
+          python -m unittest discover -s engine -v
 
       # The vault format check, the same script CI and preflight run. A release
       # that ships a host which seals differently than the engine opens makes

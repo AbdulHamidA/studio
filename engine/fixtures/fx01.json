@@ -1,6 +1,6 @@
 {
   "id": "FX-01",
-  "version": 1,
+  "version": 2,
   "language": "en",
   "rights": "Written for this test plan. Redistributable with the project.",
   "source": "My name is Mira Vale, though Jonas calls me Mi. In the station waiting room, I unhooked the brass key from my red coat and placed it in Jonas's open hand. He closed his fingers around it. A guard called from behind the locked door, “Last train!” I stayed beside the bench while Jonas used the key to unlock the door. When he opened it, he found the platform empty. The train had gone.",
@@ -74,7 +74,9 @@
       "span": [
         77,
         153
-      ]
+      ],
+      "importance": 4,
+      "mood": "trust"
     },
     {
       "id": "b2",
@@ -86,7 +88,9 @@
       "span": [
         155,
         186
-      ]
+      ],
+      "importance": 3,
+      "mood": "resolve"
     },
     {
       "id": "b3",
@@ -101,7 +105,9 @@
       ],
       "speaker": "guard",
       "speech": "Last train!",
-      "note": "Offscreen speech. The door is established as locked here."
+      "note": "Offscreen speech. The door is established as locked here.",
+      "importance": 4,
+      "mood": "urgency"
     },
     {
       "id": "b4",
@@ -119,7 +125,9 @@
         "b1",
         "b2"
       ],
-      "note": "He can open it because he was given the key. The causal link is the point of the scene."
+      "note": "He can open it because he was given the key. The causal link is the point of the scene.",
+      "importance": 4,
+      "mood": "anticipation"
     },
     {
       "id": "b5",
@@ -135,7 +143,9 @@
       "depends_on": [
         "b4"
       ],
-      "note": "The reveal. It is the last thing in the source and must survive any chunking."
+      "note": "The reveal. It is the last thing in the source and must survive any chunking.",
+      "importance": 5,
+      "mood": "loss"
     }
   ],
   "state_transitions": [
@@ -209,7 +219,13 @@
         0,
         47
       ],
-      "why": "Identity, not an event. It establishes that Mira, Mi and the narrator are one person, which the cast read must get right and which no panel has to depict."
+      "why": "Identity, not an event. It establishes that Mira, Mi and the narrator are one person, which the cast read must get right and which no panel has to depict.",
+      "importance": 1
     }
-  ]
+  ],
+  "evaluation": {
+    "essential_beat_recall": "Every essential beat must be represented by source spans; context-only identity need not receive a dedicated visual.",
+    "ending_required": "b5",
+    "dialogue_preservation": "Last train! remains verbatim and guard stays offscreen."
+  }
 }

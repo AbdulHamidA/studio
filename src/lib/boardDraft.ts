@@ -1,3 +1,4 @@
+import type { StoryBook } from "./story";
 import { api, type TextOverflow } from "./api";
 import { loadPref, removePref } from "./prefs";
 import type { StyleLock } from "./board";
@@ -21,6 +22,9 @@ export interface Coverage {
 }
 
 export interface BoardDraft {
+  storyBook?: StoryBook | null;
+  chapterId?: string | null;
+  characterSheets?: Record<string, string>;
   /**
    * Still 1, and deliberately.
    *

@@ -92,10 +92,10 @@ jobs:
       # Only what the tests touch. Installing mlx-gen would pull PyTorch and
       # several gigabytes of weights for tests that never load a model.
       - name: Install test dependencies
-        run: python -m pip install --quiet pillow==12.3.0 pillow-heif==1.7.0 cryptography==50.0.1
+        run: python -m pip install --quiet pillow==12.3.0 pillow-heif==1.7.0 cryptography==50.0.1 numpy==2.5.3
 
       - name: Tests
-        run: python engine/test_worker.py
+        run: python -m unittest discover -s engine -v
 
   interop:
     name: Vault format interop

@@ -1,0 +1,161 @@
+{
+  "title": "The missed train",
+  "summary": "A gift of trust enables the attempt to leave, but the final reveal turns hope into loss.",
+  "characters": [
+    {
+      "id": "mira",
+      "name": "Mira Vale",
+      "aliases": [
+        "Mira",
+        "Mi",
+        "I",
+        "my",
+        "me"
+      ],
+      "visual": "red coat",
+      "voice": "quiet, reflective"
+    },
+    {
+      "id": "jonas",
+      "name": "Jonas",
+      "aliases": [],
+      "visual": "",
+      "voice": "restrained"
+    },
+    {
+      "id": "guard",
+      "name": "A guard",
+      "aliases": [
+        "guard"
+      ],
+      "visual": "",
+      "voice": "urgent"
+    }
+  ],
+  "beats": [
+    {
+      "units": [
+        0
+      ],
+      "importance": 1,
+      "tension": 1,
+      "action": "Mira stands beside Jonas",
+      "setting": "station waiting room",
+      "mood": "quiet familiarity",
+      "visible": [
+        {
+          "character_id": "mira",
+          "expression": "attentive",
+          "body_language": "standing"
+        },
+        {
+          "character_id": "jonas",
+          "expression": "worried",
+          "body_language": "standing"
+        }
+      ],
+      "dialogue": []
+    },
+    {
+      "units": [
+        1
+      ],
+      "importance": 4,
+      "tension": 4,
+      "action": "Mira takes the brass key from her red coat and puts it in Jonas's open hand.",
+      "setting": "station waiting room",
+      "mood": "trust",
+      "visible": [
+        {
+          "character_id": "mira",
+          "expression": "attentive",
+          "body_language": "standing"
+        },
+        {
+          "character_id": "jonas",
+          "expression": "worried",
+          "body_language": "standing"
+        }
+      ],
+      "dialogue": []
+    },
+    {
+      "units": [
+        2
+      ],
+      "importance": 3,
+      "tension": 3,
+      "action": "Jonas closes his fingers around the key. Possession has changed.",
+      "setting": "station waiting room",
+      "mood": "resolve",
+      "visible": [
+        {
+          "character_id": "jonas",
+          "expression": "worried",
+          "body_language": "standing"
+        }
+      ],
+      "dialogue": []
+    },
+    {
+      "units": [
+        3
+      ],
+      "importance": 4,
+      "tension": 4,
+      "action": "A guard calls a warning from behind the locked door.",
+      "setting": "station waiting room",
+      "mood": "urgency",
+      "visible": [],
+      "dialogue": [
+        {
+          "speaker_id": "guard",
+          "text": "Last train!",
+          "offscreen": true
+        }
+      ]
+    },
+    {
+      "units": [
+        4
+      ],
+      "importance": 4,
+      "tension": 4,
+      "action": "Jonas unlocks the door with the key while Mira stays by the bench.",
+      "setting": "station waiting room",
+      "mood": "anticipation",
+      "visible": [
+        {
+          "character_id": "mira",
+          "expression": "attentive",
+          "body_language": "standing"
+        },
+        {
+          "character_id": "jonas",
+          "expression": "worried",
+          "body_language": "standing"
+        }
+      ],
+      "dialogue": []
+    },
+    {
+      "units": [
+        5,
+        6
+      ],
+      "importance": 5,
+      "tension": 5,
+      "action": "He opens the door and finds the platform empty. The train has gone.",
+      "setting": "empty platform",
+      "mood": "loss",
+      "visible": [
+        {
+          "character_id": "jonas",
+          "expression": "worried",
+          "body_language": "standing"
+        }
+      ],
+      "dialogue": []
+    }
+  ]
+}

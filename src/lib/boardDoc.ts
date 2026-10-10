@@ -149,7 +149,7 @@ export function setArt(
  */
 const ART_FIELDS = [
   "shot", "subject", "action", "setting", "character_in_frame",
-  "characters", "place", "place_key", "description",
+  "characters", "place", "place_key", "description", "cast", "mood", "tension", "location_state",
 ] as const;
 
 /** Fields that make the worked-up description stale, because it came from them. */
@@ -200,7 +200,10 @@ export function edit(
   const stale = staleness(patch);
   const panels = doc.panels.map(
     (p) => (p.id === id
-      ? { ...p, ...patch, ...(stale.description ? { description: "" } : {}) }
+      ? { ...p, ...patch, ...(stale.description ? { description: "" } : {}),
+          ...((patch.characters !== undefined || patch.character_in_frame === false) && patch.cast === undefined
+            ? { cast: p.cast?.filter((a) => patch.character_in_frame !== false &&
+                (patch.characters ?? p.characters ?? []).includes(a.name)) } : {}) }
       : p));
   let art = doc.art;
   const current = artOf(doc, id);

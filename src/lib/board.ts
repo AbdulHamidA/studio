@@ -282,6 +282,22 @@ function stripShotEcho(described: string): string {
 export function panelPrompt(
   panel: Panel, style: StyleLock, character: string, note?: string
 ): string {
+  if (panel.cast !== undefined) {
+    const actors = panel.cast.map((actor) => [actor.name, actor.visual,
+      actor.appearance && `Current appearance (replaces earlier clothing and condition): ${actor.appearance}`,
+      actor.expression && `expression: ${actor.expression}`,
+      actor.body_language && `body language: ${actor.body_language}`].filter(Boolean).join(", "));
+    const reference = panel.cast.length > 1
+      ? `Character reference figures from left to right: ${panel.cast.map((a) => a.name).join(", ")}` : "";
+    return [style.words, style.framing, `${panel.shot} shot`, reference,
+      "Character references establish identity only; follow the current outfit, pose and scene instead of copying reference clothing or background",
+      panel.cast.length ? `Only visible people: ${panel.cast.map((a) => a.name).join(", ")}` : "No people visible in frame",
+      ...actors, panel.subject, panel.purpose === "reaction" ? `Reaction immediately after: ${panel.action}` : panel.action, panel.setting,
+      panel.mood && `Mood: ${panel.mood}`, panel.tension && `Tension ${panel.tension} of 5`,
+      panel.location_state && `Current location state: ${panel.location_state}`,
+      panel.description, shotBackground(panel.shot), note]
+      .filter(Boolean).map((part) => String(part).trim().replace(/[.,;:]+$/, "")).join(". ") + ".";
+  }
   const cast = character.trim();
   const subject = panel.subject.trim();
   // The subject used to be joined onto the cast description with ", ", which
@@ -492,6 +508,30 @@ export function panelReferences(
   // drawn from its prompt instead; the style words are in the prompt, so the
   // board still holds together.
   return refs.slice(0, Math.max(1, budget));
+}
+
+/** A face reference avoids making one outfit the permanent character design. */
+export function identityPrompt(style: StyleLock, character: string): string {
+  return `${style.words}. Single character identity study: front and three-quarter face views,
+consistent facial proportions, hair, skin and distinguishing features. Neutral expression,
+plain background, simple neutral neckline. No full-body outfit, props, scenery or lettering.
+${character.trim()}.`;
+}
+
+/** Structured continuity requires the exact visible cast and current state. */
+export function storyContinuityReference(index: number, panels: Panel[], drawn: (string | null)[]): string | null {
+  const next = panels[index];
+  if (!next?.cast) return null;
+  const signature = (p: Panel) => JSON.stringify((p.cast ?? []).map((a) =>
+    [a.character_id, a.appearance ?? ""]).sort((a, b) => a[0].localeCompare(b[0])));
+  for (let i = index - 1; i >= 0; i--) {
+    const prev = panels[i];
+    if (prev.chapter_id !== next.chapter_id) break;
+    if (placeKey(prev) === placeKey(next) && signature(prev) === signature(next)
+        && (prev.location_state ?? "") === (next.location_state ?? "")
+        && continuesFrom({ ...prev, scene: next.scene }, next) && drawn[i]) return drawn[i];
+  }
+  return null;
 }
 
 /**

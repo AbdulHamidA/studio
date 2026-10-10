@@ -342,6 +342,9 @@ fn sniff_mime(bytes: &[u8]) -> &'static str {
         _ if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" => {
             "image/webp"
         }
+        _ if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE" => {
+            "audio/wav"
+        }
         _ => "application/octet-stream",
     }
 }
@@ -1081,6 +1084,11 @@ fn delete_biometric_kek() -> Result<(), VaultError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recovered_audio_is_recognized_as_wav() {
+        assert_eq!(super::sniff_mime(b"RIFF0000WAVEdata"), "audio/wav");
+        assert_eq!(super::sniff_mime(b"RIFF"), "application/octet-stream");
+    }
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {

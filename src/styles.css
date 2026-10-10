@@ -582,3 +582,17 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
                        text-decoration: line-through; }
 .proposal .seen { margin-top: 8px; color: var(--text-dim); font-size: 11px; }
 .proposal .row { display: flex; gap: 6px; margin-top: 10px; }
+
+.audiobook-workspace { display: grid; grid-template-columns: minmax(260px, 380px) minmax(300px, 1fr); gap: 24px; }
+.audiobook-workspace .pane { padding: 20px; background: var(--bg-raised); border: 1px solid var(--border); border-radius: 8px; }
+.audiobook-workspace label { display: flex; flex-direction: column; gap: 6px; margin: 14px 0; }
+.audiobook-workspace label:has(input[type="checkbox"]) { flex-direction: row; align-items: center; }
+.audiobook-workspace textarea { width: 100%; resize: vertical; }
+.audiobook-workspace audio { width: 100%; }
+.audio-result { margin: 18px 0; }
+.story-character-sheets { display: flex; flex-wrap: wrap; gap: 12px; margin: 18px 0; }
+.story-character-sheets .sub-head { width: 100%; }
+.story-character-sheets figure { width: 120px; margin: 0; }
+.story-character-sheets img { width: 100%; border-radius: 6px; }
+.story-character-sheets figcaption { margin-top: 4px; font-size: 12px; }
+@media (max-width: 850px) { .audiobook-workspace { grid-template-columns: 1fr; } }

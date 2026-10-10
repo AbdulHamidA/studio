@@ -22,7 +22,8 @@ system-wide.
 ```sh
 npm test                       # frontend
 cd src-tauri && cargo test     # rust
-python engine/test_worker.py   # engine
+python -m pip install pillow==12.3.0 pillow-heif==1.7.0 cryptography==50.0.1 numpy==2.5.3
+python -m unittest discover -s engine -v   # engine and shared-story/audio logic
 ```
 
 CI runs all three plus `cargo fmt --check`, clippy with warnings denied, and

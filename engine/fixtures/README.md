@@ -46,3 +46,10 @@ the brass key are already the de facto fixture across `test_worker.py`,
 `board.test.ts` and the comments in `worker.py` and `board.ts` -- this makes
 the thing they are all informally testing against into something a test can
 actually read.
+
+FX-01 version 2 scores importance and mood as well as essential-beat recall.
+`fx01.analysis.json` is a scripted, schema-valid scene response used to check
+the shared director and audio segmentation. It is an answer key, not evidence
+of a real model run. `test_story.py` checks that every essential source span
+and the final reveal survive, aliases retain one ID, and the guard's exact
+warning is kept without putting him in frame.

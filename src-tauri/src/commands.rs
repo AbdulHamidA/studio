@@ -938,7 +938,7 @@ pub async fn download_model(
                 // huggingface_hub directly.
                 "via": if entry.backend.is_some() {
                     "mflux"
-                } else if entry.tasks.contains(&crate::catalog::Task::Assist) {
+                } else if entry.tasks.contains(&crate::catalog::Task::Assist) || entry.tasks.contains(&crate::catalog::Task::Speech) {
                     "hf"
                 } else {
                     "mlxgen"
@@ -997,6 +997,8 @@ pub fn mime_for(ext: &str) -> &'static str {
         "pdf" => "application/pdf",
         "txt" | "md" => "text/plain",
         "json" => "application/json",
+        "wav" => "audio/wav",
+        "aiff" | "aif" => "audio/aiff",
         _ => "application/octet-stream",
     }
 }
@@ -2127,15 +2129,21 @@ pub async fn enrich_panels(
     state.require_unlocked()?;
 
     let host = HostInfo::probe(&state.paths());
-    let writer = models::find(&state.paths(), &host, "qwen3-4b-instruct-4bit")
-        .ok_or_else(|| AppError::msg("the prompt writer is missing from the catalog"))?;
-    if !writer.installed {
-        return Err(AppError::msg(
-            "Working up the panels needs the prompt writer. Add it from the \
-             Models tab \u{2014} it is a 2.1 GiB download and runs entirely on \
-             this Mac.",
-        ));
-    }
+    let writer = [
+        "qwen3-14b-story-4bit",
+        "qwen3-8b-story-4bit",
+        "qwen3-4b-instruct-4bit",
+    ]
+    .into_iter()
+    .filter(|id| *id != "qwen3-14b-story-4bit" || host.total_ram_gib >= 24.0)
+    .filter_map(|id| models::find(&state.paths(), &host, id))
+    .find(|m| {
+        m.installed
+            && !m.hopeless
+            && m.broken.is_none()
+            && (m.id != "qwen3-14b-story-4bit" || host.total_ram_gib >= 24.0)
+    })
+    .ok_or_else(|| AppError::msg("Install a story analyst or prompt writer from Models."))?;
 
     let engine = state.engine(&app).await?;
     engine
@@ -2711,4 +2719,281 @@ mod transient_tests {
         // must keep showing everything it always showed.
         assert!(!VaultItem::default().transient);
     }
+}
+
+/// Shared story library, encrypted with the manuscript and vault index.
+#[tauri::command]
+pub fn story_library_get(state: State<'_, AppState>) -> Result<Option<String>> {
+    Ok(state.vault.get_state("story-library")?)
+}
+
+#[tauri::command]
+pub fn story_library_set(state: State<'_, AppState>, value: String) -> Result<()> {
+    if value.len() > 8 * 1024 * 1024 {
+        return Err(AppError::msg(
+            "the story library is too large; archive completed books",
+        ));
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&value)
+        .map_err(|e| AppError::msg(format!("invalid story library: {e}")))?;
+    if parsed["version"] != 1 || !parsed["books"].is_array() {
+        return Err(AppError::msg("unsupported story library"));
+    }
+    if let Some(old) = state.vault.get_state("story-library")? {
+        state.vault.set_state("prev-story-library", old)?;
+    }
+    Ok(state.vault.set_state("story-library", value)?)
+}
+
+#[derive(Deserialize)]
+pub struct StoryAnalysis {
+    source: String,
+    title: String,
+    previous: Option<serde_json::Value>,
+    model_id: Option<String>,
+}
+
+#[tauri::command]
+pub async fn analyze_story(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+    args: StoryAnalysis,
+) -> Result<serde_json::Value> {
+    let _job = state.job_gate.read().await;
+    state.require_unlocked()?;
+    let host = HostInfo::probe(&state.paths());
+    let ids = if let Some(ref id) = args.model_id {
+        vec![id.as_str()]
+    } else if host.total_ram_gib >= 24.0 {
+        vec![
+            "qwen3-14b-story-4bit",
+            "qwen3-8b-story-4bit",
+            "qwen3-4b-instruct-4bit",
+        ]
+    } else {
+        vec!["qwen3-8b-story-4bit", "qwen3-4b-instruct-4bit"]
+    };
+    let writer = ids
+        .into_iter()
+        .filter(|id| {
+            [
+                "qwen3-14b-story-4bit",
+                "qwen3-8b-story-4bit",
+                "qwen3-4b-instruct-4bit",
+            ]
+            .contains(id)
+        })
+        .filter_map(|id| models::find(&state.paths(), &host, id))
+        .find(|m| {
+            m.installed
+                && !m.hopeless
+                && m.broken.is_none()
+                && (m.id != "qwen3-14b-story-4bit" || host.total_ram_gib >= 24.0)
+        })
+        .ok_or_else(|| {
+            AppError::msg("Install a story analyst or the prompt writer from Models first.")
+        })?;
+    let engine = state.engine(&app).await?;
+    engine
+        .request(
+            &job_id,
+            "story_analyze",
+            json!({
+                "source": args.source, "title": args.title, "previous": args.previous,
+                "writer": writer.repo,
+            }),
+        )
+        .await
+}
+
+#[tauri::command]
+pub async fn audio_voices(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    model_id: Option<String>,
+) -> Result<serde_json::Value> {
+    let _job = state.job_gate.read().await;
+    state.require_unlocked()?;
+    state
+        .engine(&app)
+        .await?
+        .request(
+            "audio-voices",
+            "audio_voices",
+            json!({"model_id": model_id}),
+        )
+        .await
+}
+
+#[derive(Deserialize)]
+pub struct AudiobookArgs {
+    model_id: Option<String>,
+    language: Option<String>,
+    delivery: Option<String>,
+    directions: Option<serde_json::Value>,
+    book: serde_json::Value,
+    chapter_id: String,
+    narrator: String,
+    voices: serde_json::Value,
+    rate: u32,
+}
+
+#[tauri::command]
+pub async fn generate_audiobook(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+    args: AudiobookArgs,
+) -> Result<String> {
+    let _job = state.job_gate.read().await;
+    state.require_unlocked()?;
+    let chapter = args.book["chapters"]
+        .as_array()
+        .and_then(|chapters| {
+            chapters
+                .iter()
+                .find(|c| c["id"].as_str() == Some(&args.chapter_id))
+        })
+        .ok_or_else(|| AppError::msg("choose an analyzed chapter"))?;
+    let title = chapter["title"].as_str().unwrap_or("Chapter").to_owned();
+    let model_name = if let Some(ref model_id) = args.model_id {
+        if model_id != "macos" {
+            if model_id != "qwen3-tts-1.7b-custom-6bit" {
+                return Err(AppError::msg("choose a supported audiobook model"));
+            }
+            let host = HostInfo::probe(&state.paths());
+            let model = models::find(&state.paths(), &host, model_id)
+                .ok_or_else(|| AppError::msg("unknown audiobook model"))?;
+            if !model.installed || model.hopeless {
+                return Err(AppError::msg("Download the audiobook voices model in Models and check its memory requirements."));
+            }
+            model.name
+        } else {
+            "macOS installed voices".into()
+        }
+    } else {
+        "macOS installed voices".into()
+    };
+    let engine = state.engine(&app).await?;
+    let (id, file_id, key, path) = state.vault.reserve_slot()?;
+    let started = std::time::Instant::now();
+    let result = engine.request(&job_id, "audiobook", json!({
+        "book": args.book, "chapter_id": args.chapter_id,
+        "narrator": args.narrator, "voices": args.voices, "rate": args.rate,
+        "model_id": args.model_id, "language": args.language,
+        "delivery": args.delivery, "directions": args.directions,
+        "vault_slots": [{"id": id, "file_id": hex(&file_id), "key": hex(&key), "path": path.to_string_lossy()}],
+    })).await;
+    let result = match result {
+        Ok(result) if result["sealed"] == true && result["sizes"][0].as_u64().unwrap_or(0) > 0 => {
+            result
+        }
+        Ok(_) => {
+            state.vault.discard_slots(std::slice::from_ref(&id));
+            return Err(AppError::msg("the speech engine returned an empty chapter"));
+        }
+        Err(error) => {
+            state.vault.discard_slots(std::slice::from_ref(&id));
+            return Err(error);
+        }
+    };
+    let safe: String = title
+        .chars()
+        .map(|c| if "/\\:*?\"<>|".contains(c) { '-' } else { c })
+        .collect();
+    let item = VaultItem {
+        id: id.clone(),
+        kind: "audiobook".into(),
+        name: format!("{}.wav", safe.trim()),
+        mime: "audio/wav".into(),
+        bytes: result["sizes"][0].as_u64().unwrap_or(0),
+        model: model_name,
+        prompt: title,
+        created_at: chrono::Local::now().to_rfc3339(),
+        duration_ms: started.elapsed().as_millis() as u64,
+        ..Default::default()
+    };
+    if let Err(error) = state.vault.commit_slot(item) {
+        state.vault.discard_slots(std::slice::from_ref(&id));
+        return Err(error.into());
+    }
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn character_reference(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+    images: Vec<String>,
+) -> Result<String> {
+    let _job = state.job_gate.read().await;
+    state.require_unlocked()?;
+    if !(2..=8).contains(&images.len()) {
+        return Err(AppError::msg(
+            "combine between two and eight character sheets",
+        ));
+    }
+    let mut inputs = Vec::new();
+    for id in &images {
+        let (fid, key, path) = state.vault.input_key(id)?;
+        inputs.push(json!({"id": id, "file_id": hex(&fid), "key": hex(&key), "path": path.to_string_lossy()}));
+    }
+    let engine = state.engine(&app).await?;
+    let (id, fid, key, path) = state.vault.reserve_slot()?;
+    let result = engine.request(&job_id, "character_reference", json!({
+        "vault_inputs": inputs,
+        "vault_slots": [{"id": id, "file_id": hex(&fid), "key": hex(&key), "path": path.to_string_lossy()}],
+    })).await;
+    let result = match result {
+        Ok(r) if r["sealed"] == true && r["sizes"][0].as_u64().unwrap_or(0) > 0 => r,
+        Ok(_) => {
+            state.vault.discard_slots(std::slice::from_ref(&id));
+            return Err(AppError::msg(
+                "character reference composition returned no image",
+            ));
+        }
+        Err(e) => {
+            state.vault.discard_slots(std::slice::from_ref(&id));
+            return Err(e);
+        }
+    };
+    if let Err(error) = state.vault.commit_slot(VaultItem {
+        id: id.clone(),
+        kind: "reference".into(),
+        name: "character-reference.png".into(),
+        mime: "image/png".into(),
+        bytes: result["sizes"][0].as_u64().unwrap_or(0),
+        model: "composed".into(),
+        inputs: images,
+        transient: true,
+        created_at: chrono::Local::now().to_rfc3339(),
+        ..Default::default()
+    }) {
+        state.vault.discard_slots(std::slice::from_ref(&id));
+        return Err(error.into());
+    }
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn direct_story(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+    book: serde_json::Value,
+    chapter_id: String,
+) -> Result<serde_json::Value> {
+    let _job = state.job_gate.read().await;
+    state.require_unlocked()?;
+    state
+        .engine(&app)
+        .await?
+        .request(
+            &job_id,
+            "direct_story",
+            json!({"book": book, "chapter_id": chapter_id}),
+        )
+        .await
 }

@@ -114,7 +114,7 @@ export default function Gallery({
 
   const KIND_LABEL: Record<string, string> = {
     generate: "Generated", edit: "Edited", upscale: "Enlarged",
-    video: "Animated", import: "Imported", doc: "Document",
+    audiobook: "Audiobook", video: "Animated", import: "Imported", doc: "Document",
     recovered: "Recovered", mask: "Mask",
   };
 
@@ -240,6 +240,7 @@ export default function Gallery({
   };
 
   const isImage = (i: VaultItem) => i.mime.startsWith("image/");
+  const isAudio = (i: VaultItem) => i.mime.startsWith("audio/");
   const isVideo = (i: VaultItem) => i.mime.startsWith("video/");
 
   // Opening a board shows the comic, not the first panel's metadata. A board
@@ -551,7 +552,7 @@ export default function Gallery({
               {isImage(open) && send && (
                 <SendTo ids={[open.id]} send={send} models={models} />
               )}
-              {onReuse && open.prompt && (
+              {onReuse && open.prompt && !isAudio(open) && (
                 <>
                   <button className="btn small primary" onClick={() => onReuse(open, false)}>
                     Make another like this
@@ -578,6 +579,8 @@ export default function Gallery({
           <div className="canvas">
             {isImage(open) ? (
               <img src={vaultUrl(open.id)} alt="" />
+            ) : isAudio(open) ? (
+              <audio controls preload="metadata" src={vaultUrl(open.id)} />
             ) : isVideo(open) ? (
               <video src={vaultUrl(open.id)} controls loop autoPlay muted
                 style={{ maxWidth: "100%", maxHeight: "64vh", borderRadius: 6 }} />
@@ -684,7 +687,7 @@ export default function Gallery({
                 aspectRatio: "1", display: "flex", alignItems: "center",
                 justifyContent: "center", fontSize: 28, color: "var(--text-faint)",
                 background: "#0b0d12",
-              }}>▤</div>}
+              }}>{isAudio(it) ? "♫" : "▤"}</div>}
           {members.length > 1 && (
             <span className="count" title={`${members.length} pictures in this board`}>
               {members.length}
