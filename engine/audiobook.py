@@ -133,7 +133,11 @@ def load_kokoro_model():
         import en_core_web_sm  # noqa: F401
     except ImportError as exc:
         raise ValueError("Kokoro's text packages are missing; download Kokoro again in Models") from exc
-    return load_model(local)
+    model = load_model(local)
+    # Voices otherwise load lazily from another repository over the network;
+    # the downloaded one already holds them under voices/.
+    model.repo_id = KOKORO_REPO
+    return model
 
 
 def kokoro_language(voice, text):
