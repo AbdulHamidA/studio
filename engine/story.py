@@ -44,6 +44,61 @@ Carry unchanged facts forward, but replace facts changed by the story.
 """
 
 
+VOICE_SYSTEM = """You cast an audiobook. Return only the requested JSON, compact on one line.
+Quoted speech in the passage is numbered like [3]“...”. For every number give the
+speaker's character id, or null when the text does not make the speaker clear.
+Use ids from the character bible. Declare only people new to the bible in
+characters, with a short local id (c1, c2) and the name exactly as the source
+gives it, then use that id. Never use a pronoun, a group, or a phrase describing
+someone as a name. For unnamed first-person narration the name Narrator is
+allowed. mood is the passage's emotional tone in a few words. voice is a short
+direction for how a new person sounds.
+"""
+
+
+def voice_instruction(group, characters):
+    """The passage with its quotes numbered, for speaker attribution only."""
+    text, cursor, numbered = ''.join(u["text"] for u in group), 0, []
+    for n, (at, quoted) in enumerate(quotes(text), 1):
+        open_at = at - 1 if at and text[at - 1] in '“"「' else at
+        numbered.append(text[cursor:open_at] + f"[{n}]")
+        cursor = open_at
+    numbered.append(text[cursor:])
+    bible = [{k: c[k] for k in ("id", "name", "aliases", "voice")} for c in characters]
+    schema = {"mood": "emotional tone", "characters": [{"id": "c1", "name": "literal source name",
+              "aliases": [], "voice": "voice direction"}], "speakers": [{"quote": 1, "speaker_id": "c1"}]}
+    return ("Character bible:\n" + json.dumps(bible, ensure_ascii=False)
+            + "\nReturn this schema:\n" + json.dumps(schema, ensure_ascii=False)
+            + "\nPassage:\n" + ''.join(numbered))
+
+
+def voice_scene_reply(raw, group, number):
+    """A voice reply restated as a scene reply, so `parse_scene` applies every
+    identity and source rule to it unchanged. One beat per passage: the
+    audiobook needs who speaks and the mood, not shots or appearances."""
+    raw = raw.strip()
+    if raw.startswith('```json') and raw.endswith('```'):
+        raw = raw[7:-3].strip()
+    reply = json.loads(raw)
+    if not isinstance(reply, dict):
+        raise ValueError("reply must be an object")
+    said = {}
+    for line in _array(reply.get("speakers", []), "speakers"):
+        if isinstance(line, dict) and type(line.get("quote")) is int:
+            who = line.get("speaker_id")
+            said[line["quote"]] = who if isinstance(who, str) and who.strip() else None
+    text = ''.join(u["text"] for u in group)
+    characters = [{**c, "visual": ""} for c in _array(reply.get("characters", []), "characters")
+                  if isinstance(c, dict)]
+    mood = reply.get("mood") if isinstance(reply.get("mood"), str) else ""
+    return json.dumps({
+        "title": f"Passage {number}", "summary": "Voice casting", "characters": characters,
+        "beats": [{"units": [u["id"] for u in group], "importance": 2, "tension": 2,
+                   "action": "Narrated passage", "setting": "", "mood": mood[:200], "visible": [],
+                   "dialogue": [{"speaker_id": said.get(n), "text": quoted, "offscreen": False}
+                                for n, (_, quoted) in enumerate(quotes(text), 1)]}]})
+
+
 def units(source):
     """Sentence units, keeping multi-sentence quoted dialogue intact."""
     result, start, quote = [], 0, None
@@ -372,7 +427,11 @@ def _unanalysed_scene(group, scene_id, number):
 
 
 def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: None,
-            passage_words=450, passage_units=8, warn=lambda _: None):
+            passage_words=450, passage_units=8, warn=lambda _: None, mode="full"):
+    """`mode="voice"` asks only who speaks each quote and the mood: enough for
+    the audiobook at a fraction of the writing, but nothing to draw from."""
+    if mode not in ("full", "voice"):
+        raise ValueError("unknown analysis mode")
     if not isinstance(source, str) or not source.strip():
         raise ValueError("paste a chapter first")
     if len(source) > 200000:
@@ -390,11 +449,13 @@ def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: N
                 _remember_state(continuity, old_beat)
     for i, group in enumerate(groups):
         progress(i, len(groups))
-        prompt = instruction(group, book["characters"], continuity)
+        voice = mode == "voice"
+        prompt = voice_instruction(group, book["characters"]) if voice else instruction(group, book["characters"], continuity)
         for attempt in range(2):
-            raw = write(SCENE_SYSTEM, prompt)
+            raw = write(VOICE_SYSTEM if voice else SCENE_SYSTEM, prompt)
             try:
-                scene, characters = parse_scene(raw, group, book["characters"], f"{chapter_id}-s{i + 1}")
+                reply = voice_scene_reply(raw, group, i + 1) if voice else raw
+                scene, characters = parse_scene(reply, group, book["characters"], f"{chapter_id}-s{i + 1}")
                 break
             except (ValueError, TypeError, KeyError, AttributeError) as exc:
                 if attempt:
@@ -416,7 +477,7 @@ def analyze(source, write, previous=None, title="Chapter", progress=lambda *_: N
         book["characters"] = characters
     chapter = {"id": chapter_id, "title": title.strip() or "Chapter",
                "source": source, "source_hash": hashlib.sha256(source.encode()).hexdigest(),
-               "scenes": scenes}
+               "scenes": scenes, **({"analysis": "voice"} if mode == "voice" else {})}
     book["chapters"].append(chapter)
     validate_book(book)
     return book

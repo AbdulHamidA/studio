@@ -918,9 +918,12 @@ impl Vault {
             }
             let (first, last) = (start / chunk, end / chunk);
             let sealed_chunk = chunk + crypto::TAG_LEN as u64;
-            file.seek(SeekFrom::Start(crypto::HEADER_LEN as u64 + first * sealed_chunk))?;
+            file.seek(SeekFrom::Start(
+                crypto::HEADER_LEN as u64 + first * sealed_chunk,
+            ))?;
             let mut sealed = Vec::new();
-            file.take((last - first + 1) * sealed_chunk).read_to_end(&mut sealed)?;
+            file.take((last - first + 1) * sealed_chunk)
+                .read_to_end(&mut sealed)?;
             let mut opened = crypto::open_chunks(&u.dek, &header, &sealed, first, n_chunks)?;
             let from = (start - first * chunk) as usize;
             let bytes = opened[from..from + (end - start + 1) as usize].to_vec();
@@ -1177,12 +1180,23 @@ mod tests {
         let vault = Vault::new(root.clone());
         vault.create("a long test passphrase", false).unwrap();
         let chunk = crypto::CHUNK_SIZE as u64;
-        let data: Vec<u8> = (0..chunk * 3 + 1234).map(|i| (i * 31 % 251) as u8).collect();
+        let data: Vec<u8> = (0..chunk * 3 + 1234)
+            .map(|i| (i * 31 % 251) as u8)
+            .collect();
         let id = vault.put(&data, an_item("narration.wav")).unwrap();
         assert_eq!(vault.plain_len(&id).unwrap(), data.len() as u64);
         let last = data.len() as u64 - 1;
-        for (a, b) in [(0, 1), (0, last), (chunk - 1, chunk), (chunk * 2 + 5, chunk * 3 + 9), (last, last)] {
-            assert_eq!(vault.get_range(&id, a, b).unwrap(), data[a as usize..=b as usize]);
+        for (a, b) in [
+            (0, 1),
+            (0, last),
+            (chunk - 1, chunk),
+            (chunk * 2 + 5, chunk * 3 + 9),
+            (last, last),
+        ] {
+            assert_eq!(
+                vault.get_range(&id, a, b).unwrap(),
+                data[a as usize..=b as usize]
+            );
         }
         assert!(vault.get_range(&id, 0, last + 1).is_err());
         // Cut at a chunk boundary: the new last chunk was not sealed as final.

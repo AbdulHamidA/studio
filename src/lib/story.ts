@@ -49,6 +49,8 @@ export interface StoryChapter {
   source: string;
   source_hash: string;
   scenes: StoryScene[];
+  /** "voice": speakers and mood only, from the Audiobook's quick analysis. */
+  analysis?: "voice";
 }
 export interface CharacterReference {
   kind?: "identity-face-v1";
@@ -104,10 +106,14 @@ export function keepBook(library: StoryLibrary, book: StoryBook): StoryLibrary {
   // Dividing the same text again made a new book every time and kept the old
   // one, so retrying a chapter filled the library until it refused to save at
   // all. A book holding nothing but text this book now holds is superseded.
-  const held = new Set(merged.chapters.map((c) => c.source_hash));
+  // Never replaced by a quicker analysis than its own, and never while
+  // narrations are filed under it.
+  const held = new Map(merged.chapters.map((c) => [c.source_hash, c.analysis]));
+  const narrated = (id: string) => Object.keys(library.audio?.[id]?.outputs ?? {}).length > 0;
   const superseded = new Set(existing ? [] : library.books
-    .filter((b) => b.id !== book.id && b.chapters.length > 0
-      && b.chapters.every((c) => held.has(c.source_hash)))
+    .filter((b) => b.id !== book.id && b.chapters.length > 0 && !narrated(b.id)
+      && b.chapters.every((c) => held.has(c.source_hash)
+        && !(held.get(c.source_hash) === "voice" && c.analysis !== "voice")))
     .map((b) => b.id));
   const audio = library.audio && Object.fromEntries(
     Object.entries(library.audio).filter(([id]) => !superseded.has(id)));

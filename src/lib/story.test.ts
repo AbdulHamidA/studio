@@ -26,6 +26,15 @@ describe("shared story model", () => {
     expect(retry.books.map((b) => b.id)).toEqual(["longer", "retry"]);
     expect(retry.audio).toEqual({});
   });
+  it("never lets a voice-only analysis replace a full one, or replace a narrated book", () => {
+    const chapter = (hash: string, analysis?: "voice") => ({ id: hash, title: hash, source: hash, source_hash: hash, scenes: [], analysis });
+    const full: StoryBook = { ...book, id: "full", chapters: [chapter("h1")] };
+    const quick = keepBook(keepBook(EMPTY_LIBRARY, full), { ...book, id: "quick", chapters: [chapter("h1", "voice")] });
+    expect(quick.books.map((b) => b.id)).toEqual(["full", "quick"]);
+    const narrated = { ...quick, audio: { quick: { narrator: "ryan", voices: {}, rate: 160, outputs: { h1: ["audio"] } } } };
+    const redone = keepBook(narrated, { ...book, id: "board", chapters: [chapter("h1")] });
+    expect(redone.books.map((b) => b.id)).toEqual(["quick", "board"]);
+  });
   it("carries canonical IDs and aliases into the editable Board cast", () => {
     expect(castFromBook(book).people[0]).toMatchObject({ id: "mira", aliases: ["Mi"], description: "red coat" });
   });

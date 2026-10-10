@@ -97,9 +97,10 @@ export const api = {
   storyLibraryGet: () => invoke<string | null>("story_library_get"),
   storyLibrarySet: (value: string) => invoke<void>("story_library_set", { value }),
   analyzeStory: (jobId: string, source: string, title: string,
-                 previous: StoryBook | null = null, modelId: string | null = null) =>
+                 previous: StoryBook | null = null, modelId: string | null = null,
+                 mode: "full" | "voice" = "full") =>
     invoke<StoryAnalysisResult>("analyze_story", { jobId,
-      args: { source, title, previous, model_id: modelId } }),
+      args: { source, title, previous, model_id: modelId, mode } }),
   directStory: (jobId: string, book: StoryBook, chapterId: string) =>
     invoke<{ panels: Panel[] }>("direct_story", { jobId, book, chapterId }),
   audioVoices: (modelId = "macos") => invoke<{ voices: { id: string; language: string }[] }>("audio_voices", { modelId }),

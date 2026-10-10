@@ -337,7 +337,7 @@ class WorkerIntegration(unittest.TestCase):
         with patch.object(worker, '_write', side_effect=write), \
                 patch.object(story, 'passages', lambda s, **_: [[{**u, 'id': 0}] for u in story.units(s)]):
             worker.op_story_analyze('test-progress', {'source': source})
-        self.assertEqual([(c['label'], c['fraction'], c['max_tokens']) for c in calls],
+        self.assertEqual([(c['label'].split(' · ')[0], c['fraction'], c['max_tokens']) for c in calls],
                          [('Understanding scene 1 of 2', 0.0, 3200), ('Understanding scene 1 of 2', 0.0, 4800),
                           ('Understanding scene 2 of 2', 0.5, 3200)])
 
@@ -694,3 +694,60 @@ class PassageGrouping(unittest.TestCase):
         self.assertEqual(len(groups), 2)
         self.assertEqual(''.join(u['text'] for g in groups for u in g), source)
         self.assertIn('* * *', groups[1][0]['text'])
+
+
+class VoiceAnalysis(unittest.TestCase):
+    """Audiobook-only analysis: speakers and mood, one short reply per long passage."""
+    SOURCE = ('I waited by the pier. Agnes Thorne said, “You’re late.”\n\n'
+              '“The ferry was early,” I said.\n\nShe laughed. “Never in forty years.”')
+
+    def test_quotes_are_numbered_in_the_passage_given_to_the_writer(self):
+        group = story.passages(self.SOURCE, max_words=700, max_units=60)[0]
+        prompt = story.voice_instruction(group, [])
+        self.assertIn('said, [1]“You’re late.”', prompt)
+        self.assertIn('[2]“The ferry was early,”', prompt)
+        self.assertIn('[3]“Never in forty years.”', prompt)
+
+    def test_a_short_reply_yields_a_valid_attributed_book(self):
+        reply = {"mood": "wry", "characters": [{"id": "c1", "name": "Narrator", "aliases": [], "voice": "dry"},
+                                               {"id": "c2", "name": "Agnes Thorne", "aliases": [], "voice": "gruff"}],
+                 "speakers": [{"quote": 1, "speaker_id": "c2"}, {"quote": 2, "speaker_id": "c1"},
+                              {"quote": 3, "speaker_id": "c2"}]}
+        calls = []
+        def write(system, prompt):
+            calls.append(system)
+            return json.dumps(reply)
+        book = story.analyze(self.SOURCE, write, mode="voice", passage_words=700, passage_units=60)
+        chapter = book['chapters'][0]
+        self.assertEqual(chapter['analysis'], 'voice')
+        self.assertEqual(calls, [story.VOICE_SYSTEM])
+        people = {c['id']: c['name'] for c in book['characters']}
+        lines = [(people[d['speaker_id']], d['text']) for s in chapter['scenes'] for b in s['beats'] for d in b['dialogue']]
+        self.assertEqual(lines, [('Agnes Thorne', 'You’re late.'), ('Narrator', 'The ferry was early,'),
+                                 ('Agnes Thorne', 'Never in forty years.')])
+        segments = story.narration_segments(book, chapter['id'])
+        self.assertEqual(''.join(s['text'] for s in segments), self.SOURCE)
+        self.assertEqual({s['mood'] for s in segments}, {'wry'})
+
+    def test_an_undeclared_speaker_is_repaired_and_unnumbered_quotes_stay_unattributed(self):
+        replies = iter([{"mood": "", "characters": [], "speakers": [{"quote": 1, "speaker_id": "ghost"}]},
+                        {"mood": "", "characters": [{"id": "c1", "name": "Agnes Thorne", "aliases": [], "voice": ""}],
+                         "speakers": [{"quote": 1, "speaker_id": "c1"}]}])
+        book = story.analyze(self.SOURCE, lambda *_: json.dumps(next(replies)), mode="voice",
+                             passage_words=700, passage_units=60)
+        lines = [d['speaker_id'] is not None for s in book['chapters'][0]['scenes'] for b in s['beats'] for d in b['dialogue']]
+        self.assertEqual(lines, [True, False, False])
+
+    def test_worker_casts_voices_in_long_passages_with_a_small_budget(self):
+        import worker
+        source = ' '.join(f'Line {i} was spoken.' for i in range(120))
+        budgets = []
+        def write(req_id, system, user, **kw):
+            budgets.append(kw['max_tokens'])
+            return json.dumps({"mood": "calm", "characters": [], "speakers": []})
+        with patch.object(worker, '_write', side_effect=write):
+            result = worker.op_story_analyze('test-voice', {'source': source, 'mode': 'voice'})
+        # 120 sentences: two voice calls, where full analysis makes thirty.
+        self.assertEqual(budgets, [1000, 1000])
+        self.assertEqual(len(story.passages(source, max_words=250, max_units=4)), 30)
+        self.assertEqual(result['book']['chapters'][0]['analysis'], 'voice')

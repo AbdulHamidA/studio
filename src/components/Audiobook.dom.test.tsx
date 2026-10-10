@@ -7,7 +7,7 @@ import { api } from "../lib/api";
 import { SPEECH_MODEL_ID, type StoryLibrary } from "../lib/story";
 
 vi.mock("../lib/api", () => ({
-  api: { audioVoices: vi.fn(), generateAudiobook: vi.fn(), cancelJob: vi.fn() },
+  api: { audioVoices: vi.fn(), generateAudiobook: vi.fn(), cancelJob: vi.fn(), analyzeStory: vi.fn() },
   errText: (e: unknown) => String(e), isCancelled: () => false,
   newJobId: () => "job", onEngineProgress: async () => () => {},
   vaultUrl: (id: string) => `vault://localhost/${id}`,
@@ -18,8 +18,8 @@ const initial: StoryLibrary = { audio: { book: { model_id: "macos", narrator: ""
 }] };
 const produced = vi.fn();
 const notify = vi.fn();
-function Harness({ models = [] }: { models?: import("../lib/types").ModelStatus[] }) {
-  const [library, setLibrary] = useState(initial);
+function Harness({ models = [], start = initial }: { models?: import("../lib/types").ModelStatus[]; start?: StoryLibrary }) {
+  const [library, setLibrary] = useState(start);
   return <Audiobook library={library} models={models} notify={notify} onProduced={produced}
     onLibraryChange={async (update) => { setLibrary((current) => update(current)); }} />;
 }
@@ -49,6 +49,15 @@ describe("Audiobook", () => {
     await waitFor(() => expect(notify).toHaveBeenCalledWith("Error: Voice unavailable", true));
     expect(document.querySelector('audio')).toBeNull();
     expect(screen.getByText("Exact original prose.")).toBeTruthy();
+  });
+  it("analyzes a new chapter with the quick voice-only analysis", async () => {
+    const book = { ...initial.books[0], chapters: [{ ...initial.books[0].chapters[0], analysis: "voice" as const }] };
+    vi.mocked(api.analyzeStory).mockResolvedValue({ book, chapter_id: "chapter", panels: [] });
+    const writer = { id: "qwen3-4b-instruct-4bit", installed: true, broken: null, hopeless: false } as unknown as import("../lib/types").ModelStatus;
+    render(<Harness models={[writer]} start={{ version: 1, books: [], activeBookId: null }} />);
+    fireEvent.change(screen.getByPlaceholderText("Paste the original prose…"), { target: { value: "Exact original prose." } });
+    fireEvent.click(screen.getByRole("button", { name: "Analyze chapter" }));
+    await waitFor(() => expect(api.analyzeStory).toHaveBeenCalledWith("job", "Exact original prose.", expect.any(String), null, null, "voice"));
   });
   it("does not enable narration when no local speech voices are available", async () => {
     vi.mocked(api.audioVoices).mockResolvedValue({ voices: [] });

@@ -245,7 +245,10 @@ pub fn open_chunks(
         let i = first + n as u64;
         match cipher.decrypt(
             &nonce_for(i),
-            Payload { msg: piece, aad: &aad_for(&header[..HEADER_LEN], i, i == n_chunks - 1) },
+            Payload {
+                msg: piece,
+                aad: &aad_for(&header[..HEADER_LEN], i, i == n_chunks - 1),
+            },
         ) {
             Ok(mut pt) => {
                 out.extend_from_slice(&pt);

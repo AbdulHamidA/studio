@@ -2942,6 +2942,10 @@ pub struct StoryAnalysis {
     title: String,
     previous: Option<serde_json::Value>,
     model_id: Option<String>,
+    /// "voice" casts speakers and mood only, for the audiobook; "full" (the
+    /// default) also directs every beat for drawing.
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 #[tauri::command]
@@ -2985,6 +2989,12 @@ pub async fn analyze_story(
         .ok_or_else(|| {
             AppError::msg("Install a story analyst or the prompt writer from Models first.")
         })?;
+    let mode = args.mode.as_deref().unwrap_or("full");
+    if !["full", "voice"].contains(&mode) {
+        return Err(AppError::msg(format!(
+            "unknown story analysis mode: {mode}"
+        )));
+    }
     let engine = state.engine(&app).await?;
     engine
         .request(
@@ -2992,7 +3002,7 @@ pub async fn analyze_story(
             "story_analyze",
             json!({
                 "source": args.source, "title": args.title, "previous": args.previous,
-                "writer": writer.repo,
+                "writer": writer.repo, "mode": mode,
             }),
         )
         .await

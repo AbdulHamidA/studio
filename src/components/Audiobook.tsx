@@ -68,10 +68,12 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
     }
   };
   const analyze = () => perform(async (id) => {
-    const result = await api.analyzeStory(id, source, title, append ? book ?? null : null);
+    // Speakers and mood only: the audiobook needs nothing about shots, outfits
+    // or rooms, and describing them for every beat made this take hours.
+    const result = await api.analyzeStory(id, source, title, append ? book ?? null : null, null, "voice");
     await onLibraryChange((current) => keepBook(current, result.book));
     setBookId(result.book.id); setChapterId(result.chapter_id); setSource(""); setAppend(false);
-    notify("Chapter analyzed and saved. Board and Audiobook share its character bible.");
+    notify("Voices cast and saved. Board shares this character bible and adds its scene direction when you draw.");
   });
   const narrate = () => perform(async (id) => {
     if (!book || !chapter) return;
@@ -98,7 +100,7 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
   return <div className="audiobook-workspace">
     <div className="pane">
       <h2>Audiobook</h2>
-      <p className="muted">Read the original chapter with local neural voices and character delivery. Characters and dialogue come from the same story analysis as Board.</p>
+      <p className="muted">Read the original chapter with local neural voices and character delivery. A quick analysis casts who speaks each line; Board shares its characters and adds scene direction when you draw.</p>
       {!library && <div className="notice warn">The encrypted story library is loading.</div>}
       {!!library?.books.length && <>
         <label>Book<select value={book?.id ?? ""} disabled={!!job}

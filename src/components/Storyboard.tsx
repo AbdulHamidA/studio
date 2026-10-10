@@ -1598,6 +1598,12 @@ export default function Storyboard({
                     const book = storyLibrary.books.find((b) => b.id === bid);
                     const chapter = book?.chapters.find((c) => c.id === cid);
                     if (!book || !chapter) return;
+                    if (chapter.analysis === "voice") {
+                      // Cast for the audiobook only: nothing to draw from yet.
+                      setStory(chapter.source); setChapterTitle(chapter.title);
+                      notify("This chapter was analyzed for voices only. Analyze it here to plan its panels.");
+                      return;
+                    }
                     void (async () => {
                       setStage("dividing");
                       try {
@@ -1614,7 +1620,7 @@ export default function Storyboard({
                   }}>
                   <option value="">Choose a saved chapter…</option>
                   {storyLibrary.books.flatMap((book) => book.chapters.map((chapter) =>
-                    <option key={chapter.id} value={`${book.id}:${chapter.id}`}>{book.chapters[0]?.title} · {chapter.title}</option>))}
+                    <option key={chapter.id} value={`${book.id}:${chapter.id}`}>{book.chapters[0]?.title} · {chapter.title}{chapter.analysis === "voice" ? " (voices only)" : ""}</option>))}
                 </select></label>}
                 <label>Chapter title<input value={chapterTitle} disabled={busy}
                   onChange={(e) => setChapterTitle(e.target.value)} /></label>

@@ -1209,9 +1209,10 @@ def _write(req_id: str, system: str, user: str, max_tokens: int = 160,
         # shared with everything else.
         if now - last >= 0.2:
             last = now
+            # No step total: `max_tokens` is a ceiling, not the work, and was
+            # shown as "step 512/3200" on a reply that ends near 600.
             emit({"id": req_id, "type": "progress", "phase": "denoise",
-                  "progress": fraction, "step": written,
-                  "total_steps": max_tokens, "message": label,
+                  "progress": fraction, "message": label,
                   # The words so far. A spinner and a token count say the
                   # machine is busy; they do not say it is writing something
                   # worth waiting for, and eight seconds of a spinner feels
@@ -6915,28 +6916,39 @@ def op_set_memory(req_id: str, req: dict[str, Any]) -> dict[str, Any]:
 
 def op_story_analyze(req_id, req):
     import story as story_model
+    mode = req.get("mode") or "full"
+    voice = mode == "voice"
+    small = req.get("writer", WRITER_REPO) == WRITER_REPO
     # Token events from the writer carry the scene label and fraction too;
     # otherwise they replace "scene i of N" within a fifth of a second.
     where = {"label": "Understanding the story", "fraction": None}
+    started = time.monotonic()
     def progress(i, total):
         if is_cancelled(req_id):
             raise Cancelled()
-        where.update(label=f"Understanding scene {i + 1} of {total}", fraction=i / total)
+        label = f"{'Casting voices in' if voice else 'Understanding'} scene {i + 1} of {total}"
+        if i:
+            left = (time.monotonic() - started) / i * (total - i)
+            label += f" · about {max(1, round(left / 60))} min left"
+        where.update(label=label, fraction=i / total)
         emit({"id": req_id, "type": "progress", "phase": "denoise",
               "progress": where["fraction"], "message": where["label"]})
     def write(system, user):
         # A repair carries the failed reply as well; a reply cut off at the
         # first budget would be cut off again at the same one.
         repair = "Your previous reply failed validation" in user
-        return _write(req_id, system, user, max_tokens=4800 if repair else 3200,
+        budget = (1000, 1600) if voice else (3200, 4800)
+        return _write(req_id, system, user, max_tokens=budget[repair],
                       temperature=0.2, repo=req.get("writer"), label=where["label"],
                       fraction=where["fraction"])
     def warn(message):
         log(req_id, message, "warn")
+    # A voice reply is a few tokens per quote, so a passage can be far longer
+    # than one whose every beat is described for drawing.
+    words, units = (700, 60) if voice else (250, 4) if small else (450, 8)
     book = story_model.analyze(req.get("source"), write,
         previous=req.get("previous"), title=req.get("title", "Chapter"), progress=progress,
-        passage_words=250 if req.get("writer", WRITER_REPO) == WRITER_REPO else 450,
-        passage_units=4 if req.get("writer", WRITER_REPO) == WRITER_REPO else 8, warn=warn)
+        passage_words=words, passage_units=units, warn=warn, mode=mode)
     chapter = book["chapters"][-1]
     panels = story_model.direct(book, chapter["id"])
     return {"book": book, "chapter_id": chapter["id"], "panels": panels}
