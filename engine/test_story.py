@@ -1035,5 +1035,16 @@ class TagsOverrideTheWriter(unittest.TestCase):
         said = [people[d['speaker_id']] for d in book['chapters'][0]['scenes'][0]['beats'][0]['dialogue']]
         self.assertEqual(said, ['Agnes', 'Narrator'])
 
+    def test_speech_continued_past_its_tag_keeps_the_tagged_speaker(self):
+        source = 'Agnes said, “Come in.” “I’m not late,” I said. “The ferry was early.”'
+        group = story.passages(source)[0]
+        data = reply(group, [{"id": "a", "name": "Agnes", "aliases": [], "visual": "", "voice": ""}])
+        data['beats'][0]['dialogue'] = [{"speaker_id": "a", "text": t, "offscreen": False}
+                                        for t in ("Come in.", "I’m not late,", "The ferry was early.")]
+        book = story.analyze(source, lambda *_: json.dumps(data))
+        people = {c['id']: c['name'] for c in book['characters']}
+        said = [people[d['speaker_id']] for d in book['chapters'][0]['scenes'][0]['beats'][0]['dialogue']]
+        self.assertEqual(said, ['Agnes', 'Narrator', 'Narrator'])
+
     def test_a_stray_straight_quote_inside_a_field_is_escaped(self):
         self.assertEqual(story._loads('{"action": "Agnes says "hello" twice", "place": "pier"}')['place'], 'pier')

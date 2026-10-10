@@ -600,6 +600,7 @@ def _attribute_by_tags(beats, text, base, characters):
             found.add(narrator[0])
         return found.pop() if len(found) == 1 else None
 
+    tagged = set()
     for n, line in enumerate(lines):
         a, b = line["start"] - base, line["end"] - base
         # The tag runs from the quote to the sentence end or the next quote.
@@ -616,6 +617,7 @@ def _attribute_by_tags(beats, text, base, characters):
         named = who(after) or who(before)
         if named:
             line["speaker_id"] = named
+            tagged.add(n)
             continue
         if line["speaker_id"] is not None:
             continue
@@ -634,10 +636,15 @@ def _attribute_by_tags(beats, text, base, characters):
                         last = (m.end(), cid)
             line["speaker_id"] = last[1] if last else None
     for n, line in enumerate(lines):
-        if line["speaker_id"] is not None:
+        # A line's own tag stands. A line that continues the previous
+        # speaker past their tag ('"...," I said. "..."') takes that speaker
+        # even over the writer; otherwise this only fills gaps.
+        if n in tagged:
             continue
         for other in (lines[n - 1] if n else None, lines[n + 1] if n + 1 < len(lines) else None):
             if other is None or other["speaker_id"] is None:
+                continue
+            if line["speaker_id"] is not None and other is not (lines[n - 1] if n else None):
                 continue
             gap = text[min(line["end"], other["end"]) - base + 1:max(line["start"], other["start"]) - base - 1]
             # Only a tag between them: `"...," she said, "..."` or `"...," I said. "..."`.
