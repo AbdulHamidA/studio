@@ -4,7 +4,8 @@ import { clock, markerAt } from "../../lib/library";
 
 export interface AudioMarker { time: number; label: string }
 
-export const RATES = [0.75, 1, 1.25, 1.5, 1.75, 2];
+// Up to 4x for listening through a draft; pitch is preserved at every rate.
+export const RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 3.5, 4];
 const SKIP = 15;
 
 /**
@@ -41,7 +42,7 @@ export default function AudioPlayer({
 
   useEffect(() => { setTime(0); setDuration(0); setFailed(false); setPlaying(false); }, [src]);
   useEffect(() => {
-    if (audio.current) audio.current.playbackRate = rate;
+    if (audio.current) { audio.current.playbackRate = rate; audio.current.preservesPitch = true; }
     savePref("audio.rate", rate);
   }, [rate, src]);
 
