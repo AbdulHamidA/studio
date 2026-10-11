@@ -37,5 +37,8 @@ export default defineConfig(({ mode }) => ({
     setupFiles: ["src/test/setup.ts"],
     // Agent worktrees live under .claude/ and carry their own copy of every test.
     exclude: ["**/node_modules/**", ".claude/**"],
+    // A release build runs the suite while the machine may be busy compiling;
+    // the default 5s lets a slow DOM test fail for no reason of its own.
+    testTimeout: 30000,
   },
 }));

@@ -9,17 +9,25 @@ HINGLISH = "Yaar, main kal office gaya tha. Boss ne bola ki meeting cancel ho ga
 
 
 class Script(unittest.TestCase):
-    def test_devanagari_script_is_accepted_and_latin_is_retried_then_kept_original(self):
-        good = "यार, मैं कल ऑफिस गया था। बॉस ने बोला कि मीटिंग कैंसल हो गई, और मैं हँस पड़ा। फिर मैंने सोचा, चलो चाय पीते हैं।"
-        text, stopped = narration.script(HINGLISH, lambda *_: good, devanagari=True)
-        self.assertEqual((text, stopped), (good, False))
+    def test_the_retelling_is_spelled_in_devanagari_by_the_word_list_not_the_model(self):
+        retold = "Yaar, main kal office gaya tha. Boss ne bola ki meeting cancel ho gayi. Phir maine socha, chalo chai peete hain."
+        prompts = []
+        def write(system, prompt):
+            prompts.append(system)
+            return retold
+        text, stopped = narration.script(HINGLISH, write, devanagari=True)
+        self.assertFalse(stopped)
+        self.assertNotIn("Devanagari", prompts[0])
+        self.assertEqual(text, "यार, मैं कल office गया था। Boss ने बोला कि meeting cancel हो गई। फिर मैंने सोचा, चलो चाय पीते हैं।")
+
+    def test_a_reply_that_is_not_a_retelling_is_retried_then_the_original_kept(self):
         calls = []
-        def latin(*_):
+        def empty(*_):
             calls.append(1)
-            return HINGLISH
-        text, _ = narration.script(HINGLISH, latin, devanagari=True)
-        self.assertEqual(len(calls), 2)          # retried once
-        self.assertEqual(text, HINGLISH.strip())  # then the original, never nothing
+            return ""
+        text, _ = narration.script(HINGLISH, empty, devanagari=False)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(text, HINGLISH.strip())
 
     def test_a_reply_far_shorter_than_the_passage_is_not_a_retelling(self):
         text, _ = narration.script(HINGLISH, lambda *_: "Office.", devanagari=False)

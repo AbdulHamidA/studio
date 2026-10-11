@@ -9,6 +9,8 @@ import time
 import wave
 from pathlib import Path
 
+import hinglish
+
 
 def voices():
     if sys.platform != "darwin":
@@ -174,7 +176,8 @@ def synthesize_kokoro(segments, narrator, assignments, rate, check_cancel,
             for segment in segments:
                 _mark(markers, segment, frames / 24000)
                 voice = assignments.get(segment["speaker_id"], narrator)
-                for part in speech_chunks(segment["text"]):
+                text = hinglish.devanagari(segment["text"]) if voice[0] == "h" else segment["text"]
+                for part in speech_chunks(text):
                     check_cancel()
                     progress(done, total)
                     done += len(part)
