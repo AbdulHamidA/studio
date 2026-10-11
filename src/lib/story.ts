@@ -100,6 +100,12 @@ export interface AudioSettings {
   /** Narrator and character voices last chosen on each speech engine, so
    *  switching engines and back does not lose a cast. */
   casts?: Record<string, { narrator: string; voices: Record<string, string> }>;
+  /** "storyteller": one voice tells everything (the default); "cast": a voice per character. */
+  telling?: "storyteller" | "cast";
+  /** A prepared narration script per chapter, read instead of the chapter text. */
+  scripts?: Record<string, string>;
+  /** Prepare scripts in Devanagari, for Hindi voices reading Hinglish. */
+  devanagari?: boolean;
 }
 export interface StoryLibrary {
   version: 1;

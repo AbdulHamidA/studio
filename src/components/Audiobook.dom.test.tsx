@@ -8,12 +8,12 @@ import { SPEECH_MODEL_ID, type StoryLibrary } from "../lib/story";
 import { NowPlaying } from "../lib/nowPlaying";
 
 vi.mock("../lib/api", () => ({
-  api: { audioVoices: vi.fn(), generateAudiobook: vi.fn(), cancelJob: vi.fn(), analyzeStory: vi.fn(), resumeStory: vi.fn(), audioPreview: vi.fn(), vaultList: vi.fn(async () => []) },
+  api: { audioVoices: vi.fn(), generateAudiobook: vi.fn(), cancelJob: vi.fn(), analyzeStory: vi.fn(), resumeStory: vi.fn(), audioPreview: vi.fn(), vaultList: vi.fn(async () => []), narrationScript: vi.fn() },
   errText: (e: unknown) => String(e), isCancelled: () => false,
   newJobId: () => "job", onEngineProgress: async () => () => {},
   vaultUrl: (id: string) => `vault://localhost/${id}`,
 }));
-const initial: StoryLibrary = { audio: { book: { model_id: "macos", narrator: "", voices: {}, rate: 160, outputs: {} } }, version: 1, activeBookId: "book", books: [{ version: 1, id: "book",
+const initial: StoryLibrary = { audio: { book: { model_id: "macos", narrator: "", voices: {}, rate: 160, outputs: {}, telling: "cast" } }, version: 1, activeBookId: "book", books: [{ version: 1, id: "book",
   characters: [{ id: "mira", name: "Mira", aliases: ["Mi"], visual: "red coat", voice: "quiet" }],
   chapters: [{ id: "chapter", title: "The train", source: "Exact original prose.", source_hash: "hash", scenes: [] }],
 }] };
@@ -77,6 +77,21 @@ describe("Audiobook", () => {
     expect(api.audioPreview).toHaveBeenCalledWith(expect.objectContaining({ voice: "Karen", model_id: "macos" }));
     expect(api.generateAudiobook).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+  it("tells the story with one storyteller from a prepared, editable narration script", async () => {
+    const storyteller: StoryLibrary = { ...initial, audio: { book: { ...initial.audio!.book, telling: "storyteller" } } };
+    const writer = { id: "qwen3-4b-instruct-4bit", installed: true, broken: null, hopeless: false } as unknown as import("../lib/types").ModelStatus;
+    vi.mocked(api.narrationScript).mockResolvedValue({ script: "यार, मैं कल ऑफिस गया था।", stopped: false });
+    render(<Harness models={[writer]} start={storyteller} />);
+    expect(screen.queryByLabelText("Mira voice")).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "Prepare narration script" }));
+    await waitFor(() => expect(api.narrationScript).toHaveBeenCalledWith("job", "Exact original prose.", expect.any(Boolean)));
+    const box = await screen.findByLabelText("The script that will be read") as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "यार, मैं कल ऑफिस गया था। बस।" } });
+    await waitFor(() => expect(screen.getAllByRole("option", { name: "Samantha" }).length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole("button", { name: "Narrate chapter" }));
+    await waitFor(() => expect(api.generateAudiobook).toHaveBeenCalledWith("job", expect.anything(), "chapter", "Samantha", {}, 160,
+      expect.objectContaining({ single: true, script: "यार, मैं कल ऑफिस गया था। बस।" })));
   });
   it("does not enable narration when no local speech voices are available", async () => {
     vi.mocked(api.audioVoices).mockResolvedValue({ voices: [] });

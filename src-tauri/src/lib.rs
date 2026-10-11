@@ -233,6 +233,7 @@ pub fn run() {
             commands::story_library_set,
             commands::analyze_story,
             commands::resume_story,
+            commands::narration_script,
             commands::direct_story,
             commands::audio_voices,
             commands::audio_preview,

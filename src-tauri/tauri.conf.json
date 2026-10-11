@@ -48,6 +48,7 @@
       "../engine/story.py": "engine/story.py",
       "../engine/audiobook.py": "engine/audiobook.py",
       "../engine/director.py": "engine/director.py",
+      "../engine/narration.py": "engine/narration.py",
       "../engine/kokoro-requirements.lock": "engine/kokoro-requirements.lock"
     }
   }

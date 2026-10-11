@@ -7031,6 +7031,29 @@ def op_direct_story(req_id, req):
     return {"panels": panels, "stopped": is_cancelled(req_id)}
 
 
+def op_narration_script(req_id, req):
+    """Retell a chapter for one storyteller, optionally in Devanagari."""
+    import narration
+    started = time.monotonic()
+    where = {"label": "Preparing the narration script", "fraction": None}
+    def progress(i, total):
+        label = f"Preparing passage {i + 1} of {total}"
+        if i:
+            label += f" · about {max(1, round((time.monotonic() - started) / i * (total - i) / 60))} min left"
+        where.update(label=label, fraction=i / total)
+        emit({"id": req_id, "type": "progress", "phase": "denoise", "progress": i / total, "message": label})
+    def write(system, user):
+        if is_cancelled(req_id):
+            raise narration.Stop()
+        try:
+            return _write(req_id, system, user, max_tokens=2400, temperature=0.3, repo=req.get("writer"),
+                          label=where["label"], fraction=where["fraction"])
+        except Cancelled:
+            raise narration.Stop()
+    text, stopped = narration.script(req.get("source"), write, bool(req.get("devanagari")), progress)
+    return {"script": text, "stopped": stopped}
+
+
 def op_audio_voices(_req_id, _req):
     import audiobook
     model = _req.get("model_id")
@@ -7105,7 +7128,16 @@ def op_audiobook(req_id, req):
     slots = req.get("vault_slots") or []
     if len(slots) != 1:
         raise ValueError("audiobook needs one encrypted output slot")
-    segments = story_model.narration_segments(req["book"], req["chapter_id"])
+    # A prepared narration script is read by one storyteller; so is the
+    # chapter itself when one voice was chosen for everyone.
+    if isinstance(req.get("script"), str) and req["script"].strip():
+        import narration
+        segments = narration.segments(req["script"])
+        req = {**req, "voices": {}, "directions": {}}
+    else:
+        segments = story_model.narration_segments(req["book"], req["chapter_id"])
+        if req.get("single"):
+            req = {**req, "voices": {}, "directions": {}}
     CACHE.unload()
     _unload_assistant()
     def check():
@@ -7172,6 +7204,7 @@ OPS = {
     "story_analyze": op_story_analyze,
     "story_resume": op_story_resume,
     "direct_story": op_direct_story,
+    "narration_script": op_narration_script,
     "audio_voices": op_audio_voices,
     "audiobook": op_audiobook,
     "audio_preview": op_audio_preview,

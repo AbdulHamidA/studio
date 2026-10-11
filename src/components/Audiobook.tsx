@@ -35,7 +35,12 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
   // were dropped and the pace slider snapped back.
   const [draft, setDraft] = useState<Partial<AudioSettings>>({});
   const settings: AudioSettings = { ...(saved ?? { narrator: "", voices: {}, rate: 160, outputs: {} }), ...draft };
-  const speechModel = settings.model_id || SPEECH_MODEL_ID;
+  // Kokoro when the older neural model is not installed: a fresh book should
+  // not open on an engine that would only say "download me".
+  const speechModel = settings.model_id
+    || (models.some((m) => m.id === SPEECH_MODEL_ID && m.installed) ? SPEECH_MODEL_ID : KOKORO_MODEL_ID);
+  const storyteller = (settings.telling ?? "storyteller") === "storyteller";
+  const script = chapter ? settings.scripts?.[chapter.id] : undefined;
   // Language, delivery and per-character direction are Qwen3-TTS's; Kokoro
   // and macOS voices take pace only.
   const neural = speechModel === SPEECH_MODEL_ID;
@@ -80,7 +85,8 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
     const lines = chapter?.scenes.flatMap((s) => s.beats.flatMap((b) => b.dialogue)) ?? [];
     const line = characterId ? lines.find((d) => d.speaker_id === characterId)?.text : null;
     if (line) return line;
-    const opening = (chapter?.source ?? "").slice(0, 300);
+    // The narrator previews what will actually be read: the script, if any.
+    const opening = ((!characterId && script) || chapter?.source || "").slice(0, 300);
     return characterId ? "Hello. This is how I will sound in your story."
       : opening.slice(0, Math.max(opening.lastIndexOf(". ") + 1, 120)) || "This is how I will read your story.";
   };
@@ -169,11 +175,23 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
     await onLibraryChange((current) => keepBook(current, result.book));
     notify(result.unanalysed ? `${result.unanalysed} passages still to cast; the rest is saved.` : "Every passage is cast.");
   });
+  // Hindi voices read Hinglish properly only from Devanagari (an M4 test:
+  // 22% of words misheard from Latin script, 7% from Devanagari).
+  const hindiVoice = /^h[fm]_/.test(narrator) || /hi_IN|Hindi/.test(voices.find((v) => v.id === narrator)?.language ?? "");
+  const devanagari = settings.devanagari ?? hindiVoice;
+  const prepareScript = () => perform(async (id) => {
+    if (!book || !chapter) return;
+    const result = await api.narrationScript(id, chapter.source, devanagari);
+    saveSettings((latest) => ({ scripts: { ...latest.scripts, [chapter.id]: result.script } }));
+    notify(result.stopped ? "Stopped. The passages prepared so far are in the script; the rest is the original text."
+      : "Narration script ready. Read it through and edit anything before narrating.");
+  });
   const narrate = () => perform(async (id) => {
     if (!book || !chapter) return;
-    const audio = await api.generateAudiobook(id, book, chapter.id, narrator, assignedVoices, settings.rate, {
+    const audio = await api.generateAudiobook(id, book, chapter.id, narrator, storyteller ? {} : assignedVoices, settings.rate, {
       model_id: speechModel, language: settings.language || "auto",
-      delivery: settings.delivery || "", directions: settings.directions || {},
+      delivery: settings.delivery || "", directions: storyteller ? {} : settings.directions || {},
+      ...(storyteller ? { single: true, ...(script?.trim() ? { script } : {}) } : {}),
     });
     onProduced();
     // Audio remains a Vault item even if the follow-up state save fails.
@@ -247,6 +265,36 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
         </select><PreviewButton id="narrator" voice={narrator} character={null} label="Preview narrator voice" /></span></label>
         <label>{neural ? `Reading pace · ${settings.rate} (approximate)` : `Reading speed · ${settings.rate} words/minute`}<input type="range" min={80} max={300}
           value={settings.rate} disabled={!!job} onChange={(e) => saveSettings({ rate: Number(e.target.value) })} /></label>
+        <label>How it is told<select value={settings.telling ?? "storyteller"} disabled={!!job}
+          onChange={(e) => saveSettings({ telling: e.target.value as AudioSettings["telling"] })}>
+          <option value="storyteller">One storyteller — a single voice tells the whole story</option>
+          <option value="cast">Character voices — a voice for each person</option>
+        </select></label>
+        {storyteller && <div className="panel script-panel">
+          <h2>Narration script</h2>
+          <p className="t-help">
+            Stories written as chat or in Hinglish are not written to be read aloud. The story
+            model can retell this chapter for one storyteller — same story and words, never
+            translated — and write it in Devanagari so Hindi voices pronounce it naturally.
+            Read it through and edit anything before narrating.
+          </p>
+          <label><input type="checkbox" checked={devanagari} disabled={!!job}
+            onChange={(e) => saveSettings({ devanagari: e.target.checked })} />
+            Write Hindi in Devanagari (for Hindi voices and Hinglish)</label>
+          <span className="control-row">
+            <button type="button" className="btn small primary" disabled={!!job || !writerReady || !chapter}
+              onClick={() => void prepareScript()}>{script ? "Prepare again" : "Prepare narration script"}</button>
+            {script && <button type="button" className="btn small" disabled={!!job}
+              onClick={() => chapter && saveSettings((latest) => {
+                const next = { ...latest.scripts }; delete next[chapter.id]; return { scripts: next };
+              })}>Use the original text</button>}
+          </span>
+          {script !== undefined && <label>The script that will be read<textarea rows={12} value={script} disabled={!!job}
+            onChange={(e) => { const value = e.target.value;
+              chapter && saveSettings((latest) => ({ scripts: { ...latest.scripts, [chapter.id]: value } })); }} /></label>}
+          {!script && <p className="t-help">Without a script the chapter text is read as written.</p>}
+        </div>}
+        {!storyteller && <>
         <div className="sub-head">Character voices</div>
         {/* Who speaks most in this chapter comes first, with their line count;
             those silent here follow, so a long bible does not bury the cast. */}
@@ -272,6 +320,7 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
               saveSettings((latest) => ({ directions: { ...latest.directions, [c.id]: value } }));
             }} />}
         </label>)}
+        </>}
         <button className="btn primary" disabled={!!job || !speechReady || !narrator || !voices.some((v) => v.id === narrator)}
           onClick={() => void narrate()}>Narrate chapter</button>
       </>}

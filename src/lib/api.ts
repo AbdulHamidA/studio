@@ -117,9 +117,13 @@ export const api = {
   audioVoices: (modelId = "macos") => invoke<{ voices: { id: string; language: string }[] }>("audio_voices", { modelId }),
   generateAudiobook: (jobId: string, book: StoryBook, chapterId: string,
                      narrator: string, voices: Record<string, string>, rate: number,
-                     options: { model_id: string; language?: string; delivery?: string; directions?: Record<string, string> } = { model_id: "macos" }) =>
+                     options: { model_id: string; language?: string; delivery?: string; directions?: Record<string, string>;
+                                script?: string; single?: boolean } = { model_id: "macos" }) =>
     invoke<string>("generate_audiobook", { jobId,
       args: { book, chapter_id: chapterId, narrator, voices, rate, ...options } }),
+  /** The chapter retold for one storyteller; Devanagari for Hindi voices. */
+  narrationScript: (jobId: string, source: string, devanagari: boolean, modelId: string | null = null) =>
+    invoke<{ script: string; stopped: boolean }>("narration_script", { jobId, source, devanagari, modelId }),
   characterReference: (jobId: string, images: string[]) =>
     invoke<string>("character_reference", { jobId, images }),
   /** Who is in the story and where it happens. Free of picture time. */

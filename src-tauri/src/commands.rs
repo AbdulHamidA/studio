@@ -3017,6 +3017,31 @@ pub async fn analyze_story(
         .await
 }
 
+/// Retell a chapter for one storyteller, optionally written in Devanagari so
+/// Hindi voices pronounce Hinglish properly.
+#[tauri::command]
+pub async fn narration_script(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    job_id: String,
+    source: String,
+    model_id: Option<String>,
+    devanagari: bool,
+) -> Result<serde_json::Value> {
+    let _job = state.job_gate.read().await;
+    state.require_unlocked()?;
+    let writer = story_writer(&state, model_id.as_deref())?;
+    state
+        .engine(&app)
+        .await?
+        .request(
+            &job_id,
+            "narration_script",
+            json!({"source": source, "writer": writer, "devanagari": devanagari}),
+        )
+        .await
+}
+
 /// Analyse only the passages a stopped or failed analysis left unanalysed.
 #[tauri::command]
 pub async fn resume_story(
@@ -3109,6 +3134,13 @@ pub struct AudiobookArgs {
     narrator: String,
     voices: serde_json::Value,
     rate: u32,
+    /// A prepared narration script; when present it is what is read, by the
+    /// narrator alone.
+    #[serde(default)]
+    script: Option<String>,
+    /// One voice for everyone, reading the chapter itself.
+    #[serde(default)]
+    single: bool,
 }
 
 #[tauri::command]
@@ -3158,6 +3190,7 @@ pub async fn generate_audiobook(
         "narrator": args.narrator, "voices": args.voices, "rate": args.rate,
         "model_id": args.model_id, "language": args.language,
         "delivery": args.delivery, "directions": args.directions,
+        "script": args.script, "single": args.single,
         "vault_slots": [{"id": id, "file_id": hex(&file_id), "key": hex(&key), "path": path.to_string_lossy()}],
     })).await;
     let result = match result {
