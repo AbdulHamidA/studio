@@ -7138,6 +7138,8 @@ def op_audiobook(req_id, req):
         segments = story_model.narration_segments(req["book"], req["chapter_id"])
         if req.get("single"):
             req = {**req, "voices": {}, "directions": {}}
+    import narration as _narration
+    segments = [{**s, "text": _narration.speakable(s["text"])} for s in segments]
     CACHE.unload()
     _unload_assistant()
     def check():

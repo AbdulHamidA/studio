@@ -44,6 +44,11 @@ class Script(unittest.TestCase):
         self.assertEqual(len(segs), 2)
 
 
+class Speech(unittest.TestCase):
+    def test_emoji_and_symbols_never_reach_the_voice(self):
+        self.assertEqual(narration.speakable("Kahan ho?? 😤 *bas* 5 min 👍🏽").strip(), "Kahan ho?? bas 5 min")
+
+
 class Worker(unittest.TestCase):
     def test_script_op_and_scripted_narration_use_one_voice(self):
         import worker
