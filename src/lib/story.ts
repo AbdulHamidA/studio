@@ -158,7 +158,14 @@ export function keepBook(library: StoryLibrary, book: StoryBook): StoryLibrary {
     books: [...library.books.filter((b) => b.id !== book.id && !superseded.has(b.id)), merged] };
 }
 export function castFromBook(book: StoryBook) {
-  return { people: book.characters.map((c, i) => ({
+  // A first-person narrator is in nearly every scene but rarely listed as
+  // visible, and is added after everyone else -- so without this they fall
+  // past the cast sheet's four places. They stand next to the lead instead.
+  const narrator = book.characters.findIndex((c) => c.name === "Narrator");
+  const characters = narrator > 1
+    ? [book.characters[0], book.characters[narrator], ...book.characters.filter((_, i) => i !== 0 && i !== narrator)]
+    : book.characters;
+  return { people: characters.map((c, i) => ({
     id: c.id, name: c.name, aliases: c.aliases, description: c.visual,
     mentions: book.chapters.flatMap((ch) => ch.scenes.flatMap((s) => s.beats))
       .filter((b) => b.visible.some((a) => a.character_id === c.id)).length,

@@ -894,10 +894,31 @@ export default function Storyboard({
    * chooses each panel's camera, angle, framing and what is in frame. Panels
    * of unchanged beats keep their pictures; Stop keeps the scenes done.
    */
+  /**
+   * A book the director returned with someone added -- a first-person
+   * narrator the analysis of an older version never made a character. It is
+   * saved, and the new person joins the cast so their cast sheet is drawn;
+   * the people already there keep their sheets.
+   */
+  const adoptBook = async (book: StoryBook | undefined) => {
+    if (!book) return;
+    const joined = book.characters.filter((c) => !storyBookRef.current?.characters.some((o) => o.id === c.id));
+    await onStoryAnalyzed(book);
+    setStoryBook(book); storyBookRef.current = book;
+    const fresh = castFromBook(book);
+    setCast((c) => {
+      if (!c) return fresh;
+      const known = new Set(c.people.map((p) => p.name.toLowerCase()));
+      const added = fresh.people.filter((p) => !known.has(p.name.toLowerCase()));
+      return added.length ? { ...c, people: [...c.people, ...added] } : c;
+    });
+    if (joined.length) notify(`${joined.map((c) => c.name).join(", ")} joined the cast. Draw their cast sheet before the panels.`);
+  };
   const directWithModel = async () => {
     if (!storyBook || !chapterId) return;
     await runJob("dividing", async (id) => {
       const r = await api.directStory(id, storyBook, chapterId, bookFormat, true, analystId || null);
+      await adoptBook(r.book);
       setDoc((d) => replan(d, r.panels));
       notify(r.stopped ? "Stopped. Scenes directed so far are kept; the rest keep the planned shots."
         : `Directed ${r.panels.length} panels. Drawn panels of unchanged moments were kept.`);
@@ -908,6 +929,7 @@ export default function Storyboard({
     if (!storyBook || !chapterId) return;
     await runJob("dividing", async (id) => {
       const r = await api.directStory(id, storyBook, chapterId, f);
+      await adoptBook(r.book);
       setDoc((d) => replan(d, r.panels));
     });
   };
@@ -947,9 +969,11 @@ export default function Storyboard({
     }
     await runJob("dividing", async (id) => {
       const result = await api.directStory(id, book, cid, bookFormat);
+      const current = result.book ?? book;
+      if (result.book) await onStoryAnalyzed(result.book);
       setStory(chapter.source); setChapterTitle(chapter.title);
-      setStoryBook(book); storyBookRef.current = book; setChapterId(cid);
-      ignoreSavedReferences.current = false; setCast(castFromBook(book));
+      setStoryBook(current); storyBookRef.current = current; setChapterId(cid);
+      ignoreSavedReferences.current = false; setCast(castFromBook(current));
       setDoc(fromArrays(result.panels)); setDivided(true); setProjectId(newJobId());
       setSheet(null); clearCharacterSheets(); setPages([]); setOverflow([]); setPlaceSheets({});
       setSelected(0); setCoverage(null);

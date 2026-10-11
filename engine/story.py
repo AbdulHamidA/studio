@@ -556,16 +556,38 @@ SPEECH_VERBS = (r'said|says|asked|asks|replied|replies|answered|called|calls|sho
                 r'whispered|muttered|murmured|added|snapped|laughed|sighed|told|continued|insisted|warned|began')
 
 
+# The narrator in their own narration: English, romanized Hindi, Devanagari.
+# "main" alone is also an English adjective, so it counts only beside others.
+_EDGE_L, _EDGE_R = r"(?<![\w\u0900-\u097F])", r"(?![\w\u0900-\u097F])"
+FIRST_PERSON = re.compile(_EDGE_L + r"(?:I|me|my|myself|(?i:main|maine|mujhe|mujhse|mujhko|mera|meri|mere)"
+                          r"|मैं|मैंने|मुझे|मुझसे|मुझको|मेरा|मेरी|मेरे)" + _EDGE_R)
+
+
+def is_narrator(character):
+    return character["name"] == "Narrator" or bool(set(character["aliases"]).intersection({"I", "me", "my"}))
+
+
 def _ensure_narrator(characters, source):
-    """A first-person story whose prose tags its own lines ('I said') gets a
-    Narrator, so those lines have someone to belong to."""
-    if any(c["name"] == "Narrator" or set(c["aliases"]).intersection({"I", "me", "my"}) for c in characters):
+    """A story told in the first person gets a Narrator: in a comic they are a
+    person to draw, and in the prose their own lines need someone to belong to.
+    First person means the narration, not the dialogue, says I, main or मैं --
+    at least three times, so one stray word is not a narrator -- or tags a
+    line of its own ('"...," I said')."""
+    if any(is_narrator(c) for c in characters):
         return characters
-    narrative = QUOTE.sub(" ", source)
-    if not re.search(r'\b(?:I|me|my)\b', narrative) or not re.search(
-            r'[”"」]\s*,?\s*I\s+(?:' + SPEECH_VERBS + r')\b', source):
+    told = len(FIRST_PERSON.findall(QUOTE.sub(" ", source)))
+    tagged = re.search(r'[”"」]\s*,?\s*I\s+(?:' + SPEECH_VERBS + r')\b', source)
+    if told < 3 and not (told and tagged):
         return characters
     return [*characters, {"id": str(uuid.uuid4()), "name": "Narrator", "aliases": [], "visual": "", "voice": ""}]
+
+
+def ensure_narrator(book):
+    """The book with a Narrator if any chapter is told in the first person --
+    for books analysed before the narrator was a character."""
+    source = "\n\n".join(c["source"] for c in book["chapters"])
+    characters = _ensure_narrator(book["characters"], source)
+    return book if characters is book["characters"] else {**book, "characters": characters}
 
 
 def _attribute_by_tags(beats, text, base, characters):
@@ -585,8 +607,7 @@ def _attribute_by_tags(beats, text, base, characters):
                 continue
             if name.strip():
                 names.append((name.strip(), c["id"]))
-    narrator = [c["id"] for c in characters if c["name"] == "Narrator"
-                or set(c["aliases"]).intersection({"I", "me", "my"})]
+    narrator = [c["id"] for c in characters if is_narrator(c)]
     lines = [d for b in beats for d in b["dialogue"]]
 
     def who(tag):

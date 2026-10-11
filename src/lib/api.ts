@@ -111,7 +111,7 @@ export const api = {
   /** The director's shot list; `refine` has the story model improve it scene by scene. */
   directStory: (jobId: string, book: StoryBook, chapterId: string, format: BookFormat = "manga",
                 refine = false, modelId: string | null = null) =>
-    invoke<{ panels: Panel[]; stopped?: boolean }>("direct_story", { jobId,
+    invoke<{ panels: Panel[]; stopped?: boolean; book?: StoryBook }>("direct_story", { jobId,
       args: { book, chapter_id: chapterId, format, refine, model_id: modelId } }),
   audioPreview: (args: { model_id: string; voice: string; text: string; language?: string;
                          delivery?: string; direction?: string; rate: number }) =>

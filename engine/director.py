@@ -47,12 +47,17 @@ WAIT = re.compile(r"\b(wait(?:ed|ing)?|hours?|minutes?|later|long time|silence|s
 VULNERABLE = re.compile(r"\b(sad|grief|alone|lonely|afraid|fear|small|lost|tears?|weep|cry)\b", re.I)
 VIOLENT = re.compile(r"\b(fight|strike|hit|slam|crash|run|chase|fall|scream|attack|shot|blood|storm)\b", re.I)
 THOUGHT = re.compile(r"\bI\b[^.!?]*\b(thought|knew|wondered|felt|remembered|realised|realized|decided|"
-                     r"had (?:already )?decided|hoped|feared)\b")
+                     r"had (?:already )?decided|hoped|feared)\b"
+                     r"|(?i:\b(?:maine socha|mujhe laga|mujhe pata (?:tha|thi)|mujhe yaad aaya|maine tay kiya)\b)"
+                     r"|मैंने सोचा|मुझे लगा|मुझे पता था|मुझे याद आया")
 PERSON = re.compile(r"\b(he|she|they|I|we|him|her|them|me|us|his|hers|their|my)\b", re.I)
-FIRST_PERSON = re.compile(r"\b(I|me|my|we|us|our)\b")
+FIRST_PERSON = re.compile(story.FIRST_PERSON.pattern + r"|\b(?:we|us|our)\b"
+                          r"|(?<![\w\u0900-\u097F])(?:(?i:hum|humne|hamne|hamara|hamari|hamare)|हम|हमने)(?![\w\u0900-\u097F])")
 # A first-person sentence about looking is the one place a point-of-view shot
 # helps; everywhere else the narrator is a person in the story, drawn.
-LOOKING = re.compile(r"\b(?:I|we)\s+(?:\w+\s+)?(saw|looked|watched|noticed|read|stared|glanced|spotted|caught sight)\b", re.I)
+LOOKING = re.compile(r"\b(?:I|we)\s+(?:\w+\s+)?(saw|looked|watched|noticed|read|stared|glanced|spotted|caught sight)\b"
+                     r"|\b(?:maine|main|humne|hamne)\s+(?:\w+\s+){0,3}(?:dekha|dekhi|dekhe|dekh|ghoor|padha|padhi|notice)"
+                     r"|(?:मैंने|मैं|हमने)\s+(?:\S+\s+){0,3}(?:देखा|देखी|देखे|देख|घूर|पढ़ा|पढ़ी)", re.I)
 # What a sentence is about decides the shot, not where it falls in the beat.
 PLACE = re.compile(r"\b(wind|sky|sea|rain|snow|fog|storm|sun|moon|light|dark|room|kitchen|hall|street|"
                    r"harbou?r|pier|shore|beach|window|walls?|house|town|city|forest|field|road|smell(?:ed|s)?|"
@@ -313,8 +318,7 @@ def plan(book, chapter_id, fmt="manga"):
                                 for c in named]
                     # The narrator is a character: a first-person sentence
                     # draws them, unless it is about what they see.
-                    narrator = next((c for c in book["characters"] if c["name"] == "Narrator"
-                                     or set(c["aliases"]).intersection({"I", "me", "my"})), None)
+                    narrator = next((c for c in book["characters"] if story.is_narrator(c)), None)
                     first_person = bool(FIRST_PERSON.search(sentence))
                     narrator_pov = first_person and bool(LOOKING.search(sentence)) and not subjects
                     if first_person and narrator and not narrator_pov and all(x["character_id"] != narrator["id"] for x in subjects):

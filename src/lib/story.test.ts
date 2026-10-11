@@ -37,6 +37,10 @@ describe("shared story model", () => {
   });
   it("carries canonical IDs and aliases into the editable Board cast", () => {
     expect(castFromBook(book).people[0]).toMatchObject({ id: "mira", aliases: ["Mi"], description: "red coat" });
+    const told = { ...book, characters: [...book.characters,
+      { id: "x", name: "Xan", aliases: [], visual: "", voice: "" }, { id: "y", name: "Yul", aliases: [], visual: "", voice: "" },
+      { id: "n", name: "Narrator", aliases: [], visual: "", voice: "" }] };
+    expect(castFromBook(told).people[1].name).toBe("Narrator");
   });
   it("keeps actions and emotion even when surface enrichment is present", () => {
     const panel: Panel = { shot: "close-up", subject: "Mira", action: "releases the key",

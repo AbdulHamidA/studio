@@ -6978,6 +6978,7 @@ def req_format(req):
 
 def _story_result(req_id, book, chapter_id, req=None):
     import story as story_model
+    book = story_model.ensure_narrator(book)
     chapter = next(c for c in book["chapters"] if c["id"] == chapter_id)
     left = sum(1 for s in chapter["scenes"] if s.get("unanalysed"))
     import director
@@ -7014,9 +7015,14 @@ def op_direct_story(req_id, req):
     scene by the story model when one is named. A refinement that fails or is
     stopped keeps the rules' plan for the scenes it did not reach."""
     import director
+    import story as story_model
     fmt = req_format(req)
+    # A book analysed before a first-person narrator was a character gains
+    # them here; the book goes back so the board can draw their cast sheet.
+    book = story_model.ensure_narrator(req["book"])
+    extra = {"book": book} if book is not req["book"] else {}
     if not req.get("writer"):
-        return {"panels": director.plan(req["book"], req["chapter_id"], fmt)}
+        return {"panels": director.plan(book, req["chapter_id"], fmt), **extra}
     started = time.monotonic()
     def progress(i, total):
         label = f"Directing scene {i + 1} of {total}"
@@ -7033,8 +7039,8 @@ def op_direct_story(req_id, req):
                           label=where["label"], fraction=where["fraction"])
         except Cancelled:
             raise director.Stop()
-    panels = director.direct(req["book"], req["chapter_id"], fmt, write=write, progress=progress)
-    return {"panels": panels, "stopped": is_cancelled(req_id)}
+    panels = director.direct(book, req["chapter_id"], fmt, write=write, progress=progress)
+    return {"panels": panels, "stopped": is_cancelled(req_id), **extra}
 
 
 def op_narration_script(req_id, req):

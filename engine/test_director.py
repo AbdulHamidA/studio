@@ -195,3 +195,38 @@ class PlaceMoves(unittest.TestCase):
         panels = director.plan(b, b['chapters'][0]['id'], "manga")
         last_scene = max(p["scene"] for p in panels if p["framing"] != "establishing" or p["role"] != "R")
         self.assertEqual({p["setting"] for p in panels if p["scene"] == last_scene and p["role"] != "R"}, {"kitchen"})
+
+
+class HinglishNarrator(unittest.TestCase):
+    SOURCE = ('Main subah office ke liye nikla. Maine Riya ko station par dekha.\n\n'
+              'Mujhe laga wo naraz thi. Maine uska haath pakda aur hum chal pade.')
+
+    def analysed(self):
+        def write(_, prompt):
+            group = json.loads(prompt.split('Numbered source units:\n')[1].split('\nYour previous reply')[0])
+            return json.dumps({"title": "t", "characters": [{"id": "r", "name": "Riya", "aliases": [], "visual": "", "voice": ""}],
+                               "looks": [], "places": [], "speakers": [],
+                               "beats": [{"units": [u["id"] for u in group], "importance": 4, "action": "a",
+                                          "place": "station", "mood": "tense", "cast": [{"id": "r", "feel": ""}]}]})
+        return story.analyze(self.SOURCE, write, passage_words=999, passage_units=99)
+
+    def test_a_story_told_with_main_and_maine_has_a_narrator_who_is_drawn(self):
+        b = self.analysed()
+        self.assertIn("Narrator", [c["name"] for c in b["characters"]])
+        panels = director.plan(b, b['chapters'][0]['id'], "manga")
+        held = next(p for p in panels if p["moment"].startswith("Main subah"))
+        self.assertIn("Narrator", held["characters"])
+        saw = next(p for p in panels if p["moment"].startswith("Maine Riya ko"))
+        self.assertIn("Riya", saw["characters"])
+
+    def test_a_book_analysed_without_its_narrator_gains_one_when_planned_again(self):
+        import worker
+        b = self.analysed()
+        old = {**b, "characters": [c for c in b["characters"] if c["name"] != "Narrator"]}
+        out = worker.op_direct_story('d', {'book': old, 'chapter_id': b['chapters'][0]['id'], 'format': 'manga'})
+        self.assertIn("Narrator", [c["name"] for c in out["book"]["characters"]])
+        again = worker.op_direct_story('d', {'book': out["book"], 'chapter_id': b['chapters'][0]['id'], 'format': 'manga'})
+        self.assertNotIn("book", again)
+
+    def test_a_third_person_story_has_no_narrator(self):
+        self.assertEqual(story._ensure_narrator([], 'Riya ne kaha, "main aa rahi hoon." Wo chali gayi.'), [])
