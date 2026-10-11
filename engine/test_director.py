@@ -59,10 +59,27 @@ class Plan(unittest.TestCase):
         self.assertIn(self.panels[0]["shot"], ("EWS", "WS"))
         self.assertEqual((self.panels[-1]["shot"], self.panels[-1]["angle"]), ("EWS", "bird"))
 
-    def test_a_person_is_introduced_in_full_before_closer_shots_and_the_narrator_is_not(self):
+    def test_people_including_the_narrator_are_introduced_in_full_before_closer_shots(self):
         agnes = [p for p in self.panels if p["focus"] == "Agnes Thorne"]
         self.assertEqual((agnes[0]["shot"], agnes[0]["moment"].startswith("First sight")), ("WS", True))
-        self.assertFalse(any(p["moment"].startswith("First sight of Narrator") for p in self.panels))
+        # A first-person narrator is a character in a comic, not an invisible camera.
+        self.assertTrue(any(p["moment"].startswith("First sight of Narrator") for p in self.panels))
+
+    def test_first_person_sentences_draw_the_narrator_and_looking_is_point_of_view(self):
+        source = 'I carried my suitcase down the long pier. I saw the ferry leave without me.'
+        def write(_, prompt):
+            group = json.loads(prompt.split('Numbered source units:\n')[1].split('\nYour previous reply')[0])
+            return json.dumps({"title": "t", "characters": [{"id": "n", "name": "Narrator", "aliases": [], "visual": "tall", "voice": ""}],
+                               "looks": [], "places": [], "speakers": [],
+                               "beats": [{"units": [u["id"] for u in group], "importance": 3, "action": "a",
+                                          "place": "pier", "mood": "lonely", "cast": [{"id": "n", "feel": ""}]}]})
+        b = story.analyze(source, write, passage_words=999, passage_units=99)
+        panels = director.plan(b, b['chapters'][0]['id'], "manga")
+        carry = next(p for p in panels if p["moment"].startswith("I carried"))
+        self.assertIn("Narrator", carry["characters"])
+        self.assertNotEqual(carry["framing"], "pov")
+        saw = next(p for p in panels if p["moment"].startswith("I saw"))
+        self.assertEqual(saw["framing"], "pov")
 
     def test_every_line_of_dialogue_is_placed_once_with_shot_reverse_coverage(self):
         said = [d["text"] for p in self.panels for d in p["dialogue"]]

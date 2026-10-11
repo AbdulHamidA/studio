@@ -50,6 +50,9 @@ THOUGHT = re.compile(r"\bI\b[^.!?]*\b(thought|knew|wondered|felt|remembered|real
                      r"had (?:already )?decided|hoped|feared)\b")
 PERSON = re.compile(r"\b(he|she|they|I|we|him|her|them|me|us|his|hers|their|my)\b", re.I)
 FIRST_PERSON = re.compile(r"\b(I|me|my|we|us|our)\b")
+# A first-person sentence about looking is the one place a point-of-view shot
+# helps; everywhere else the narrator is a person in the story, drawn.
+LOOKING = re.compile(r"\b(?:I|we)\s+(?:\w+\s+)?(saw|looked|watched|noticed|read|stared|glanced|spotted|caught sight)\b", re.I)
 # What a sentence is about decides the shot, not where it falls in the beat.
 PLACE = re.compile(r"\b(wind|sky|sea|rain|snow|fog|storm|sun|moon|light|dark|room|kitchen|hall|street|"
                    r"harbou?r|pier|shore|beach|window|walls?|house|town|city|forest|field|road|smell(?:ed|s)?|"
@@ -242,10 +245,6 @@ def plan(book, chapter_id, fmt="manga"):
                 if a["character_id"] in introduced:
                     continue
                 introduced.add(a["character_id"])
-                # The reader is a first-person narrator; they are not shown
-                # arriving, they are seen through.
-                if a["name"] == "Narrator":
-                    continue
                 panels.append(mk(shot="WS", angle="low" if beat["importance"] >= 3 else "eye", framing="single",
                                  focus=a["name"], cast=[_who(a)], role="I", transition="subject", weight=2,
                                  moment=f"First sight of {a['name']}, seen in full: {a['visual'] or a['name']}"
@@ -312,8 +311,17 @@ def plan(book, chapter_id, fmt="manga"):
                     subjects = [by_id.get(c["id"]) or {"character_id": c["id"], "name": c["name"],
                                 "visual": c["visual"][:story.VISUAL_LIMIT], "expression": "", "body_language": ""}
                                 for c in named]
-                    narrator_pov = not subjects and FIRST_PERSON.search(sentence)
-                    if not subjects and not narrator_pov and not PERSON.search(sentence):
+                    # The narrator is a character: a first-person sentence
+                    # draws them, unless it is about what they see.
+                    narrator = next((c for c in book["characters"] if c["name"] == "Narrator"
+                                     or set(c["aliases"]).intersection({"I", "me", "my"})), None)
+                    first_person = bool(FIRST_PERSON.search(sentence))
+                    narrator_pov = first_person and bool(LOOKING.search(sentence)) and not subjects
+                    if first_person and narrator and not narrator_pov and all(x["character_id"] != narrator["id"] for x in subjects):
+                        subjects = [by_id.get(narrator["id"]) or {"character_id": narrator["id"], "name": narrator["name"],
+                                    "visual": narrator["visual"][:story.VISUAL_LIMIT], "expression": "", "body_language": ""},
+                                    *subjects]
+                    if not subjects and not narrator_pov and not (PERSON.search(sentence) and not first_person):
                         shot, frame, cast = ("WS" if PLACE.search(sentence) else "INSERT"), "insert", []
                     # A detail shot is for a sentence about the object or the
                     # hands; a long sentence that only mentions one is a scene.

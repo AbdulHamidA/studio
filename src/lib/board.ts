@@ -603,7 +603,12 @@ export function storyContinuityReference(index: number, panels: Panel[], drawn: 
   for (let i = index - 1; i >= 0 && index - i <= CHAIN_LIMIT; i--) {
     const prev = panels[i];
     if (prev.chapter_id !== next.chapter_id) break;
-    if (placeKey(prev) === placeKey(next) && signature(prev) === signature(next)
+    // Only the same camera continues a frame. Handed a previous picture, the
+    // drawer copies its composition, so a new shot or angle anchored to the
+    // last frame came back as the last frame again -- the repeats people saw.
+    const sameCamera = shotClass(prev) === shotClass(next) && (prev.framing ?? "") === (next.framing ?? "")
+      && (prev.angle ?? "eye") === (next.angle ?? "eye");
+    if (sameCamera && placeKey(prev) === placeKey(next) && signature(prev) === signature(next)
         && (prev.location_state ?? "") === (next.location_state ?? "")
         && continuesFrom({ ...prev, scene: next.scene }, next) && drawn[i]) return drawn[i];
   }

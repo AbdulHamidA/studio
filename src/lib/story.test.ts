@@ -76,6 +76,12 @@ describe("story appearance continuity", () => {
     expect(storyContinuityReference(1, [before, panel("red dress", "wet floor; night")], ["frame", null])).toBeNull();
     expect(storyContinuityReference(1, [before, { ...panel("red dress"), cast: [] }], ["frame", null])).toBeNull();
   });
+  it("never hands a new camera the previous frame, which it would copy", () => {
+    const before = { ...panel("red dress"), shot: "WS" as const, angle: "eye" };
+    expect(storyContinuityReference(1, [before, { ...panel("red dress"), shot: "CU" as const, angle: "eye" }], ["frame", null])).toBeNull();
+    expect(storyContinuityReference(1, [before, { ...panel("red dress"), shot: "WS" as const, angle: "low" }], ["frame", null])).toBeNull();
+    expect(storyContinuityReference(1, [before, { ...panel("red dress"), shot: "WS" as const, angle: "eye" }], ["frame", null])).toBe("frame");
+  });
   it("re-anchors to the sheet instead of chaining copies through a whole scene", () => {
     const run = Array.from({ length: 2 * CHAIN_LIMIT + 1 }, () => panel("red dress"));
     const drawn = run.map((_, i) => `frame${i}`);
