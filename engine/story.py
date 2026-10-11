@@ -409,7 +409,9 @@ def parse_scene(raw, group, bible, scene_id):
     source = ''.join(u["text"] for u in group)
     local_ids, dropped = set(), set()
     narrative = QUOTE.sub("", source)
-    first_person = bool(re.search(r'\b(?:I|me|my|myself|we|us|our)\b', narrative, re.I))
+    # English, romanized Hindi or Devanagari: a Hinglish "maine socha" is as
+    # first-person as "I thought", and its narrator a person in the scene.
+    first_person = bool(FIRST_PERSON.search(narrative) or re.search(r'\b(?:we|us|our)\b', narrative, re.I))
     for person in _array(reply.get("characters"), "characters"):
         name = _text(person.get("name"), "name", False)
         local_id = _text(person.get("id"), "character id", False)
@@ -418,8 +420,7 @@ def parse_scene(raw, group, bible, scene_id):
         local_ids.add(local_id)
         if re.fullmatch(r'(?:the\s+)?narrator', name, re.I):
             name = "Narrator"
-            known = [c for c in characters if c["name"] == "Narrator"
-                     or set(c["aliases"]).intersection({"I", "my", "me"})]
+            known = [c for c in characters if is_narrator(c)]
             if len(known) == 1:
                 # Models re-declare the narrator per passage; bind to the known one.
                 lookup[local_id] = known[0]["id"]
@@ -559,7 +560,7 @@ SPEECH_VERBS = (r'said|says|asked|asks|replied|replies|answered|called|calls|sho
 # The narrator in their own narration: English, romanized Hindi, Devanagari.
 # "main" alone is also an English adjective, so it counts only beside others.
 _EDGE_L, _EDGE_R = r"(?<![\w\u0900-\u097F])", r"(?![\w\u0900-\u097F])"
-FIRST_PERSON = re.compile(_EDGE_L + r"(?:I|me|my|myself|(?i:main|maine|mujhe|mujhse|mujhko|mera|meri|mere)"
+FIRST_PERSON = re.compile(_EDGE_L + r"(?:I|[Mm]e|[Mm]y|[Mm]yself|(?i:main|maine|mujhe|mujhse|mujhko|mera|meri|mere)"
                           r"|मैं|मैंने|मुझे|मुझसे|मुझको|मेरा|मेरी|मेरे)" + _EDGE_R)
 
 

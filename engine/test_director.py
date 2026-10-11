@@ -230,3 +230,20 @@ class HinglishNarrator(unittest.TestCase):
 
     def test_a_third_person_story_has_no_narrator(self):
         self.assertEqual(story._ensure_narrator([], 'Riya ne kaha, "main aa rahi hoon." Wo chali gayi.'), [])
+
+
+class HinglishNarratorDeclared(unittest.TestCase):
+    def test_a_narrator_the_writer_declares_in_a_hinglish_scene_is_kept_and_visible(self):
+        source = 'Maine darwaza khola. Riya bahar khadi thi.'
+        def write(_, prompt):
+            group = json.loads(prompt.split('Numbered source units:\n')[1].split('\nYour previous reply')[0])
+            return json.dumps({"title": "t", "characters": [{"id": "n", "name": "Narrator", "aliases": [], "visual": "tall", "voice": ""},
+                                                            {"id": "r", "name": "Riya", "aliases": [], "visual": "", "voice": ""}],
+                               "looks": [], "places": [], "speakers": [],
+                               "beats": [{"units": [u["id"] for u in group], "importance": 3, "action": "a", "place": "door",
+                                          "mood": "calm", "cast": [{"id": "n", "feel": ""}, {"id": "r", "feel": ""}]}]})
+        b = story.analyze(source, write, passage_words=999, passage_units=99)
+        narrator = next(c for c in b["characters"] if c["name"] == "Narrator")
+        self.assertEqual(narrator["visual"], "tall")
+        visible = {a["character_id"] for s in b["chapters"][0]["scenes"] for beat in s["beats"] for a in beat["visible"]}
+        self.assertIn(narrator["id"], visible)
