@@ -517,6 +517,10 @@ export default function Storyboard({
    * loads a Vault project back into a board, and the notes exist nowhere else.
    */
   const [confirmReset, setConfirmReset] = useState<"prose" | "new" | null>(null);
+  // Going back to the story: its text is editable again while the board stays
+  // on screen, until it is analysed again.
+  const [editingStory, setEditingStory] = useState(false);
+  const [confirmRedo, setConfirmRedo] = useState<string | null>(null);
 
 
   // A Board contains the manuscript and creative history. Load it from the
@@ -1803,6 +1807,7 @@ export default function Storyboard({
   /** Bring a step's part of the screen forward, and put focus there. */
   const goToStep = (name: StepName) => {
     setViewStep(name);
+    setConfirmRedo(null);
     if (name === "story") setMsOpen(true);
     if (name === "cast") setRailTab("board");
     if (name === "panels") setRailTab("panel");
@@ -1845,6 +1850,48 @@ export default function Storyboard({
             go: () => void draw() }
         : { label: composing ? "Composing…" : "Make a page", go: () => void compose(),
             blocked: composing ? "The pages are being composed." : undefined };
+  /**
+   * Doing an earlier step again, from the step bar. Going back used to only
+   * scroll to that part of the screen: nothing in it could be redone without
+   * discarding the board. Each reached step now offers its own redo; the run
+   * button still offers the next step forward.
+   */
+  const chapterNow = storyBook?.chapters.find((c) => c.id === chapterId);
+  const analyseAgain = async () => {
+    setEditingStory(false);
+    // The same text is analysed again in place, keeping the book, chapter and
+    // character ids; edited text is a new analysis of the new text.
+    if (storyBook && chapterId && chapterNow && chapterNow.source === story) {
+      await runJob("dividing", async (id) => {
+        const r = await api.resumeStory(id, storyBook, chapterId, analystId || null, bookFormat, true);
+        await onStoryAnalyzed(r.book);
+        setStoryBook(r.book); storyBookRef.current = r.book; setCast(castFromBook(r.book));
+        setDoc((d) => replan(d, r.panels));
+        notify(`Analysed again: ${r.panels.length} panels planned. Pictures of unchanged moments were kept.`);
+      });
+    } else {
+      await divide();
+    }
+  };
+  const redoFor: Partial<Record<StepName, { label: string; armed?: string; go: () => void }>> = {
+    story: { label: "Analyse again", armed: drawnCount > 0 ? "Analyse again? The plan is replaced; drawn pictures stay in the Vault" : undefined,
+             go: () => void analyseAgain() },
+    cast: { label: "Redraw the cast sheets", go: () => {
+      clearCharacterSheets(); ignoreSavedReferences.current = true;
+      notify("Cast sheets cleared. They are drawn again, from the current descriptions, with the next panel.");
+    } },
+    panels: { label: "Plan the panels again", armed: drawnCount > 0 ? "Plan again? Pictures of unchanged moments are kept" : undefined,
+              go: () => void replanFormat(bookFormat) },
+    draw: { label: "Redraw every panel", armed: `Redraw all ${drawnCount}? The old pictures stay in the Vault`,
+            go: () => {
+              setDoc((d) => ({ ...d, art: Object.fromEntries(Object.entries(d.art).map(([k, a]) =>
+                [k, { ...a, drawn: null, redraws: a.redraws + 1 }])) }));
+              notify("Every panel is ready to draw again. Press Draw to start.");
+            } },
+    pages: { label: "Make the pages again", go: () => void compose() },
+  };
+  const redo = viewStep && viewStep !== workflowStep && stepState[viewStep]?.reached ? redoFor[viewStep] : undefined;
+
   const running = stage === "dividing" ? "the analysis" : stage === "enriching" ? "preparing briefs"
     : "drawing";
 
@@ -1924,6 +1971,15 @@ export default function Storyboard({
         </button>
         {!busy && primary.blocked && (
           <span id="board-run-why" className="t-help">{primary.blocked}</span>
+        )}
+        {!busy && redo && (
+          <button type="button" className={"btn small" + (confirmRedo === viewStep ? " danger" : "")}
+            onClick={() => {
+              if (redo.armed && confirmRedo !== viewStep) { setConfirmRedo(viewStep); return; }
+              setConfirmRedo(null); redo.go();
+            }}>
+            {confirmRedo === viewStep && redo.armed ? redo.armed : redo.label}
+          </button>
         )}
         {panels && (
           <>
@@ -2097,8 +2153,13 @@ export default function Storyboard({
             </button>
           </div>
           <div className="inner">
-            {!panels ? (
+            {!panels || editingStory ? (
               <>
+                {panels && <div className="notice" style={{ marginBottom: 10 }}>
+                  Editing the story. The board stays as it is until you analyse again.
+                  <button type="button" className="btn small" style={{ marginLeft: 8 }}
+                    onClick={() => setEditingStory(false)}>Done</button>
+                </div>}
                 {!!storyLibrary?.books.length && <label>Use an analyzed chapter<select
                   value="" disabled={busy} onChange={(e) => void openChapter(e.target.value)}>
                   <option value="">Choose a saved chapter…</option>
@@ -2153,6 +2214,8 @@ export default function Storyboard({
               </>
             ) : (
               <div className="ms-prose">
+                <button type="button" className="btn small" style={{ marginBottom: 8 }} disabled={busy}
+                  onClick={() => setEditingStory(true)}>Edit the story</button>
                 {/* Divided: the prose stays on screen, and the sentences behind
                     the selected panel are lit. Clicking one selects its panel,
                     so the story and the board point at each other. */}

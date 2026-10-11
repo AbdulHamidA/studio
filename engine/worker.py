@@ -6997,6 +6997,12 @@ def op_story_analyze(req_id, req):
 
 def op_story_resume(req_id, req):
     import story as story_model
+    if req.get("again"):
+        # Analyse the whole chapter again, in place: the same book, chapter
+        # and character ids, so narrations and boards filed under them stay.
+        req = {**req, "book": {**req["book"], "chapters": [
+            {**c, "scenes": [{**s, "unanalysed": True} for s in c["scenes"]]} if c["id"] == req.get("chapter_id") else c
+            for c in req["book"]["chapters"]]}}
     chapter = next((c for c in req["book"]["chapters"] if c["id"] == req.get("chapter_id")), None)
     voice = bool(chapter and chapter.get("analysis") == "voice")
     book = story_model.resume(req["book"], req.get("chapter_id"), **_story_writer(req_id, req, voice))

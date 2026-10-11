@@ -3043,26 +3043,38 @@ pub async fn narration_script(
 }
 
 /// Analyse only the passages a stopped or failed analysis left unanalysed.
+
+#[derive(Deserialize)]
+pub struct Resumption {
+    book: serde_json::Value,
+    chapter_id: String,
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    format: Option<String>,
+    /// Analyse every passage again, not only the ones left unanalysed.
+    #[serde(default)]
+    again: bool,
+}
+
 #[tauri::command]
 pub async fn resume_story(
     app: AppHandle,
     state: State<'_, AppState>,
     job_id: String,
-    book: serde_json::Value,
-    chapter_id: String,
-    model_id: Option<String>,
-    format: Option<String>,
+    args: Resumption,
 ) -> Result<serde_json::Value> {
     let _job = state.job_gate.read().await;
     state.require_unlocked()?;
-    let writer = story_writer(&state, model_id.as_deref())?;
+    let writer = story_writer(&state, args.model_id.as_deref())?;
     state
         .engine(&app)
         .await?
         .request(
             &job_id,
             "story_resume",
-            json!({"book": book, "chapter_id": chapter_id, "writer": writer, "format": format}),
+            json!({"book": args.book, "chapter_id": args.chapter_id, "writer": writer,
+                   "format": args.format, "again": args.again}),
         )
         .await
 }

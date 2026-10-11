@@ -103,9 +103,11 @@ export const api = {
                  mode: "full" | "voice" = "full", format: BookFormat = "manga") =>
     invoke<StoryAnalysisResult>("analyze_story", { jobId,
       args: { source, title, previous, model_id: modelId, mode, format } }),
+  /** Continue an analysis, or with `again` analyse the whole chapter afresh in place. */
   resumeStory: (jobId: string, book: StoryBook, chapterId: string, modelId: string | null = null,
-                format: BookFormat = "manga") =>
-    invoke<StoryAnalysisResult>("resume_story", { jobId, book, chapterId, modelId, format }),
+                format: BookFormat = "manga", again = false) =>
+    invoke<StoryAnalysisResult>("resume_story", { jobId,
+      args: { book, chapter_id: chapterId, model_id: modelId, format, again } }),
   /** The director's shot list; `refine` has the story model improve it scene by scene. */
   directStory: (jobId: string, book: StoryBook, chapterId: string, format: BookFormat = "manga",
                 refine = false, modelId: string | null = null) =>

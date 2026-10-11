@@ -186,6 +186,15 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
     notify(result.stopped ? "Stopped. The passages prepared so far are in the script; the rest is the original text."
       : "Narration script ready. Read it through and edit anything before narrating.");
   });
+  // Going back: the chapter analysed again in place, so the book, its
+  // characters and the recordings filed under the chapter all stay.
+  const analyseAgain = () => perform(async (id) => {
+    if (!book || !chapter) return;
+    const result = await api.resumeStory(id, book, chapter.id, null, "manga", true);
+    await onLibraryChange((current) => keepBook(current, result.book));
+    notify("Analysed again. Speakers and moods are updated; recordings are kept.");
+  });
+  const jump = (section: string) => document.getElementById(`ab-${section}`)?.scrollIntoView({ block: "start" });
   const narrate = () => perform(async (id) => {
     if (!book || !chapter) return;
     const audio = await api.generateAudiobook(id, book, chapter.id, narrator, storyteller ? {} : assignedVoices, settings.rate, {
@@ -212,10 +221,17 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
   return <div className="audiobook-workspace">
     <div className="pane">
       <h2>Narrate a chapter</h2>
+      {/* Every step stays reachable: jump back to any of them and redo it. */}
+      {book && chapter && <ol className="board-steps audiobook-steps" aria-label="Audiobook steps">
+        {([["chapter", "Chapter"], ["script", "Script"], ["voices", "Voices"], ["narrate", "Narrate"]] as const).map(([key, label], n) => (
+          <li key={key}><button type="button" onClick={() => jump(key)}>
+            <span className="step-n" aria-hidden="true">{n + 1}</span><span className="step-label">{label}</span>
+          </button></li>))}
+      </ol>}
       <p className="muted">Read the original chapter with local neural voices and character delivery. A quick analysis casts who speaks each line; Board shares its characters and adds scene direction when you draw.</p>
       {!library && <div className="notice warn">The encrypted story library is loading.</div>}
       {!!library?.books.length && <>
-        <label>Book<select value={book?.id ?? ""} disabled={!!job}
+        <label id="ab-chapter">Book<select value={book?.id ?? ""} disabled={!!job}
           onChange={(e) => { setBookId(e.target.value); setChapterId(""); }}>
           {library.books.map((b) => <option key={b.id} value={b.id}>
             {b.chapters[0]?.title ?? "Book"} · {b.chapters.length} chapters
@@ -225,6 +241,8 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
           onChange={(e) => setChapterId(e.target.value)}>
           {book?.chapters.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
         </select></label>
+        {chapter && <button type="button" className="btn small" disabled={!!job || !writerReady}
+          onClick={() => void analyseAgain()}>Analyse this chapter again</button>}
       </>}
       <details open={!book}>
         <summary>{book ? "Add a chapter or start another book" : "Start with your chapter"}</summary>
@@ -242,7 +260,7 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
         <button className="btn small" disabled={!!job || !writerReady} onClick={() => void resume()}>Continue analysis</button>
       </div>}
       {book && chapter && <>
-        <label>Speech engine<select value={speechModel} disabled={!!job}
+        <label id="ab-voices">Speech engine<select value={speechModel} disabled={!!job}
           onChange={(e) => switchEngine(e.target.value)}>
           <option value={KOKORO_MODEL_ID}>Kokoro · fast, Hindi and Indian English voices</option>
           <option value={SPEECH_MODEL_ID}>Qwen3-TTS · expressive, slower</option>
@@ -270,7 +288,7 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
           <option value="storyteller">One storyteller — a single voice tells the whole story</option>
           <option value="cast">Character voices — a voice for each person</option>
         </select></label>
-        {storyteller && <div className="panel script-panel">
+        {storyteller && <div className="panel script-panel" id="ab-script">
           <h2>Narration script</h2>
           <p className="t-help">
             Stories written as chat or in Hinglish are not written to be read aloud. The story
@@ -322,7 +340,7 @@ export default function Audiobook({ library, models, notify, onLibraryChange, on
         </label>)}
         </>}
         <button className="btn primary" disabled={!!job || !speechReady || !narrator || !voices.some((v) => v.id === narrator)}
-          onClick={() => void narrate()}>Narrate chapter</button>
+          id="ab-narrate" onClick={() => void narrate()}>Narrate chapter</button>
       </>}
       {!voices.length && <p className="notice warn">{voiceError || (speechModel === "macos"
         ? "Installed macOS speech voices are required for narration. Manage voices in macOS Accessibility → Spoken Content."

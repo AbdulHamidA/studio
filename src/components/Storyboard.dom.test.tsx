@@ -81,7 +81,7 @@ describe("Board shared story workflow", () => {
     expect(await screen.findByText("1 passage not analysed yet")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Continue analysis" }));
     await waitFor(() => expect(save).toHaveBeenCalledWith(finished));
-    expect(resume).toHaveBeenCalledWith(expect.objectContaining({ book: stopped, chapterId: "chapter" }));
+    expect(resume).toHaveBeenCalledWith(expect.objectContaining({ args: expect.objectContaining({ book: stopped, chapter_id: "chapter" }) }));
     expect(await screen.findByRole("button", { name: /Draw 2 of 2/ })).toBeTruthy();
     expect(screen.queryByText("1 passage not analysed yet")).toBeNull();
   });
@@ -106,6 +106,21 @@ describe("Board accessibility", () => {
     fireEvent.change(await screen.findByLabelText("Use an analyzed chapter"), { target: { value: "book:chapter" } });
     await screen.findByText("Story direction · The reveal");
   };
+
+  it("goes back to the story, edits it, and analyses the same chapter again in place", async () => {
+    const again = vi.fn(() => ({ book, chapter_id: "chapter", panels: [panel, { ...panel, beat_id: "beat2" }], unanalysed: 0 }));
+    await loaded();
+    hostAnswers({ resume_story: again });
+    const storyStep = screen.getAllByRole("button").find((b) => b.closest(".board-steps") && /Story/.test(b.textContent ?? ""));
+    fireEvent.click(storyStep!);
+    fireEvent.click(screen.getByRole("button", { name: "Edit the story" }));
+    expect(screen.getByRole("textbox", { name: "Manuscript prose" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Analyse again" }));
+    await waitFor(() => expect(again).toHaveBeenCalledWith(expect.objectContaining({
+      args: expect.objectContaining({ chapter_id: "chapter", again: true }) })));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /^Stop/ })).toBeNull());
+    expect(await screen.findByRole("button", { name: /Draw 2 of 2/ })).toBeTruthy();
+  });
 
   it("names every field of the panel editor, the board settings and the manuscript", async () => {
     show({ version: 1, books: [], activeBookId: null });
